@@ -3,20 +3,31 @@
  * Design: Scandinavian Minimalism, warm off-white, terracotta/sage accents
  * Layout: Left sidebar navigator + card-based main content
  * Typography: Instrument Serif (titles) + DM Sans (body)
+ * Enhanced: Image previews, testing phase, winning angle flow, dashboard nav
  */
 
 import { useState } from "react";
 import { Link } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import { processSteps, type ProcessStep } from "@/lib/processData";
+import { messageTestingCreatives } from "@/lib/portfolioData";
 
-function StepIcon({ status, stepId }: { status: ProcessStep['status']; stepId: number }) {
+type ExtendedStatus = ProcessStep['status'] | 'testing';
+
+function StepIcon({ status, stepId }: { status: ExtendedStatus; stepId: number }) {
   if (status === 'approved') {
     return (
       <div className="w-7 h-7 rounded-full bg-[#7D9B76] flex items-center justify-center">
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
           <path d="M2 6L5 9L10 3" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
+      </div>
+    );
+  }
+  if (status === 'testing') {
+    return (
+      <div className="w-7 h-7 rounded-full bg-[#D4A843] flex items-center justify-center text-white text-xs font-medium animate-pulse">
+        {stepId}
       </div>
     );
   }
@@ -36,7 +47,7 @@ function StepIcon({ status, stepId }: { status: ProcessStep['status']; stepId: n
 
 export default function ConceptB() {
   const [activeStep, setActiveStep] = useState(0);
-  const [stepStates, setStepStates] = useState<Record<number, ProcessStep['status']>>({
+  const [stepStates, setStepStates] = useState<Record<number, ExtendedStatus>>({
     0: 'active', 1: 'pending', 2: 'pending', 3: 'pending', 4: 'pending', 5: 'pending'
   });
   const [showOutput, setShowOutput] = useState(false);
@@ -44,6 +55,9 @@ export default function ConceptB() {
   const [feedbackText, setFeedbackText] = useState("");
   const [showFeedback, setShowFeedback] = useState(false);
   const [expandedOutputs, setExpandedOutputs] = useState<Set<string>>(new Set());
+  const [isTesting, setIsTesting] = useState(false);
+  const [testingComplete, setTestingComplete] = useState(false);
+  const [winningAngleSelected, setWinningAngleSelected] = useState<string | null>(null);
 
   const currentStep = processSteps[activeStep];
 
@@ -53,8 +67,19 @@ export default function ConceptB() {
     setTimeout(() => {
       setIsProcessing(false);
       setShowOutput(true);
-      setStepStates(prev => ({ ...prev, [activeStep]: 'review' }));
+      if (activeStep === 2) {
+        setStepStates(prev => ({ ...prev, [activeStep]: 'testing' }));
+        setIsTesting(true);
+      } else {
+        setStepStates(prev => ({ ...prev, [activeStep]: 'review' }));
+      }
     }, 2000);
+  };
+
+  const handleTestingComplete = () => {
+    setIsTesting(false);
+    setTestingComplete(true);
+    setStepStates(prev => ({ ...prev, [activeStep]: 'review' }));
   };
 
   const handleApprove = () => {
@@ -68,6 +93,9 @@ export default function ConceptB() {
         setShowFeedback(false);
         setFeedbackText("");
         setExpandedOutputs(new Set());
+        setIsTesting(false);
+        setTestingComplete(false);
+        setWinningAngleSelected(null);
       }, 500);
     }
   };
@@ -85,14 +113,21 @@ export default function ConceptB() {
     <div className="min-h-screen bg-[#FAFAF8] flex" style={{ fontFamily: 'DM Sans' }}>
       {/* Sidebar */}
       <aside className="w-[260px] border-r border-[#E8E4DE] bg-[#F5F3EF] flex flex-col shrink-0 h-screen sticky top-0">
-        {/* Sidebar Header */}
         <div className="px-5 py-5 border-b border-[#E8E4DE]">
-          <Link href="/">
-            <span className="text-xs text-[#B5AFA5] hover:text-[#8A8478] transition-colors cursor-pointer">
-              ← Back to concepts
-            </span>
-          </Link>
-          <div className="mt-3 flex items-center gap-2.5">
+          <div className="flex items-center gap-3 mb-3">
+            <Link href="/">
+              <span className="text-xs text-[#B5AFA5] hover:text-[#8A8478] transition-colors cursor-pointer">
+                ← Portfolio
+              </span>
+            </Link>
+            <span className="text-[#D4CFC7]">·</span>
+            <Link href="/dashboard/acme-supplements">
+              <span className="text-xs text-[#B5AFA5] hover:text-[#8A8478] transition-colors cursor-pointer">
+                Dashboard
+              </span>
+            </Link>
+          </div>
+          <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-[#C45D3E] flex items-center justify-center text-white text-xs font-bold">
               FC
             </div>
@@ -103,14 +138,12 @@ export default function ConceptB() {
           </div>
         </div>
 
-        {/* Client Info */}
         <div className="px-5 py-3 border-b border-[#E8E4DE]">
           <div className="text-[10px] uppercase tracking-wider text-[#B5AFA5] mb-1.5">Client</div>
           <div className="text-sm text-[#1D1D1F] font-medium">Acme Supplements</div>
           <div className="text-xs text-[#B5AFA5] mt-0.5">Week 2 of 6</div>
         </div>
 
-        {/* Step Navigator */}
         <nav className="flex-1 overflow-y-auto py-3">
           <div className="px-5 mb-2">
             <div className="text-[10px] uppercase tracking-wider text-[#B5AFA5]">Process Steps</div>
@@ -120,7 +153,8 @@ export default function ConceptB() {
               <button
                 onClick={() => {
                   setActiveStep(step.id);
-                  setShowOutput(stepStates[step.id] === 'review' || stepStates[step.id] === 'approved');
+                  const st = stepStates[step.id];
+                  setShowOutput(st === 'review' || st === 'approved' || st === 'testing');
                   setShowFeedback(false);
                 }}
                 className={`w-full px-5 py-2.5 flex items-center gap-3 transition-all text-left ${
@@ -136,6 +170,9 @@ export default function ConceptB() {
                   }`}>
                     {step.shortTitle}
                   </div>
+                  {stepStates[step.id] === 'testing' && (
+                    <div className="text-[10px] text-[#D4A843]">Testing live...</div>
+                  )}
                   {stepStates[step.id] === 'review' && (
                     <div className="text-[10px] text-[#C45D3E]">Awaiting review</div>
                   )}
@@ -155,7 +192,6 @@ export default function ConceptB() {
           ))}
         </nav>
 
-        {/* Progress */}
         <div className="px-5 py-4 border-t border-[#E8E4DE]">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs text-[#B5AFA5]">Progress</span>
@@ -191,6 +227,21 @@ export default function ConceptB() {
             </h1>
           </motion.div>
 
+          {/* Winning Angle Banner (for step 3 if selected) */}
+          {activeStep === 3 && winningAngleSelected && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-[#7D9B76]/10 rounded-xl border border-[#7D9B76]/20 p-4 mb-6 flex items-center gap-3"
+            >
+              <div className="w-8 h-8 rounded-full bg-[#7D9B76]/20 flex items-center justify-center text-sm">🎯</div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-[#7D9B76]">Winning Angle from Step 2</div>
+                <div className="text-sm font-medium text-[#3D6B35]">"{winningAngleSelected}"</div>
+              </div>
+            </motion.div>
+          )}
+
           {/* Inputs Card */}
           <motion.div
             key={`inputs-${activeStep}`}
@@ -213,9 +264,7 @@ export default function ConceptB() {
                   <label className="flex items-center gap-2 mb-1.5">
                     <span className="text-sm text-[#3D3A36]">{input.label}</span>
                     {input.fromPrevious && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[#F0EDE8] text-[#B5AFA5]">
-                        Auto
-                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[#F0EDE8] text-[#B5AFA5]">Auto</span>
                     )}
                     {input.required && <span className="text-[#C45D3E] text-xs">*</span>}
                   </label>
@@ -246,7 +295,6 @@ export default function ConceptB() {
               ))}
             </div>
 
-            {/* Execute */}
             <div className="px-6 py-4 border-t border-[#F0EDE8] bg-[#FDFCFA]">
               <button
                 onClick={handleExecute}
@@ -261,10 +309,7 @@ export default function ConceptB() {
                 ) : stepStates[activeStep] === 'approved' ? (
                   'Step Completed'
                 ) : (
-                  <>
-                    Run Step
-                    <span className="text-white/60">→</span>
-                  </>
+                  <>Run Step <span className="text-white/60">→</span></>
                 )}
               </button>
               <p className="text-[11px] text-[#B5AFA5] text-center mt-2">
@@ -273,7 +318,7 @@ export default function ConceptB() {
             </div>
           </motion.div>
 
-          {/* Results Card */}
+          {/* Results */}
           <AnimatePresence mode="wait">
             {isProcessing && (
               <motion.div
@@ -290,9 +335,7 @@ export default function ConceptB() {
                   <h3 className="text-lg text-[#1D1D1F] mb-1" style={{ fontFamily: 'Instrument Serif' }}>
                     Running AI Pipeline
                   </h3>
-                  <p className="text-sm text-[#B5AFA5]">
-                    Executing {currentStep.aiActions.length} actions...
-                  </p>
+                  <p className="text-sm text-[#B5AFA5]">Executing {currentStep.aiActions.length} actions...</p>
                   <div className="mt-4 space-y-1.5 w-full max-w-sm">
                     {currentStep.aiActions.slice(0, 4).map((action, i) => (
                       <motion.div
@@ -318,7 +361,142 @@ export default function ConceptB() {
                 animate={{ opacity: 1, y: 0 }}
                 className="space-y-4"
               >
-                {/* Results Header */}
+                {/* MESSAGE TESTING: Creative Previews */}
+                {activeStep === 2 && (isTesting || testingComplete) && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="bg-white rounded-xl border border-[#E8E4DE] shadow-sm overflow-hidden"
+                  >
+                    <div className="px-6 py-4 border-b border-[#F0EDE8] flex items-center justify-between">
+                      <div>
+                        <h2 className="text-sm font-semibold text-[#1D1D1F]">Message Testing Creatives</h2>
+                        <p className="text-xs text-[#B5AFA5] mt-0.5">
+                          {isTesting ? 'Ads are live and collecting data...' : 'Testing complete — select the winning angle'}
+                        </p>
+                      </div>
+                      {isTesting && (
+                        <span className="text-[10px] px-2 py-1 rounded-full bg-[#D4A843]/10 text-[#D4A843] font-medium flex items-center gap-1">
+                          <span className="animate-pulse">●</span> Live
+                        </span>
+                      )}
+                    </div>
+                    <div className="p-6">
+                      <div className="grid grid-cols-3 gap-4">
+                        {messageTestingCreatives.map((creative, i) => {
+                          const isWinner = testingComplete && creative.metrics.ctr === Math.max(...messageTestingCreatives.map(c => c.metrics.ctr));
+                          return (
+                            <motion.div
+                              key={creative.id}
+                              initial={{ opacity: 0, scale: 0.95 }}
+                              animate={{ opacity: 1, scale: 1 }}
+                              transition={{ delay: i * 0.08 }}
+                              className={`rounded-lg border overflow-hidden ${
+                                isWinner ? 'border-[#7D9B76] ring-2 ring-[#7D9B76]/20' : 'border-[#E8E4DE]'
+                              }`}
+                            >
+                              <div className="aspect-square relative overflow-hidden bg-[#F0EDE8]">
+                                <img
+                                  src={creative.imageUrl}
+                                  alt={creative.angle}
+                                  className="w-full h-full object-cover"
+                                />
+                                {isWinner && (
+                                  <div className="absolute top-2 right-2 bg-[#7D9B76] text-white text-[9px] px-2 py-0.5 rounded-full font-medium">
+                                    Winner
+                                  </div>
+                                )}
+                                {isTesting && (
+                                  <div className="absolute top-2 left-2 bg-[#D4A843] text-white text-[9px] px-2 py-0.5 rounded-full">
+                                    Live
+                                  </div>
+                                )}
+                              </div>
+                              <div className="p-3">
+                                <div className="text-[11px] font-medium text-[#C45D3E] mb-0.5">{creative.angle}</div>
+                                <div className="text-[11px] text-[#6B6660] leading-tight mb-2 line-clamp-2">{creative.message}</div>
+                                <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                                  <div className="text-[10px] text-[#B5AFA5]">CTR: <span className={`font-medium ${isWinner ? 'text-[#7D9B76]' : 'text-[#1D1D1F]'}`}>{creative.metrics.ctr}%</span></div>
+                                  <div className="text-[10px] text-[#B5AFA5]">CPC: <span className="font-medium text-[#1D1D1F]">${creative.metrics.cpc}</span></div>
+                                  <div className="text-[10px] text-[#B5AFA5]">Clicks: <span className="font-medium text-[#1D1D1F]">{creative.metrics.clicks}</span></div>
+                                  <div className="text-[10px] text-[#B5AFA5]">Spend: <span className="font-medium text-[#1D1D1F]">${creative.metrics.spend}</span></div>
+                                </div>
+                              </div>
+                            </motion.div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Testing Phase */}
+                      {isTesting && (
+                        <div className="mt-5 bg-[#D4A843]/5 rounded-lg border border-[#D4A843]/20 p-4">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-sm font-medium text-[#D4A843]">Testing in Progress</span>
+                            <span className="text-xs text-[#B5AFA5]">~2 days remaining</span>
+                          </div>
+                          <p className="text-xs text-[#8A8478] mb-3">
+                            Creatives are live and collecting performance data. Once enough data is gathered, you can determine the winning angle.
+                          </p>
+                          <button
+                            onClick={handleTestingComplete}
+                            className="w-full py-2.5 bg-[#D4A843] hover:bg-[#C49A38] text-white rounded-lg text-sm font-medium transition-colors"
+                          >
+                            Simulate: Testing Data Ready
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Winning Angle Selection */}
+                      {testingComplete && !winningAngleSelected && (
+                        <div className="mt-5 bg-[#C45D3E]/5 rounded-lg border border-[#C45D3E]/20 p-4">
+                          <h4 className="text-sm font-medium text-[#C45D3E] mb-1">Select Winning Angle</h4>
+                          <p className="text-xs text-[#8A8478] mb-3">Based on test results, choose the angle for creative production.</p>
+                          <div className="space-y-2">
+                            {Array.from(new Set(messageTestingCreatives.map(c => c.angle))).map((angle) => {
+                              const angleCreatives = messageTestingCreatives.filter(c => c.angle === angle);
+                              const avgCtr = (angleCreatives.reduce((sum, c) => sum + c.metrics.ctr, 0) / angleCreatives.length).toFixed(1);
+                              const isBest = angle === "The Hidden Root Cause";
+                              return (
+                                <button
+                                  key={angle}
+                                  onClick={() => setWinningAngleSelected(angle)}
+                                  className={`w-full p-3 rounded-lg border text-left transition-all flex items-center justify-between ${
+                                    isBest ? 'border-[#7D9B76]/40 bg-[#7D9B76]/5 hover:bg-[#7D9B76]/10' : 'border-[#E8E4DE] hover:border-[#D4CFC7]'
+                                  }`}
+                                >
+                                  <div>
+                                    <div className="text-sm text-[#1D1D1F] flex items-center gap-2">
+                                      {angle}
+                                      {isBest && <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-[#7D9B76]/10 text-[#7D9B76]">Recommended</span>}
+                                    </div>
+                                    <div className="text-[10px] text-[#B5AFA5] mt-0.5">{angleCreatives.length} creatives tested</div>
+                                  </div>
+                                  <div className="text-right">
+                                    <div className="text-xs text-[#1D1D1F]">Avg CTR: <span className={isBest ? 'text-[#7D9B76] font-medium' : ''}>{avgCtr}%</span></div>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Winning Angle Confirmed */}
+                      {winningAngleSelected && (
+                        <div className="mt-5 bg-[#7D9B76]/10 rounded-lg border border-[#7D9B76]/20 p-4 flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-full bg-[#7D9B76]/20 flex items-center justify-center text-sm">🎯</div>
+                          <div>
+                            <div className="text-[10px] uppercase tracking-wider text-[#7D9B76]">Winning Angle Selected</div>
+                            <div className="text-sm font-medium text-[#3D6B35]">"{winningAngleSelected}"</div>
+                            <div className="text-[10px] text-[#7D9B76]/60 mt-0.5">This will be passed as input to Step 3</div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </motion.div>
+                )}
+
+                {/* Regular Results */}
                 <div className="bg-white rounded-xl border border-[#E8E4DE] shadow-sm overflow-hidden">
                   <div className="px-6 py-4 border-b border-[#F0EDE8]">
                     <h2 className="text-sm font-semibold text-[#1D1D1F]">Results</h2>
@@ -390,7 +568,9 @@ export default function ConceptB() {
                     <div className="px-6 py-4 bg-[#C45D3E]/5 border-b border-[#C45D3E]/10">
                       <h3 className="text-sm font-semibold text-[#C45D3E]">Review Required</h3>
                       <p className="text-xs text-[#8A8478] mt-0.5">
-                        Review the outputs and approve to continue, or provide feedback for revisions.
+                        {activeStep === 2 && winningAngleSelected
+                          ? `Approve "${winningAngleSelected}" as the winning angle and proceed to creative production.`
+                          : 'Review the outputs and approve to continue, or provide feedback for revisions.'}
                       </p>
                     </div>
                     <div className="p-6">
