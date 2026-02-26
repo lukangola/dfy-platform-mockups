@@ -9,7 +9,7 @@ import { Link, useLocation } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Package, Palette, LayoutGrid, ChevronLeft, ChevronRight,
-  Settings, HelpCircle, Sparkles, Box,
+  Settings, HelpCircle, Sparkles, Box, FolderOpen,
 } from "lucide-react";
 
 interface WorkspaceLayoutProps {
@@ -20,6 +20,7 @@ const NAV_ITEMS = [
   { id: "products", label: "Products", icon: Package, path: "/workspace/products", description: "Product repository" },
   { id: "brand", label: "Brand Info", icon: Palette, path: "/workspace/brand", description: "Brand identity" },
   { id: "apps", label: "Apps", icon: LayoutGrid, path: "/workspace/apps", description: "Tool suite" },
+  { id: "assets", label: "Assets", icon: FolderOpen, path: "/workspace/assets", description: "Generated content" },
 ];
 
 export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {

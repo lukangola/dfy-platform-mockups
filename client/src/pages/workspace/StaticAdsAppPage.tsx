@@ -1,8 +1,9 @@
 /**
  * DESIGN: Studio Control Room — Static Ads Recreator
- * Step 1: Select Product + Angle (dropdown from research or custom)
- * Step 2: Select references from library + upload custom references
- * Step 3: Review recreated ads with approve/regenerate/chat feedback
+ * Step 0: Select Product + Angle + Language
+ * Step 1: Select references from library + upload custom references
+ * Step 2: Review recreated ads with approve/regenerate/chat feedback
+ * Step 3: Export & What's Next
  */
 import { useState } from "react";
 import { Link } from "wouter";
@@ -10,14 +11,16 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Check, X, RefreshCw, MessageSquare, ChevronRight, ChevronDown,
   Send, ArrowLeft, Package, Sparkles, ImagePlus, Upload,
-  Layers, PenLine, Eye, CheckCircle2,
+  Layers, PenLine, Eye, CheckCircle2, Download, Globe,
+  RotateCcw, Languages, ArrowRight, FolderOpen,
 } from "lucide-react";
 import {
   MOCK_PRODUCTS, STATIC_AD_LIBRARY, MOCK_RECREATED_ADS, MOCK_CHAT_MESSAGES,
-  type StaticAdReference, type RecreatedAd,
+  LANGUAGES,
+  type RecreatedAd,
 } from "@/lib/mockData";
 
-const STEPS = ["Product & Angle", "Select References", "Review Recreations"];
+const STEPS = ["Product & Angle", "Select References", "Review Recreations", "Export"];
 
 function StatusBadge({ status }: { status: RecreatedAd["status"] }) {
   const styles: Record<string, string> = {
@@ -36,25 +39,33 @@ function StatusBadge({ status }: { status: RecreatedAd["status"] }) {
 export default function StaticAdsAppPage() {
   const [currentStep, setCurrentStep] = useState(0);
 
-  // Step 1 state
+  // Step 0 state
   const [selectedProductId, setSelectedProductId] = useState("");
   const [productDropdownOpen, setProductDropdownOpen] = useState(false);
   const [angleMode, setAngleMode] = useState<"select" | "custom">("select");
   const [selectedAngle, setSelectedAngle] = useState("");
   const [customAngle, setCustomAngle] = useState("");
   const [angleDropdownOpen, setAngleDropdownOpen] = useState(false);
+  const [selectedLanguage, setSelectedLanguage] = useState("en");
+  const [langDropdownOpen, setLangDropdownOpen] = useState(false);
 
-  // Step 2 state
+  // Step 1 state
   const [selectedRefs, setSelectedRefs] = useState<Set<string>>(new Set());
 
-  // Step 3 state
+  // Step 2 state
   const [selectedAd, setSelectedAd] = useState<RecreatedAd | null>(null);
   const [chatInput, setChatInput] = useState("");
+
+  // Step 3 state
+  const [exporting, setExporting] = useState(false);
+  const [exported, setExported] = useState(false);
 
   const selectedProduct = MOCK_PRODUCTS.find((p) => p.id === selectedProductId);
   const researchedProducts = MOCK_PRODUCTS.filter((p) => p.researchStatus === "complete");
   const contentAngles = selectedProduct?.research?.contentAngles || [];
   const activeAngle = angleMode === "custom" ? customAngle : selectedAngle;
+  const selectedLang = LANGUAGES.find((l) => l.code === selectedLanguage);
+  const approvedAds = MOCK_RECREATED_ADS.filter((a) => a.status === "approved");
 
   const handleProductSelect = (productId: string) => {
     setSelectedProductId(productId);
@@ -70,6 +81,33 @@ export default function StaticAdsAppPage() {
       else next.add(id);
       return next;
     });
+  };
+
+  const handleExport = () => {
+    setExporting(true);
+    setTimeout(() => {
+      setExporting(false);
+      setExported(true);
+    }, 2000);
+  };
+
+  const handleRestartWithNewAngle = () => {
+    setSelectedAngle("");
+    setCustomAngle("");
+    setAngleMode("select");
+    setSelectedRefs(new Set());
+    setSelectedAd(null);
+    setExported(false);
+    setExporting(false);
+    setCurrentStep(0);
+  };
+
+  const handleRestartWithNewLanguage = () => {
+    setSelectedRefs(new Set());
+    setSelectedAd(null);
+    setExported(false);
+    setExporting(false);
+    setCurrentStep(0);
   };
 
   return (
@@ -95,9 +133,7 @@ export default function StaticAdsAppPage() {
           {STEPS.map((step, i) => (
             <button
               key={step}
-              onClick={() => {
-                if (i <= currentStep) setCurrentStep(i);
-              }}
+              onClick={() => { if (i <= currentStep) setCurrentStep(i); }}
               className="flex items-center gap-1.5 group"
             >
               <div
@@ -132,7 +168,7 @@ export default function StaticAdsAppPage() {
           <AnimatePresence mode="wait">
 
             {/* ============================================ */}
-            {/* STEP 0: PRODUCT & ANGLE SELECTION            */}
+            {/* STEP 0: PRODUCT & ANGLE & LANGUAGE           */}
             {/* ============================================ */}
             {currentStep === 0 && (
               <motion.div key="product-angle" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="max-w-2xl mx-auto py-12">
@@ -140,7 +176,7 @@ export default function StaticAdsAppPage() {
                   <Sparkles size={18} />
                   SELECT PRODUCT & ANGLE
                 </h2>
-                <p className="text-xs text-white/30 mb-8 font-mono">Choose a product and the content angle for your static ad recreations.</p>
+                <p className="text-xs text-white/30 mb-8 font-mono">Choose a product, content angle, and language for your static ad recreations.</p>
 
                 <div className="space-y-5">
                   {/* Product Selection */}
@@ -227,7 +263,6 @@ export default function StaticAdsAppPage() {
                         Content Angle
                       </label>
 
-                      {/* Toggle: Select from Research vs Custom */}
                       <div className="flex gap-2 mb-4">
                         <button
                           onClick={() => setAngleMode("select")}
@@ -313,6 +348,63 @@ export default function StaticAdsAppPage() {
                     </motion.div>
                   )}
 
+                  {/* Language Selection */}
+                  {selectedProduct && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: "auto" }}
+                      className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-5"
+                    >
+                      <label className="text-[10px] font-mono text-white/40 uppercase tracking-widest block mb-3 flex items-center gap-1.5">
+                        <Globe size={10} />
+                        Output Language
+                      </label>
+                      <div className="relative">
+                        <button
+                          onClick={() => setLangDropdownOpen(!langDropdownOpen)}
+                          className="w-full flex items-center gap-3 bg-white/[0.03] border border-white/[0.08] rounded-lg px-4 py-3 hover:border-white/[0.15] transition-all text-left"
+                        >
+                          <span className="text-lg shrink-0">{selectedLang?.flag}</span>
+                          <div className="flex-1">
+                            <div className="text-sm text-white/80">{selectedLang?.label}</div>
+                            <div className="text-[10px] font-mono text-white/30">Text overlays and copy will be generated in this language</div>
+                          </div>
+                          <ChevronDown size={16} className={`text-white/30 transition-transform ${langDropdownOpen ? "rotate-180" : ""}`} />
+                        </button>
+
+                        <AnimatePresence>
+                          {langDropdownOpen && (
+                            <motion.div
+                              initial={{ opacity: 0, y: -4 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              exit={{ opacity: 0, y: -4 }}
+                              className="absolute top-full left-0 right-0 mt-1 rounded-lg border border-white/[0.08] overflow-hidden z-20"
+                              style={{ background: "#1A1D28" }}
+                            >
+                              <div className="p-1.5 max-h-64 overflow-auto">
+                                {LANGUAGES.map((lang) => (
+                                  <button
+                                    key={lang.code}
+                                    onClick={() => { setSelectedLanguage(lang.code); setLangDropdownOpen(false); }}
+                                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left transition-all ${
+                                      selectedLanguage === lang.code
+                                        ? "bg-amber-500/10 border border-amber-500/20"
+                                        : "hover:bg-white/[0.04] border border-transparent"
+                                    }`}
+                                  >
+                                    <span className="text-base shrink-0">{lang.flag}</span>
+                                    <span className="text-xs text-white/70 flex-1">{lang.label}</span>
+                                    {selectedLanguage === lang.code && <Check size={12} className="text-amber-400 shrink-0" />}
+                                  </button>
+                                ))}
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    </motion.div>
+                  )}
+
                   {/* Next Button */}
                   <button
                     onClick={() => selectedProductId && activeAngle && setCurrentStep(1)}
@@ -363,6 +455,19 @@ export default function StaticAdsAppPage() {
                   </button>
                 </div>
 
+                {/* Config Summary */}
+                <div className="mb-6 flex items-center gap-3 text-[10px] font-mono text-white/30">
+                  <span className="flex items-center gap-1.5 bg-white/[0.03] border border-white/[0.06] rounded px-2.5 py-1.5">
+                    <Package size={10} /> {selectedProduct?.name}
+                  </span>
+                  <span className="flex items-center gap-1.5 bg-white/[0.03] border border-white/[0.06] rounded px-2.5 py-1.5">
+                    <Layers size={10} /> {activeAngle.length > 40 ? activeAngle.slice(0, 40) + "..." : activeAngle}
+                  </span>
+                  <span className="flex items-center gap-1.5 bg-white/[0.03] border border-white/[0.06] rounded px-2.5 py-1.5">
+                    <span className="text-xs">{selectedLang?.flag}</span> {selectedLang?.label}
+                  </span>
+                </div>
+
                 {/* Upload Area */}
                 <div className="mb-6 rounded-lg border-2 border-dashed border-white/[0.08] p-6 flex flex-col items-center gap-3 hover:border-amber-500/30 transition-colors cursor-pointer group" style={{ background: "rgba(255,255,255,0.01)" }}>
                   <div className="w-12 h-12 rounded-xl bg-white/[0.04] flex items-center justify-center group-hover:bg-amber-500/10 transition-colors">
@@ -410,7 +515,6 @@ export default function StaticAdsAppPage() {
                           }`}
                           style={{ background: "#13161F" }}
                         >
-                          {/* Selection Indicator */}
                           <div className={`absolute top-3 right-3 z-10 w-6 h-6 rounded-full flex items-center justify-center transition-all ${
                             isSelected
                               ? "bg-amber-500 text-black"
@@ -453,9 +557,27 @@ export default function StaticAdsAppPage() {
                       Review, approve, or regenerate each recreation. Click on an ad to give specific feedback.
                     </p>
                   </div>
-                  <button className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[10px] font-mono uppercase tracking-wider bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/25 transition-all">
-                    <CheckCircle2 size={10} /> Approve All
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[10px] font-mono uppercase tracking-wider bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/25 transition-all">
+                      <CheckCircle2 size={10} /> Approve All
+                    </button>
+                    <button
+                      onClick={() => setCurrentStep(3)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[10px] font-mono uppercase tracking-wider bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 transition-all"
+                    >
+                      <Download size={10} /> Export
+                    </button>
+                  </div>
+                </div>
+
+                {/* Config Summary */}
+                <div className="mb-4 flex items-center gap-3 text-[10px] font-mono text-white/30">
+                  <span className="flex items-center gap-1.5 bg-white/[0.03] border border-white/[0.06] rounded px-2.5 py-1.5">
+                    <Package size={10} /> {selectedProduct?.name}
+                  </span>
+                  <span className="flex items-center gap-1.5 bg-white/[0.03] border border-white/[0.06] rounded px-2.5 py-1.5">
+                    <span className="text-xs">{selectedLang?.flag}</span> {selectedLang?.label}
+                  </span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -480,7 +602,6 @@ export default function StaticAdsAppPage() {
                         )}
                         <div className="absolute top-3 right-3"><StatusBadge status={ad.status} /></div>
 
-                        {/* Hover overlay */}
                         <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-3">
                           <button className="w-9 h-9 rounded-lg bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 hover:bg-emerald-500/30 transition-colors">
                             <Check size={16} />
@@ -507,6 +628,193 @@ export default function StaticAdsAppPage() {
                     </motion.div>
                   ))}
                 </div>
+              </motion.div>
+            )}
+
+            {/* ============================================ */}
+            {/* STEP 3: EXPORT & WHAT'S NEXT                 */}
+            {/* ============================================ */}
+            {currentStep === 3 && (
+              <motion.div key="export" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="max-w-3xl mx-auto py-12">
+                {!exported ? (
+                  <>
+                    <h2 className="text-xl font-bold font-mono text-amber-400 mb-2 flex items-center gap-2">
+                      <Download size={18} />
+                      EXPORT RECREATIONS
+                    </h2>
+                    <p className="text-xs text-white/30 mb-8 font-mono">
+                      Download your approved ads and save them to the brand workspace assets.
+                    </p>
+
+                    {/* Export Summary */}
+                    <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-6 mb-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <span className="text-[10px] font-mono text-white/40 uppercase tracking-widest">Export Summary</span>
+                        <span className="text-[10px] font-mono text-emerald-400">{approvedAds.length} approved ads ready</span>
+                      </div>
+
+                      <div className="space-y-3 mb-6">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-white/50">Product</span>
+                          <span className="text-white/80 font-medium">{selectedProduct?.name || "Golden Radiance Serum"}</span>
+                        </div>
+                        <div className="h-px bg-white/[0.04]" />
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-white/50">Angle</span>
+                          <span className="text-white/80 font-medium truncate ml-4 max-w-[300px]">{activeAngle || "Luxury unboxing experience"}</span>
+                        </div>
+                        <div className="h-px bg-white/[0.04]" />
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-white/50">Language</span>
+                          <span className="text-white/80 font-medium flex items-center gap-1.5">
+                            <span>{selectedLang?.flag}</span> {selectedLang?.label}
+                          </span>
+                        </div>
+                        <div className="h-px bg-white/[0.04]" />
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-white/50">Total Ads</span>
+                          <span className="text-white/80 font-medium">{approvedAds.length} files</span>
+                        </div>
+                      </div>
+
+                      {/* Preview Grid */}
+                      <div className="grid grid-cols-5 gap-2 mb-6">
+                        {approvedAds.map((ad) => (
+                          <div key={ad.id} className="aspect-square rounded-lg overflow-hidden border border-white/[0.06]">
+                            <img src={ad.image} alt={ad.title} className="w-full h-full object-cover" />
+                          </div>
+                        ))}
+                      </div>
+
+                      <button
+                        onClick={handleExport}
+                        disabled={exporting}
+                        className="w-full py-3.5 rounded-lg font-mono text-sm font-bold tracking-wider uppercase transition-all flex items-center justify-center gap-2"
+                        style={{
+                          background: exporting
+                            ? "rgba(255,255,255,0.05)"
+                            : "linear-gradient(135deg, #10B981 0%, #059669 100%)",
+                          color: exporting ? "rgba(255,255,255,0.3)" : "#0D0F12",
+                          boxShadow: exporting ? "none" : "0 0 20px rgba(16,185,129,0.3)",
+                        }}
+                      >
+                        {exporting ? (
+                          <>
+                            <RefreshCw size={16} className="animate-spin" />
+                            Exporting & Saving to Assets...
+                          </>
+                        ) : (
+                          <>
+                            <Download size={16} />
+                            Download & Save to Brand Assets
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    {/* Export Complete */}
+                    <div className="text-center mb-10">
+                      <motion.div
+                        initial={{ scale: 0 }}
+                        animate={{ scale: 1 }}
+                        transition={{ type: "spring", stiffness: 200, damping: 15 }}
+                        className="w-20 h-20 rounded-full bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center mx-auto mb-5"
+                        style={{ boxShadow: "0 0 40px rgba(16,185,129,0.2)" }}
+                      >
+                        <CheckCircle2 size={36} className="text-emerald-400" />
+                      </motion.div>
+                      <h2 className="text-xl font-bold font-mono text-emerald-400 mb-2">
+                        EXPORT COMPLETE
+                      </h2>
+                      <p className="text-xs text-white/40 font-mono">
+                        {approvedAds.length} ads downloaded and saved to your brand workspace assets.
+                      </p>
+                    </div>
+
+                    {/* Saved Summary Card */}
+                    <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/[0.03] p-5 mb-8">
+                      <div className="flex items-center gap-3 mb-3">
+                        <FolderOpen size={16} className="text-emerald-400" />
+                        <span className="text-xs font-mono text-emerald-400 uppercase tracking-widest">Saved to Assets</span>
+                      </div>
+                      <div className="grid grid-cols-5 gap-2 mb-3">
+                        {approvedAds.map((ad) => (
+                          <div key={ad.id} className="aspect-square rounded-lg overflow-hidden border border-emerald-500/20">
+                            <img src={ad.image} alt={ad.title} className="w-full h-full object-cover" />
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex items-center justify-between text-[10px] font-mono text-white/30">
+                        <span>{selectedProduct?.name} · {selectedLang?.flag} {selectedLang?.label}</span>
+                        <Link href="/workspace/assets">
+                          <span className="text-cyan-400 hover:text-cyan-300 transition-colors cursor-pointer flex items-center gap-1">
+                            View in Assets <ArrowRight size={10} />
+                          </span>
+                        </Link>
+                      </div>
+                    </div>
+
+                    {/* What's Next */}
+                    <div className="mb-6">
+                      <div className="flex items-center gap-2 mb-5">
+                        <div className="w-2 h-2 rounded-full bg-amber-400" style={{ boxShadow: "0 0 8px rgba(245,158,11,0.5)" }} />
+                        <span className="text-xs font-mono text-white/40 uppercase tracking-widest">What's Next?</span>
+                        <div className="flex-1 h-px bg-white/[0.06]" />
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Recreate for another angle */}
+                        <motion.button
+                          whileHover={{ scale: 1.02, y: -2 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={handleRestartWithNewAngle}
+                          className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-6 text-left hover:border-amber-500/30 transition-all group"
+                        >
+                          <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mb-4 group-hover:bg-amber-500/20 transition-colors">
+                            <RotateCcw size={20} className="text-amber-400" />
+                          </div>
+                          <h3 className="text-sm font-bold text-white/80 mb-1 font-mono">Recreate for Another Angle</h3>
+                          <p className="text-[11px] text-white/30 leading-relaxed">
+                            Use the same references and product but switch to a different content angle. Your language selection ({selectedLang?.label}) will be preserved.
+                          </p>
+                          <div className="mt-4 flex items-center gap-1.5 text-amber-400 text-[10px] font-mono uppercase tracking-wider group-hover:gap-2.5 transition-all">
+                            Change Angle <ArrowRight size={12} />
+                          </div>
+                        </motion.button>
+
+                        {/* Recreate for another language */}
+                        <motion.button
+                          whileHover={{ scale: 1.02, y: -2 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={handleRestartWithNewLanguage}
+                          className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-6 text-left hover:border-cyan-500/30 transition-all group"
+                        >
+                          <div className="w-12 h-12 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center mb-4 group-hover:bg-cyan-500/20 transition-colors">
+                            <Languages size={20} className="text-cyan-400" />
+                          </div>
+                          <h3 className="text-sm font-bold text-white/80 mb-1 font-mono">Recreate for Another Language</h3>
+                          <p className="text-[11px] text-white/30 leading-relaxed">
+                            Keep the same product, angle, and references but generate the ads in a different language. Quick localization workflow.
+                          </p>
+                          <div className="mt-4 flex items-center gap-1.5 text-cyan-400 text-[10px] font-mono uppercase tracking-wider group-hover:gap-2.5 transition-all">
+                            Change Language <ArrowRight size={12} />
+                          </div>
+                        </motion.button>
+                      </div>
+
+                      {/* Back to Apps */}
+                      <div className="mt-6 text-center">
+                        <Link href="/workspace/apps">
+                          <button className="text-[10px] font-mono text-white/25 hover:text-white/50 transition-colors uppercase tracking-widest flex items-center gap-1.5 mx-auto">
+                            <ArrowLeft size={10} /> Back to Apps
+                          </button>
+                        </Link>
+                      </div>
+                    </div>
+                  </>
+                )}
               </motion.div>
             )}
           </AnimatePresence>

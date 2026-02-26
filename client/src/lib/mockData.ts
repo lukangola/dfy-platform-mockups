@@ -8,6 +8,25 @@ export const IMAGES = {
 };
 
 // ============================================================
+// LANGUAGE OPTIONS
+// ============================================================
+
+export const LANGUAGES = [
+  { code: "en", label: "English", flag: "🇺🇸" },
+  { code: "de", label: "Deutsch", flag: "🇩🇪" },
+  { code: "fr", label: "Français", flag: "🇫🇷" },
+  { code: "es", label: "Español", flag: "🇪🇸" },
+  { code: "it", label: "Italiano", flag: "🇮🇹" },
+  { code: "pt", label: "Português", flag: "🇧🇷" },
+  { code: "nl", label: "Nederlands", flag: "🇳🇱" },
+  { code: "ja", label: "日本語", flag: "🇯🇵" },
+  { code: "ko", label: "한국어", flag: "🇰🇷" },
+  { code: "zh", label: "中文", flag: "🇨🇳" },
+  { code: "ar", label: "العربية", flag: "🇸🇦" },
+  { code: "tr", label: "Türkçe", flag: "🇹🇷" },
+];
+
+// ============================================================
 // SHOT TYPES & B-ROLL DATA
 // ============================================================
 
@@ -294,10 +313,42 @@ export const STATIC_AD_LIBRARY: StaticAdReference[] = [
 
 export const MOCK_RECREATED_ADS: RecreatedAd[] = [
   { id: "ra1", referenceId: "lib1", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/HCqoSnXFOjxONOjr.jpg", title: "Golden Serum Before/After", angle: "Luxury unboxing experience with premium packaging", status: "approved", prompt: "Recreate this before/after testimonial ad with Golden Radiance Serum. Show visible skin glow transformation, premium product placement, gold accents matching brand palette." },
-  { id: "ra2", referenceId: "lib2", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/QVzzhlMLjUKesrgE.jpg", title: "Radiance Close-Up", angle: "Before/after skin glow transformation", status: "pending", prompt: "Recreate this skin close-up ad featuring Golden Radiance Serum. Emphasize dewy, glowing skin with product bottle elegantly placed. Use warm golden tones." },
-  { id: "ra3", referenceId: "lib3", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/LzVJeTPJHbrgymcb.jpg", title: "Full Range Showcase", angle: "Ingredient education series (science-backed claims)", status: "generating", prompt: "Recreate this multi-product banner layout with the Lumina Beauty product range. Clean white background, editorial arrangement, brand colors." },
-  { id: "ra4", referenceId: "lib4", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/uRQRtlsbRKaGybqv.jpg", title: "Botanical Luxury Portrait", angle: "Morning routine integration", status: "pending", prompt: "Recreate this floral beauty portrait with Golden Radiance Serum. Model applying serum with botanical elements, warm lighting, premium feel." },
-  { id: "ra5", referenceId: "lib5", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/mZsqHZfbWJvqtynu.jpg", title: "Natural Glow Promo", angle: "Comparison with higher-priced competitors", status: "rejected", prompt: "Recreate this promotional ad style with Golden Radiance Serum. Highlight value proposition vs premium competitors, clean design with price callout." },
+  { id: "ra2", referenceId: "lib2", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/QVzzhlMLjUKesrgE.jpg", title: "Radiance Close-Up", angle: "Before/after skin glow transformation", status: "approved", prompt: "Recreate this skin close-up ad featuring Golden Radiance Serum. Emphasize dewy, glowing skin with product bottle elegantly placed. Use warm golden tones." },
+  { id: "ra3", referenceId: "lib3", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/LzVJeTPJHbrgymcb.jpg", title: "Full Range Showcase", angle: "Ingredient education series (science-backed claims)", status: "approved", prompt: "Recreate this multi-product banner layout with the Lumina Beauty product range. Clean white background, editorial arrangement, brand colors." },
+  { id: "ra4", referenceId: "lib4", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/uRQRtlsbRKaGybqv.jpg", title: "Botanical Luxury Portrait", angle: "Morning routine integration", status: "approved", prompt: "Recreate this floral beauty portrait with Golden Radiance Serum. Model applying serum with botanical elements, warm lighting, premium feel." },
+  { id: "ra5", referenceId: "lib5", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/mZsqHZfbWJvqtynu.jpg", title: "Natural Glow Promo", angle: "Comparison with higher-priced competitors", status: "approved", prompt: "Recreate this promotional ad style with Golden Radiance Serum. Highlight value proposition vs premium competitors, clean design with price callout." },
+];
+
+// ============================================================
+// ASSETS DATA
+// ============================================================
+
+export type AssetType = "static-ad" | "broll-image" | "broll-video";
+
+export interface Asset {
+  id: string;
+  type: AssetType;
+  title: string;
+  image: string;
+  productId: string;
+  productName: string;
+  angle?: string;
+  language?: string;
+  sourceApp: string;
+  createdAt: string;
+  status: "approved" | "exported";
+}
+
+export const MOCK_ASSETS: Asset[] = [
+  { id: "a1", type: "static-ad", title: "Golden Serum Before/After", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/HCqoSnXFOjxONOjr.jpg", productId: "p1", productName: "Golden Radiance Serum", angle: "Luxury unboxing experience", language: "English", sourceApp: "Static Ads Recreator", createdAt: "2026-02-25", status: "exported" },
+  { id: "a2", type: "static-ad", title: "Radiance Close-Up", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/QVzzhlMLjUKesrgE.jpg", productId: "p1", productName: "Golden Radiance Serum", angle: "Skin glow transformation", language: "English", sourceApp: "Static Ads Recreator", createdAt: "2026-02-25", status: "exported" },
+  { id: "a3", type: "static-ad", title: "Full Range Showcase", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/LzVJeTPJHbrgymcb.jpg", productId: "p1", productName: "Golden Radiance Serum", angle: "Ingredient education", language: "Deutsch", sourceApp: "Static Ads Recreator", createdAt: "2026-02-24", status: "approved" },
+  { id: "a4", type: "broll-image", title: "Box Opening — Top View", image: IMAGES.brollUnboxing, productId: "p1", productName: "Golden Radiance Serum", sourceApp: "B-Roll Generator", createdAt: "2026-02-23", status: "exported" },
+  { id: "a5", type: "broll-image", title: "Hero Product Shot", image: IMAGES.brollPresentation, productId: "p1", productName: "Golden Radiance Serum", sourceApp: "B-Roll Generator", createdAt: "2026-02-23", status: "exported" },
+  { id: "a6", type: "broll-image", title: "Application — Hands", image: IMAGES.brollUsage, productId: "p1", productName: "Golden Radiance Serum", sourceApp: "B-Roll Generator", createdAt: "2026-02-22", status: "approved" },
+  { id: "a7", type: "static-ad", title: "Botanical Luxury Portrait", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/uRQRtlsbRKaGybqv.jpg", productId: "p1", productName: "Golden Radiance Serum", angle: "Morning routine", language: "English", sourceApp: "Static Ads Recreator", createdAt: "2026-02-24", status: "exported" },
+  { id: "a8", type: "broll-image", title: "Texture Pour", image: IMAGES.brollPresentation, productId: "p2", productName: "Hydra Silk Shampoo", sourceApp: "B-Roll Generator", createdAt: "2026-02-21", status: "exported" },
+  { id: "a9", type: "static-ad", title: "Natural Glow Promo", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/mZsqHZfbWJvqtynu.jpg", productId: "p2", productName: "Hydra Silk Shampoo", angle: "Clean beauty positioning", language: "Français", sourceApp: "Static Ads Recreator", createdAt: "2026-02-20", status: "approved" },
 ];
 
 export const WORKSPACE_APPS: WorkspaceApp[] = [
