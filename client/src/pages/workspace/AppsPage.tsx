@@ -6,7 +6,7 @@
 import { Link } from "wouter";
 import { motion } from "framer-motion";
 import {
-  Video, FileText, Palette, Type, Calendar, Search,
+  Video, FileText, Palette, Type, Calendar, Search, ImagePlus,
   ArrowRight, Lock, Sparkles, LayoutGrid,
 } from "lucide-react";
 import { WORKSPACE_APPS, type WorkspaceApp } from "@/lib/mockData";
@@ -19,6 +19,7 @@ const ICON_MAP: Record<string, React.ElementType> = {
   Type,
   Calendar,
   Search,
+  ImagePlus,
 };
 
 function StatusBadge({ status }: { status: WorkspaceApp["status"] }) {

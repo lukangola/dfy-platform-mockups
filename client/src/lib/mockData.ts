@@ -260,6 +260,46 @@ export const MOCK_PRODUCTS: Product[] = [
   },
 ];
 
+// ============================================================
+// STATIC ADS RECREATOR DATA
+// ============================================================
+
+export interface StaticAdReference {
+  id: string;
+  image: string;
+  title: string;
+  style: string;
+  source: "library" | "uploaded";
+  selected?: boolean;
+}
+
+export interface RecreatedAd {
+  id: string;
+  referenceId: string;
+  image: string;
+  title: string;
+  angle: string;
+  status: "pending" | "approved" | "rejected" | "generating";
+  prompt: string;
+}
+
+export const STATIC_AD_LIBRARY: StaticAdReference[] = [
+  { id: "lib1", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/HCqoSnXFOjxONOjr.jpg", title: "Before/After Testimonial", style: "Social Proof", source: "library" },
+  { id: "lib2", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/QVzzhlMLjUKesrgE.jpg", title: "Skin Close-Up with Product", style: "Results-Focused", source: "library" },
+  { id: "lib3", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/LzVJeTPJHbrgymcb.jpg", title: "Multi-Product Banner", style: "Brand Showcase", source: "library" },
+  { id: "lib4", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/uRQRtlsbRKaGybqv.jpg", title: "Floral Beauty Portrait", style: "Lifestyle", source: "library" },
+  { id: "lib5", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/mZsqHZfbWJvqtynu.jpg", title: "Natural Beauty Promo", style: "Promotional", source: "library" },
+  { id: "lib6", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/TvjCoiZycBPPmuRx.jpg", title: "Magazine Editorial Layout", style: "Editorial", source: "library" },
+];
+
+export const MOCK_RECREATED_ADS: RecreatedAd[] = [
+  { id: "ra1", referenceId: "lib1", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/HCqoSnXFOjxONOjr.jpg", title: "Golden Serum Before/After", angle: "Luxury unboxing experience with premium packaging", status: "approved", prompt: "Recreate this before/after testimonial ad with Golden Radiance Serum. Show visible skin glow transformation, premium product placement, gold accents matching brand palette." },
+  { id: "ra2", referenceId: "lib2", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/QVzzhlMLjUKesrgE.jpg", title: "Radiance Close-Up", angle: "Before/after skin glow transformation", status: "pending", prompt: "Recreate this skin close-up ad featuring Golden Radiance Serum. Emphasize dewy, glowing skin with product bottle elegantly placed. Use warm golden tones." },
+  { id: "ra3", referenceId: "lib3", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/LzVJeTPJHbrgymcb.jpg", title: "Full Range Showcase", angle: "Ingredient education series (science-backed claims)", status: "generating", prompt: "Recreate this multi-product banner layout with the Lumina Beauty product range. Clean white background, editorial arrangement, brand colors." },
+  { id: "ra4", referenceId: "lib4", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/uRQRtlsbRKaGybqv.jpg", title: "Botanical Luxury Portrait", angle: "Morning routine integration", status: "pending", prompt: "Recreate this floral beauty portrait with Golden Radiance Serum. Model applying serum with botanical elements, warm lighting, premium feel." },
+  { id: "ra5", referenceId: "lib5", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/mZsqHZfbWJvqtynu.jpg", title: "Natural Glow Promo", angle: "Comparison with higher-priced competitors", status: "rejected", prompt: "Recreate this promotional ad style with Golden Radiance Serum. Highlight value proposition vs premium competitors, clean design with price callout." },
+];
+
 export const WORKSPACE_APPS: WorkspaceApp[] = [
   {
     id: "broll",
@@ -269,6 +309,15 @@ export const WORKSPACE_APPS: WorkspaceApp[] = [
     status: "active",
     route: "/workspace/apps/broll",
     color: "#00D4FF",
+  },
+  {
+    id: "static-ads",
+    name: "Static Ads Recreator",
+    description: "Recreate and adapt static ad references with your product and brand. Select from a library or upload your own references.",
+    icon: "ImagePlus",
+    status: "active",
+    route: "/workspace/apps/static-ads",
+    color: "#F59E0B",
   },
   {
     id: "ugc-scripts",

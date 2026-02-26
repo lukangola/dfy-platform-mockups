@@ -10,6 +10,7 @@ import ProductDetailPage from "./pages/workspace/ProductDetailPage";
 import BrandInfoPage from "./pages/workspace/BrandInfoPage";
 import AppsPage from "./pages/workspace/AppsPage";
 import BrollAppPage from "./pages/workspace/BrollAppPage";
+import StaticAdsAppPage from "./pages/workspace/StaticAdsAppPage";
 
 function Router() {
   return (
@@ -49,6 +50,12 @@ function Router() {
       <Route path="/workspace/apps/broll">
         <WorkspaceLayout>
           <BrollAppPage />
+        </WorkspaceLayout>
+      </Route>
+
+      <Route path="/workspace/apps/static-ads">
+        <WorkspaceLayout>
+          <StaticAdsAppPage />
         </WorkspaceLayout>
       </Route>
 

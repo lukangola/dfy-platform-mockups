@@ -133,14 +133,17 @@ export default function ProductsPage() {
 
                     <div className="mt-3 flex items-center justify-between">
                       <ResearchStatusBadge status={product.researchStatus} />
-                      <a
-                        href={product.productLink}
-                        onClick={(e) => e.stopPropagation()}
-                        className="text-[10px] font-mono text-white/20 hover:text-cyan-400 transition-colors flex items-center gap-1"
+                      <span
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          window.open(product.productLink, '_blank');
+                        }}
+                        className="text-[10px] font-mono text-white/20 hover:text-cyan-400 transition-colors flex items-center gap-1 cursor-pointer"
                       >
                         <ExternalLink size={10} />
                         Link
-                      </a>
+                      </span>
                     </div>
                   </div>
                 </div>
