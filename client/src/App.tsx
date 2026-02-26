@@ -1,23 +1,57 @@
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
-import { Route, Switch } from "wouter";
+import { Route, Switch, Redirect } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
-import Home from "./pages/Home";
-import BrandDashboard from "./pages/BrandDashboard";
-import ConceptA from "./pages/ConceptA";
-import ConceptB from "./pages/ConceptB";
-import ConceptC from "./pages/ConceptC";
+import WorkspaceLayout from "./components/WorkspaceLayout";
+import ProductsPage from "./pages/workspace/ProductsPage";
+import ProductDetailPage from "./pages/workspace/ProductDetailPage";
+import BrandInfoPage from "./pages/workspace/BrandInfoPage";
+import AppsPage from "./pages/workspace/AppsPage";
+import BrollAppPage from "./pages/workspace/BrollAppPage";
 
 function Router() {
   return (
     <Switch>
-      <Route path={"/"} component={Home} />
-      <Route path={"/dashboard/:brandId"} component={BrandDashboard} />
-      <Route path={"/concept-a"} component={ConceptA} />
-      <Route path={"/concept-b"} component={ConceptB} />
-      <Route path={"/concept-c"} component={ConceptC} />
+      {/* Redirect root to workspace products */}
+      <Route path="/">
+        <Redirect to="/workspace/products" />
+      </Route>
+
+      {/* Workspace routes wrapped in layout */}
+      <Route path="/workspace/products">
+        <WorkspaceLayout>
+          <ProductsPage />
+        </WorkspaceLayout>
+      </Route>
+
+      <Route path="/workspace/products/:id">
+        {(params) => (
+          <WorkspaceLayout>
+            <ProductDetailPage productId={params.id} />
+          </WorkspaceLayout>
+        )}
+      </Route>
+
+      <Route path="/workspace/brand">
+        <WorkspaceLayout>
+          <BrandInfoPage />
+        </WorkspaceLayout>
+      </Route>
+
+      <Route path="/workspace/apps">
+        <WorkspaceLayout>
+          <AppsPage />
+        </WorkspaceLayout>
+      </Route>
+
+      <Route path="/workspace/apps/broll">
+        <WorkspaceLayout>
+          <BrollAppPage />
+        </WorkspaceLayout>
+      </Route>
+
       <Route path={"/404"} component={NotFound} />
       <Route component={NotFound} />
     </Switch>
@@ -27,7 +61,7 @@ function Router() {
 function App() {
   return (
     <ErrorBoundary>
-      <ThemeProvider defaultTheme="light">
+      <ThemeProvider defaultTheme="dark">
         <TooltipProvider>
           <Toaster />
           <Router />

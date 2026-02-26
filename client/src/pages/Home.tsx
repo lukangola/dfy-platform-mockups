@@ -1,243 +1,200 @@
 import { Link } from "wouter";
 import { motion } from "framer-motion";
-import { mockBrands, stepNames } from "@/lib/portfolioData";
+import { ArrowRight, Monitor, Paintbrush, Zap } from "lucide-react";
 
-const concepts = [
-  { id: "a", label: "Command Center", path: "concept-a", accent: "#00D4FF" },
-  { id: "b", label: "Flow Canvas", path: "concept-b", accent: "#C45D3E" },
-  { id: "c", label: "Pipeline Theater", path: "concept-c", accent: "#38BDF8" },
+const variants = [
+  {
+    title: "Studio Control Room",
+    subtitle: "Broadcast-Ästhetik",
+    description: "Dunkles, professionelles Interface inspiriert von Film-Post-Production-Tools. Panel-basierte Architektur mit Filmstrip-Navigation und Terminal-Style Chat.",
+    href: "/studio",
+    icon: Monitor,
+    gradient: "from-slate-900 via-cyan-950 to-slate-900",
+    accent: "#00D4FF",
+    tags: ["Dark Mode", "Panel Layout", "Keyboard-First"],
+  },
+  {
+    title: "Clean Canvas",
+    subtitle: "Editorial Whitespace",
+    description: "Minimalistisch wie ein Apple-Produktkatalog. Warmes Off-White, großzügiger Weißraum, asymmetrisches Magazine-Grid mit Serifenschrift für Headlines.",
+    href: "/canvas",
+    icon: Paintbrush,
+    gradient: "from-stone-100 via-indigo-50 to-stone-100",
+    accent: "#4338CA",
+    tags: ["Light Mode", "Editorial", "Serif Typography"],
+  },
+  {
+    title: "Neon Forge",
+    subtitle: "Cyberpunk Production Lab",
+    description: "Futuristisches Lab-Gefühl mit Neon-Akzenten. Jeder Shot-Typ hat seine eigene Neon-Farbe. Glassmorphism und Glow-Effekte mit Pipeline-Visualizer.",
+    href: "/neon",
+    icon: Zap,
+    gradient: "from-black via-purple-950 to-black",
+    accent: "#FF2D8A",
+    tags: ["Dark Mode", "Neon", "Gamified"],
+  },
 ];
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-[#0A0A0F] text-white">
-      {/* Header */}
-      <header className="border-b border-white/10 px-8 py-4">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center text-xs font-bold" style={{ fontFamily: 'Space Grotesk' }}>
-              DFY
-            </div>
-            <span className="text-sm text-white/50 tracking-wider uppercase" style={{ fontFamily: 'Space Grotesk' }}>
-              Platform UI Concepts
-            </span>
-          </div>
-          <span className="text-xs text-white/30" style={{ fontFamily: 'JetBrains Mono' }}>
-            v0.2 — With Portfolio & Dashboard
-          </span>
-        </div>
-      </header>
+    <div className="min-h-screen bg-[#0A0A0A] text-white overflow-hidden">
+      {/* Subtle grid background */}
+      <div
+        className="fixed inset-0 opacity-[0.03]"
+        style={{
+          backgroundImage: `linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)`,
+          backgroundSize: "60px 60px",
+        }}
+      />
 
-      {/* Concept Selector Tabs */}
-      <div className="border-b border-white/10 px-8">
-        <div className="max-w-7xl mx-auto flex items-center gap-1 py-2">
-          <span className="text-[10px] text-white/20 uppercase tracking-wider mr-3" style={{ fontFamily: 'JetBrains Mono' }}>
-            VIEW AS:
-          </span>
-          {concepts.map((c) => (
-            <Link key={c.id} href={`/${c.path}`}>
-              <span
-                className="text-xs px-3 py-1.5 border border-white/10 hover:border-white/20 text-white/40 hover:text-white/60 transition-all cursor-pointer"
-                style={{ fontFamily: 'Space Grotesk' }}
-              >
-                {c.label}
+      <div className="relative z-10">
+        {/* Header */}
+        <header className="pt-16 pb-12 px-8">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6 }}
+            className="max-w-6xl mx-auto"
+          >
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-cyan-400 to-indigo-500 flex items-center justify-center">
+                <span className="text-white font-bold text-sm" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>BR</span>
+              </div>
+              <span className="text-white/40 text-sm tracking-widest uppercase" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+                Design Mockups
               </span>
-            </Link>
-          ))}
-        </div>
-      </div>
-
-      {/* Hero */}
-      <section className="px-8 pt-12 pb-8">
-        <div className="max-w-7xl mx-auto">
-          <motion.p
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="text-sm text-cyan-400 tracking-widest uppercase mb-3"
-            style={{ fontFamily: 'JetBrains Mono' }}
-          >
-            Portfolio Overview
-          </motion.p>
-          <motion.h1
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.1 }}
-            className="text-4xl font-bold leading-tight mb-3"
-            style={{ fontFamily: 'Space Grotesk' }}
-          >
-            Active DFY Projects
-          </motion.h1>
-          <motion.p
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.2 }}
-            className="text-base text-white/40 max-w-xl"
-            style={{ fontFamily: 'DM Sans' }}
-          >
-            All running Done-For-You brand projects at a glance. Click any brand to see its detailed dashboard and step progress.
-          </motion.p>
-        </div>
-      </section>
-
-      {/* Stats Bar */}
-      <section className="px-8 pb-8">
-        <div className="max-w-7xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-3">
-          {[
-            { label: "Active Projects", value: mockBrands.length, color: "text-cyan-400" },
-            { label: "Steps Completed", value: Object.values(mockBrands.reduce((acc, b) => { Object.values(b.stepStatuses).forEach(s => { if (s === 'completed') acc.count++; }); return acc; }, { count: 0 })).reduce(() => mockBrands.reduce((sum, b) => sum + Object.values(b.stepStatuses).filter(s => s === 'completed').length, 0), 0), color: "text-emerald-400" },
-            { label: "In Testing", value: mockBrands.filter(b => Object.values(b.stepStatuses).includes('testing')).length, color: "text-amber-400" },
-            { label: "Needs Attention", value: mockBrands.filter(b => b.health === 'attention').length, color: "text-red-400" },
-          ].map((stat, i) => (
-            <motion.div
-              key={stat.label}
-              initial={{ opacity: 0, y: 15 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.3 + i * 0.05 }}
-              className="border border-white/10 bg-white/[0.02] p-4"
+            </div>
+            <h1
+              className="text-5xl md:text-7xl font-bold tracking-tight leading-[1.05]"
+              style={{ fontFamily: "'Space Grotesk', sans-serif" }}
             >
-              <div className={`text-2xl font-bold ${stat.color}`} style={{ fontFamily: 'Space Grotesk' }}>
-                {stat.value}
-              </div>
-              <div className="text-[10px] text-white/30 uppercase tracking-wider mt-1" style={{ fontFamily: 'JetBrains Mono' }}>
-                {stat.label}
-              </div>
-            </motion.div>
-          ))}
-        </div>
-      </section>
+              B-Roll Tool
+              <br />
+              <span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-indigo-400 to-pink-400">
+                UI Concepts
+              </span>
+            </h1>
+            <p className="mt-6 text-lg text-white/50 max-w-2xl leading-relaxed" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+              Drei unterschiedliche Design-Ansätze für ein KI-gestütztes B-Roll-Generierungstool.
+              Von der Produktbild-Eingabe über Shot-Generierung und Review bis zur Video-Produktion.
+            </p>
+          </motion.div>
+        </header>
 
-      {/* Brand Cards */}
-      <section className="px-8 pb-20">
-        <div className="max-w-7xl mx-auto space-y-3">
-          {mockBrands.map((brand, i) => (
-            <motion.div
-              key={brand.id}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.4 + i * 0.08 }}
-            >
-              <Link href={`/dashboard/${brand.id}`}>
-                <div className="group border border-white/10 bg-white/[0.02] hover:bg-white/[0.04] transition-all cursor-pointer overflow-hidden">
-                  <div className="p-5 flex items-center gap-5">
-                    {/* Brand Icon */}
-                    <div className="text-3xl w-12 h-12 flex items-center justify-center bg-white/5 shrink-0">
-                      {brand.logo}
-                    </div>
+        {/* Variant Cards */}
+        <main className="px-8 pb-24">
+          <div className="max-w-6xl mx-auto grid gap-8">
+            {variants.map((v, i) => (
+              <motion.div
+                key={v.href}
+                initial={{ opacity: 0, y: 40 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.6, delay: 0.2 + i * 0.15 }}
+              >
+                <Link href={v.href}>
+                  <div className="group relative rounded-2xl overflow-hidden border border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04] transition-all duration-500 cursor-pointer">
+                    {/* Gradient overlay */}
+                    <div className={`absolute inset-0 bg-gradient-to-r ${v.gradient} opacity-30 group-hover:opacity-50 transition-opacity duration-500`} />
 
-                    {/* Brand Info */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-3 mb-1">
-                        <h3 className="text-lg font-semibold" style={{ fontFamily: 'Space Grotesk' }}>
-                          {brand.name}
-                        </h3>
-                        <span className={`text-[9px] px-2 py-0.5 uppercase tracking-wider border ${
-                          brand.health === 'on-track' ? 'border-emerald-500/30 text-emerald-400 bg-emerald-500/10' :
-                          brand.health === 'attention' ? 'border-amber-500/30 text-amber-400 bg-amber-500/10' :
-                          'border-red-500/30 text-red-400 bg-red-500/10'
-                        }`} style={{ fontFamily: 'JetBrains Mono' }}>
-                          {brand.health === 'on-track' ? 'ON TRACK' : brand.health === 'attention' ? 'NEEDS ATTENTION' : 'BLOCKED'}
-                        </span>
+                    <div className="relative z-10 p-8 md:p-12 flex flex-col md:flex-row items-start md:items-center gap-8">
+                      {/* Icon */}
+                      <div
+                        className="w-16 h-16 rounded-xl flex items-center justify-center shrink-0 border border-white/10"
+                        style={{ backgroundColor: `${v.accent}15` }}
+                      >
+                        <v.icon size={28} style={{ color: v.accent }} />
                       </div>
-                      <div className="flex items-center gap-4 text-xs text-white/30" style={{ fontFamily: 'JetBrains Mono' }}>
-                        <span>{brand.category}</span>
-                        <span>•</span>
-                        <span>Week {brand.weekNumber}/{brand.totalWeeks}</span>
-                        {brand.keyMetrics?.winningAngle && (
-                          <>
-                            <span>•</span>
-                            <span className="text-cyan-400/60">Angle: "{brand.keyMetrics.winningAngle}"</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
 
-                    {/* Step Progress */}
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {stepNames.map((step) => {
-                        const status = brand.stepStatuses[step.id];
-                        return (
-                          <div
-                            key={step.id}
-                            className="relative group/step"
-                            title={`${step.shortTitle}: ${status}`}
+                      {/* Content */}
+                      <div className="flex-1">
+                        <div className="flex items-center gap-3 mb-2">
+                          <h2
+                            className="text-2xl md:text-3xl font-bold text-white"
+                            style={{ fontFamily: "'Space Grotesk', sans-serif" }}
                           >
-                            <div className={`w-8 h-8 flex items-center justify-center text-[10px] font-bold transition-all ${
-                              status === 'completed' ? 'bg-emerald-500/30 text-emerald-400' :
-                              status === 'active' ? 'bg-cyan-500/30 text-cyan-400 ring-1 ring-cyan-500/30' :
-                              status === 'testing' ? 'bg-amber-500/30 text-amber-400 animate-pulse' :
-                              status === 'review' ? 'bg-amber-500/20 text-amber-400' :
-                              'bg-white/5 text-white/20'
-                            }`} style={{ fontFamily: 'JetBrains Mono' }}>
-                              {status === 'completed' ? '✓' : step.id}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    {/* Current Step Label */}
-                    <div className="text-right shrink-0 w-36">
-                      <div className="text-[10px] text-white/20 uppercase" style={{ fontFamily: 'JetBrains Mono' }}>
-                        CURRENT
+                            {v.title}
+                          </h2>
+                          <span
+                            className="text-xs px-3 py-1 rounded-full border"
+                            style={{
+                              color: v.accent,
+                              borderColor: `${v.accent}40`,
+                              backgroundColor: `${v.accent}10`,
+                              fontFamily: "'JetBrains Mono', monospace",
+                            }}
+                          >
+                            {v.subtitle}
+                          </span>
+                        </div>
+                        <p className="text-white/40 leading-relaxed max-w-xl" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+                          {v.description}
+                        </p>
+                        <div className="flex flex-wrap gap-2 mt-4">
+                          {v.tags.map((tag) => (
+                            <span
+                              key={tag}
+                              className="text-xs px-2.5 py-1 rounded-md bg-white/5 text-white/30 border border-white/[0.06]"
+                              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
                       </div>
-                      <div className="text-sm text-white/60" style={{ fontFamily: 'Space Grotesk' }}>
-                        {stepNames[brand.currentStep].shortTitle}
-                      </div>
-                      <div className="text-[10px] text-white/20" style={{ fontFamily: 'JetBrains Mono' }}>
-                        {brand.stepStatuses[brand.currentStep] === 'testing' ? '⏳ Testing...' :
-                         brand.stepStatuses[brand.currentStep] === 'review' ? '👁 In Review' :
-                         '▶ Active'}
+
+                      {/* Arrow */}
+                      <div className="shrink-0 w-12 h-12 rounded-full border border-white/10 flex items-center justify-center group-hover:border-white/20 group-hover:bg-white/5 transition-all duration-300">
+                        <ArrowRight size={20} className="text-white/40 group-hover:text-white/80 group-hover:translate-x-0.5 transition-all duration-300" />
                       </div>
                     </div>
-
-                    {/* Arrow */}
-                    <div className="text-white/20 group-hover:text-white/40 group-hover:translate-x-1 transition-all shrink-0">
-                      →
-                    </div>
                   </div>
-
-                  {/* Progress Bar */}
-                  <div className="h-0.5 bg-white/5">
-                    <div
-                      className="h-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all duration-500"
-                      style={{ width: `${(Object.values(brand.stepStatuses).filter(s => s === 'completed').length / 6) * 100}%` }}
-                    />
-                  </div>
-                </div>
-              </Link>
-            </motion.div>
-          ))}
-        </div>
-      </section>
-
-      {/* Concept Links Footer */}
-      <section className="px-8 pb-16 border-t border-white/10 pt-10">
-        <div className="max-w-7xl mx-auto">
-          <h3 className="text-xs tracking-widest uppercase text-white/20 mb-6" style={{ fontFamily: 'JetBrains Mono' }}>
-            View This Portfolio in Different UI Concepts
-          </h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {concepts.map((c) => (
-              <Link key={c.id} href={`/${c.path}`}>
-                <div className="border border-white/10 bg-white/[0.02] hover:bg-white/[0.04] p-5 transition-all cursor-pointer group">
-                  <div className="flex items-center gap-2 mb-2">
-                    <div className="w-2 h-2" style={{ backgroundColor: c.accent }} />
-                    <span className="text-xs text-white/30 uppercase tracking-wider" style={{ fontFamily: 'JetBrains Mono' }}>
-                      Concept {c.id.toUpperCase()}
-                    </span>
-                  </div>
-                  <div className="text-lg font-semibold mb-1" style={{ fontFamily: 'Space Grotesk' }}>
-                    {c.label}
-                  </div>
-                  <div className="text-sm text-white/30 group-hover:text-white/40 flex items-center gap-2 transition-colors" style={{ color: c.accent }}>
-                    View full mockup →
-                  </div>
-                </div>
-              </Link>
+                </Link>
+              </motion.div>
             ))}
           </div>
-        </div>
-      </section>
+
+          {/* Workflow description */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.6, delay: 0.8 }}
+            className="max-w-6xl mx-auto mt-16"
+          >
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-8">
+              <h3
+                className="text-sm text-white/30 uppercase tracking-widest mb-6"
+                style={{ fontFamily: "'JetBrains Mono', monospace" }}
+              >
+                Workflow
+              </h3>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                {[
+                  { step: "01", label: "Input", desc: "Produktbild & Zielgruppe" },
+                  { step: "02", label: "Generate", desc: "KI-Shot-Generierung" },
+                  { step: "03", label: "Review", desc: "Feedback & Re-Prompt" },
+                  { step: "04", label: "Approve", desc: "Shots genehmigen" },
+                  { step: "05", label: "Video", desc: "Video-Generierung" },
+                ].map((item) => (
+                  <div key={item.step} className="text-center">
+                    <div
+                      className="text-3xl font-bold text-white/10 mb-2"
+                      style={{ fontFamily: "'Space Grotesk', sans-serif" }}
+                    >
+                      {item.step}
+                    </div>
+                    <div className="text-sm font-medium text-white/60" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+                      {item.label}
+                    </div>
+                    <div className="text-xs text-white/25 mt-1" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+                      {item.desc}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </motion.div>
+        </main>
+      </div>
     </div>
   );
 }
