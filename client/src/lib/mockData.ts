@@ -351,6 +351,205 @@ export const MOCK_ASSETS: Asset[] = [
   { id: "a9", type: "static-ad", title: "Natural Glow Promo", image: "https://files.manuscdn.com/user_upload_by_module/session_file/310419663029348799/mZsqHZfbWJvqtynu.jpg", productId: "p2", productName: "Hydra Silk Shampoo", angle: "Clean beauty positioning", language: "Français", sourceApp: "Static Ads Recreator", createdAt: "2026-02-20", status: "approved" },
 ];
 
+// ============================================================
+// MESSAGE TESTING ADS CREATOR DATA
+// ============================================================
+
+export interface MessageAngle {
+  id: string;
+  name: string;
+  messages: string[];
+}
+
+export interface MessageTemplate {
+  id: string;
+  name: string;
+  description: string;
+  style: string;
+  previewImage: string;
+  layout: "bold-headline" | "minimal-center" | "editorial-split";
+}
+
+export interface MessageTestingAd {
+  id: string;
+  angleId: string;
+  angleName: string;
+  message: string;
+  image: string;
+  status: "pending" | "approved" | "rejected" | "generating";
+  prompt: string;
+}
+
+// Angles with 10 messages each for Golden Radiance Serum
+export const MOCK_MESSAGE_ANGLES: Record<string, MessageAngle[]> = {
+  p1: [
+    {
+      id: "ma1",
+      name: "Luxury & Premium Feel",
+      messages: [
+        "24K Gold meets skincare science — your skin deserves nothing less.",
+        "The serum that makes your vanity look like a jewelry box.",
+        "Why settle for ordinary when your skin can wear gold?",
+        "Premium ingredients. Premium results. Premium you.",
+        "One drop of liquid gold. That's all it takes.",
+        "Your skin's new favorite luxury — without the luxury price tag.",
+        "Indulge in the glow that only real gold can deliver.",
+        "From the bottle to your skin — every drop feels like a treat.",
+        "This isn't just skincare. It's a golden ritual.",
+        "The only thing more radiant than this serum? You, after using it.",
+      ],
+    },
+    {
+      id: "ma2",
+      name: "Science-Backed Results",
+      messages: [
+        "15% Vitamin C + 24K Gold = visible results in 7 days.",
+        "93% of women saw smoother skin. The other 7% saw it in week two.",
+        "Dermatologist-tested. Instagram-approved. Science-backed.",
+        "Hyaluronic Acid + Niacinamide + Vitamin C — the triple threat your skin needs.",
+        "We didn't just make claims. We ran the clinical trials.",
+        "Your skin barrier called. It wants this serum.",
+        "3 active ingredients. 1 serum. 0 compromises.",
+        "The formula that made our chemists proud and our testers obsessed.",
+        "Peptide complex for collagen. Squalane for moisture. Gold for glow.",
+        "Not magic. Just really, really good science.",
+      ],
+    },
+    {
+      id: "ma3",
+      name: "Competitor Comparison",
+      messages: [
+        "SkinCeuticals quality at less than half the price. You're welcome.",
+        "Why pay $182 for Vitamin C when $78 gets you gold-infused results?",
+        "The Ordinary can't do this. Drunk Elephant wishes it could.",
+        "Premium results without the premium markup.",
+        "Same active ingredients as the $180 serums. Different price tag.",
+        "We studied the best serums on the market. Then we made a better one.",
+        "Your $80 serum doesn't have 24K gold. Ours does.",
+        "Compare the ingredients. Compare the price. You'll switch.",
+        "Tatcha charges $88 for less. We charge $78 for more.",
+        "The serum that luxury brands don't want you to know about.",
+      ],
+    },
+    {
+      id: "ma4",
+      name: "Transformation & Before/After",
+      messages: [
+        "Day 1: skeptical. Day 7: obsessed. Day 30: unrecognizable.",
+        "The glow-up your skin has been waiting for.",
+        "Before: dull. After: radiant. The difference? One golden serum.",
+        "Your 'no-makeup' makeup look starts with this serum.",
+        "From tired skin to 'did you just come back from vacation?' skin.",
+        "The before photo you'll actually want to share.",
+        "7 days. That's all we need to make you a believer.",
+        "Watch your fine lines fade and your confidence glow.",
+        "The transformation that made our testers cry happy tears.",
+        "Dull skin is temporary. Golden Radiance is forever.",
+      ],
+    },
+    {
+      id: "ma5",
+      name: "Clean & Sustainable Beauty",
+      messages: [
+        "Cruelty-free. Vegan. Sustainable glass. And it actually works.",
+        "Good for your skin. Good for the planet. Great for your conscience.",
+        "Clean beauty that doesn't compromise on luxury or results.",
+        "No parabens. No sulfates. No guilt. Just glow.",
+        "Sustainable packaging meets unsustainably good results.",
+        "The eco-friendly serum that outperforms the toxic ones.",
+        "Your skin and the planet will both thank you.",
+        "Clean ingredients. Clear conscience. Radiant skin.",
+        "We made luxury skincare sustainable. You're welcome, Earth.",
+        "Every bottle is recyclable. Every drop is effective.",
+      ],
+    },
+  ],
+  p2: [
+    {
+      id: "ma6",
+      name: "Silk-Smooth Results",
+      messages: [
+        "Silk proteins for hair that feels like, well, silk.",
+        "Your hair after one wash: touchably soft, visibly shiny.",
+        "The shampoo that makes bad hair days extinct.",
+        "72-hour hydration. One wash. Zero weight.",
+        "Argan oil + silk amino acids = your best hair ever.",
+        "Sulfate-free doesn't mean results-free. Proof inside.",
+        "The lather is rich. The results are richer.",
+        "From frizzy to silky in one shower.",
+        "Color-safe, planet-friendly, and ridiculously effective.",
+        "Your stylist will ask what changed. Show them this bottle.",
+      ],
+    },
+    {
+      id: "ma7",
+      name: "Clean Haircare Revolution",
+      messages: [
+        "Sulfate-free. Paraben-free. Compromise-free.",
+        "Clean haircare that actually cleans. Revolutionary, right?",
+        "Your scalp deserves better than sulfates.",
+        "The clean shampoo that doesn't sacrifice the lather.",
+        "Biotin + Aloe + Silk = the clean formula your hair craves.",
+        "We removed the bad stuff. Kept the good stuff. Added silk.",
+        "Clean beauty for your hair. Finally.",
+        "No harsh chemicals. Just pure, silky results.",
+        "The ingredient list you can actually pronounce.",
+        "Gentle on hair. Tough on bad hair days.",
+      ],
+    },
+  ],
+};
+
+// 3 template styles for message testing ads
+export const MOCK_MESSAGE_TEMPLATES: MessageTemplate[] = [
+  {
+    id: "mt1",
+    name: "Bold Statement",
+    description: "Large, impactful headline with product image below. High contrast, attention-grabbing layout designed for scroll-stopping impact.",
+    style: "Bold white text on dark gradient, product centered below",
+    previewImage: IMAGES.productSerum,
+    layout: "bold-headline",
+  },
+  {
+    id: "mt2",
+    name: "Minimal Center",
+    description: "Clean, centered layout with elegant typography. Message floats over a subtle product backdrop. Premium, understated feel.",
+    style: "Centered serif text, soft product background, minimal elements",
+    previewImage: IMAGES.brollPresentation,
+    layout: "minimal-center",
+  },
+  {
+    id: "mt3",
+    name: "Editorial Split",
+    description: "Magazine-style split layout with message on one side and product imagery on the other. Professional, editorial aesthetic.",
+    style: "Two-column split, text left, product right, editorial feel",
+    previewImage: IMAGES.brollUsage,
+    layout: "editorial-split",
+  },
+];
+
+// Pre-generated message testing ads (mock results)
+export function generateMockMessageAds(productId: string, templateId: string): MessageTestingAd[] {
+  const angles = MOCK_MESSAGE_ANGLES[productId] || [];
+  const ads: MessageTestingAd[] = [];
+  const images = [IMAGES.productSerum, IMAGES.brollPresentation, IMAGES.brollUsage, IMAGES.brollUnboxing, IMAGES.productShampoo];
+  
+  angles.forEach((angle) => {
+    angle.messages.forEach((message, idx) => {
+      ads.push({
+        id: `mta-${angle.id}-${idx}`,
+        angleId: angle.id,
+        angleName: angle.name,
+        message,
+        image: images[Math.floor(Math.random() * images.length)],
+        status: Math.random() > 0.3 ? "approved" : "pending",
+        prompt: `Generate a ${templateId === 'mt1' ? 'bold statement' : templateId === 'mt2' ? 'minimal center' : 'editorial split'} static ad with message: "${message}" for ${angle.name} angle.`,
+      });
+    });
+  });
+  return ads;
+}
+
 export const WORKSPACE_APPS: WorkspaceApp[] = [
   {
     id: "broll",
@@ -369,6 +568,15 @@ export const WORKSPACE_APPS: WorkspaceApp[] = [
     status: "active",
     route: "/workspace/apps/static-ads",
     color: "#F59E0B",
+  },
+  {
+    id: "message-testing",
+    name: "Message Testing Ads",
+    description: "Generate message testing ad variations across all research angles. Pick a template, generate 50+ unique ads, review and export by angle.",
+    icon: "MessageSquare",
+    status: "active",
+    route: "/workspace/apps/message-testing",
+    color: "#A855F7",
   },
   {
     id: "ugc-scripts",

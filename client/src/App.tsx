@@ -12,6 +12,7 @@ import AppsPage from "./pages/workspace/AppsPage";
 import BrollAppPage from "./pages/workspace/BrollAppPage";
 import StaticAdsAppPage from "./pages/workspace/StaticAdsAppPage";
 import AssetsPage from "./pages/workspace/AssetsPage";
+import MessageTestingAppPage from "./pages/workspace/MessageTestingAppPage";
 
 function Router() {
   return (
@@ -57,6 +58,12 @@ function Router() {
       <Route path="/workspace/apps/static-ads">
         <WorkspaceLayout>
           <StaticAdsAppPage />
+        </WorkspaceLayout>
+      </Route>
+
+      <Route path="/workspace/apps/message-testing">
+        <WorkspaceLayout>
+          <MessageTestingAppPage />
         </WorkspaceLayout>
       </Route>
 
