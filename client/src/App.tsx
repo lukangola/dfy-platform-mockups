@@ -13,6 +13,8 @@ import BrollAppPage from "./pages/workspace/BrollAppPage";
 import StaticAdsAppPage from "./pages/workspace/StaticAdsAppPage";
 import AssetsPage from "./pages/workspace/AssetsPage";
 import MessageTestingAppPage from "./pages/workspace/MessageTestingAppPage";
+import WorkflowsPage from "./pages/workspace/WorkflowsPage";
+import DFYWorkflowPage from "./pages/workspace/DFYWorkflowPage";
 
 function Router() {
   return (
@@ -70,6 +72,18 @@ function Router() {
       <Route path="/workspace/assets">
         <WorkspaceLayout>
           <AssetsPage />
+        </WorkspaceLayout>
+      </Route>
+
+      <Route path="/workspace/workflows">
+        <WorkspaceLayout>
+          <WorkflowsPage />
+        </WorkspaceLayout>
+      </Route>
+
+      <Route path="/workspace/workflows/dfy">
+        <WorkspaceLayout>
+          <DFYWorkflowPage />
         </WorkspaceLayout>
       </Route>
 
