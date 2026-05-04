@@ -1,171 +1,133 @@
 /**
  * DESIGN: Studio Control Room — Message Testing Ads Creator
  * 5-step workflow:
- *   1. Select Product & Angles (from research, all preselected, can deselect)
- *   2. Choose Template (3 variants generated, pick one, can regenerate/reprompt)
- *   3. Review All Generated Ads (grouped by angle, approve/regenerate/reprompt)
- *   4. Export (download by angle folders, saved to assets)
+ *   1. Select Product & Angles
+ *   2. Review Messages (edit / confirm per angle)
+ *   3. Review Template (single reference template, live nano-banana-pro preview + feedback loop)
+ *   4. Review All Generated Ads
+ *   5. Export
  */
-import { useState, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowLeft, ChevronRight, Check, X, RefreshCw, Send,
   Download, MessageSquare, Package, Layers, Eye,
   CheckCircle2, Sparkles, FolderDown, RotateCcw,
-  ChevronDown, ChevronUp,
+  ChevronDown, ChevronUp, Loader2, AlertTriangle,
+  Plus,
 } from "lucide-react";
 import {
-  MOCK_PRODUCTS,
-  MOCK_MESSAGE_ANGLES,
-  MOCK_MESSAGE_TEMPLATES,
-  generateMockMessageAds,
-  MOCK_CHAT_MESSAGES,
-  IMAGES,
-  type MessageAngle,
-  type MessageTemplate,
-  type MessageTestingAd,
-} from "@/lib/mockData";
+  listProducts, getProductAngles, generateMessageTestingCopy, generateImage,
+  getReferenceStyle, saveBrandAssets,
+  type Product, type ProductAngle, type MessageAngleGroup,
+} from "@/lib/api";
+import { useBrand } from "@/contexts/BrandContext";
+import { MOCK_CHAT_MESSAGES } from "@/lib/mockData";
 import { toast } from "sonner";
 
 const STEPS = [
   { id: 1, label: "Product & Angles", icon: Package },
-  { id: 2, label: "Choose Template", icon: Layers },
-  { id: 3, label: "Review Ads", icon: Eye },
-  { id: 4, label: "Export", icon: Download },
+  { id: 2, label: "Review Messages", icon: MessageSquare },
+  { id: 3, label: "Review Template", icon: Layers },
+  { id: 4, label: "Review Ads", icon: Eye },
+  { id: 5, label: "Export", icon: Download },
 ];
 
-// ── Template Preview Card ──────────────────────────────────────
-function TemplatePreview({
-  template,
-  sampleMessage,
-  selected,
-  onSelect,
-}: {
-  template: MessageTemplate;
-  sampleMessage: string;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  const layoutStyles: Record<string, React.CSSProperties> = {
-    "bold-headline": {
-      background: "linear-gradient(180deg, #0A0C10 0%, #1A1D28 100%)",
-    },
-    "minimal-center": {
-      background: "linear-gradient(135deg, #F5F0E8 0%, #E8E0D0 100%)",
-    },
-    "editorial-split": {
-      background: "linear-gradient(90deg, #0A0C10 50%, #1A1D28 50%)",
-    },
+// ── Single reference template ─────────────────────────────────
+// Two-stage flow:
+//   1. PREVIEW (step 3): recreate the editorial-quote reference for THIS product
+//      using [reference image + product image]. The user tweaks with feedback
+//      until satisfied, then approves.
+//   2. BATCH (step 4): use the approved preview as the canonical reference. Every
+//      subsequent ad reproduces it exactly — only the headline quote text changes.
+const REFERENCE_TEMPLATE = {
+  name: "Editorial Quote",
+  layout: "editorial-quote" as const,
+
+  /** Step 3 preview: recreate the reference layout for the product's brand. */
+  previewComposition: (
+    message: string,
+    feedback: string,
+    style: Record<string, unknown> | null,
+  ) => {
+    const styleBlock = style
+      ? `\n\nReference spec (for style guidance only — the first attached image is the canonical reference):\n${JSON.stringify(style, null, 2)}\n`
+      : "";
+    const base =
+      `Recreate the editorial-quote advertisement shown in the FIRST reference image, but as a new 1:1 square ad for the product shown in the SECOND reference image. Match the first image's layout, typography, composition, product placement, and pill-badge style. Adapt the background color and pill-badge color to this product's own brand palette (extract from the product's label and cap). Keep the product at approximately the same relative size as in the reference. Keep the "#1" pill badge at approximately the same size and position — adapt its claim text to fit the product (short, two lines max). Replace the headline quote with exactly: "${message}" — wrap in the same curly quotation marks, near-black editorial serif, oversized, left-aligned, natural phrase-based line breaks that fill the upper-left area without overlapping the product. Headline and product must not overlap. No watermarks, no logos, no extra captions. 2K resolution, sharp focus.` +
+      styleBlock;
+    const trimmed = feedback.trim();
+    return trimmed ? `${base}\n\nAdditional direction from user: ${trimmed}` : base;
+  },
+
+  /** Step 4 batch: the approved preview is the reference. Only the headline changes. */
+  batchComposition: (message: string, feedback: string) => {
+    const base =
+      `Reproduce the attached reference image EXACTLY. The ONLY thing that changes is the headline quote text — replace it with exactly: "${message}" (wrap in the same curly quotation marks shown in the reference). Everything else is identical: same background color, same product and product size, same product position, same "#1" pill badge with the same text and same size, same typography, same lighting, same layout, same composition. Use natural phrase-based line breaks for the new headline so it fills the same headline area as the reference without overlapping the product. 1:1 square, 2K resolution, sharp focus. Do not add, remove, or alter any element except the headline text.`;
+    const trimmed = feedback.trim();
+    return trimmed ? `${base}\n\nAdditional direction from user: ${trimmed}` : base;
+  },
+};
+
+function buildAdInput(
+  prompt: string,
+  imageUrls: (string | null | undefined)[],
+): { model: string; input: Record<string, unknown> } {
+  const cleaned = imageUrls.filter((u): u is string => Boolean(u));
+  if (cleaned.length > 0) {
+    return {
+      model: "fal-ai/nano-banana-pro/edit",
+      input: {
+        prompt,
+        image_urls: cleaned,
+        aspect_ratio: "1:1",
+        resolution: "2K",
+        num_images: 1,
+        output_format: "jpeg",
+      },
+    };
+  }
+  return {
+    model: "fal-ai/flux-pro/v1.1",
+    input: { prompt, aspect_ratio: "1:1", num_images: 1, output_format: "jpeg" },
   };
-
-  return (
-    <motion.div
-      whileHover={{ y: -4 }}
-      onClick={onSelect}
-      className={`rounded-xl border overflow-hidden cursor-pointer transition-all ${
-        selected
-          ? "border-purple-500 ring-2 ring-purple-500/30"
-          : "border-white/[0.08] hover:border-white/[0.15]"
-      }`}
-      style={{ background: "#13161F" }}
-    >
-      {/* Template Preview */}
-      <div
-        className="h-56 relative flex items-center justify-center p-6 overflow-hidden"
-        style={layoutStyles[template.layout]}
-      >
-        {template.layout === "bold-headline" && (
-          <div className="text-center z-10 px-4">
-            <p className="text-white font-bold text-base leading-snug max-w-[260px] mx-auto">
-              {sampleMessage}
-            </p>
-            <div className="mt-4 flex justify-center">
-              <img
-                src={template.previewImage}
-                alt=""
-                className="w-16 h-16 object-contain rounded-lg"
-              />
-            </div>
-          </div>
-        )}
-        {template.layout === "minimal-center" && (
-          <div className="text-center z-10 px-4">
-            <p className="text-[#2D2D2D] font-serif text-sm italic leading-relaxed max-w-[240px] mx-auto">
-              "{sampleMessage}"
-            </p>
-            <div className="mt-3 w-8 h-px bg-[#C8A84E] mx-auto" />
-          </div>
-        )}
-        {template.layout === "editorial-split" && (
-          <div className="flex w-full h-full z-10">
-            <div className="w-1/2 flex items-center justify-center p-4">
-              <p className="text-white text-xs leading-relaxed max-w-[140px]">
-                {sampleMessage}
-              </p>
-            </div>
-            <div className="w-1/2 flex items-center justify-center">
-              <img
-                src={template.previewImage}
-                alt=""
-                className="w-20 h-20 object-contain rounded-lg"
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Selection indicator */}
-        {selected && (
-          <div className="absolute top-3 right-3 w-7 h-7 rounded-full bg-purple-500 flex items-center justify-center z-20">
-            <Check size={14} className="text-white" />
-          </div>
-        )}
-      </div>
-
-      {/* Info */}
-      <div className="p-4 border-t border-white/[0.06]">
-        <h4 className="text-sm font-semibold text-white/90 mb-1">{template.name}</h4>
-        <p className="text-[11px] text-white/40 leading-relaxed">{template.description}</p>
-      </div>
-    </motion.div>
-  );
 }
+
+const TEMPLATE_BG = "linear-gradient(135deg, #EFE6D4 0%, #E2D3B6 100%)";
+
+// ── Types ──────────────────────────────────────────────────────
+type AdStatus = "pending" | "approved" | "rejected" | "generating" | "failed";
+
+type LiveAd = {
+  id: string;
+  angleName: string;
+  message: string;
+  status: AdStatus;
+  imageUrl?: string;
+  error?: string;
+};
 
 // ── Ad Card ────────────────────────────────────────────────────
 function AdCard({
   ad,
-  templateLayout,
   onApprove,
-  onReject,
   onRegenerate,
   onChat,
   isSelected,
 }: {
-  ad: MessageTestingAd;
-  templateLayout: string;
+  ad: LiveAd;
   onApprove: () => void;
-  onReject: () => void;
   onRegenerate: () => void;
   onChat: () => void;
   isSelected: boolean;
 }) {
-  const layoutStyles: Record<string, React.CSSProperties> = {
-    "bold-headline": {
-      background: "linear-gradient(180deg, #0A0C10 0%, #1A1D28 100%)",
-    },
-    "minimal-center": {
-      background: "linear-gradient(135deg, #F5F0E8 0%, #E8E0D0 100%)",
-    },
-    "editorial-split": {
-      background: "linear-gradient(90deg, #0A0C10 50%, #1A1D28 50%)",
-    },
-  };
-
-  const statusColors: Record<string, string> = {
+  const statusColors: Record<AdStatus, string> = {
     approved: "#10B981",
     pending: "#F59E0B",
     rejected: "#EF4444",
     generating: "#A855F7",
+    failed: "#EF4444",
   };
 
   return (
@@ -178,33 +140,29 @@ function AdCard({
       }`}
       style={{ background: "#13161F" }}
     >
-      {/* Ad Preview */}
       <div
-        className="h-40 relative flex items-center justify-center p-4 overflow-hidden"
-        style={layoutStyles[templateLayout]}
+        className="relative overflow-hidden"
+        style={{ aspectRatio: "1/1", background: TEMPLATE_BG }}
       >
-        {templateLayout === "bold-headline" && (
-          <p className="text-white font-bold text-[11px] leading-snug text-center max-w-[200px]">
-            {ad.message}
-          </p>
-        )}
-        {templateLayout === "minimal-center" && (
-          <p className="text-[#2D2D2D] font-serif text-[10px] italic text-center leading-relaxed max-w-[180px]">
-            "{ad.message}"
-          </p>
-        )}
-        {templateLayout === "editorial-split" && (
-          <div className="flex w-full h-full">
-            <div className="w-1/2 flex items-center p-2">
-              <p className="text-white text-[9px] leading-relaxed">{ad.message}</p>
-            </div>
-            <div className="w-1/2 flex items-center justify-center">
-              <img src={ad.image} alt="" className="w-12 h-12 object-contain rounded" />
-            </div>
+        {ad.imageUrl ? (
+          <img src={ad.imageUrl} alt={ad.message} className="w-full h-full object-cover" />
+        ) : ad.status === "generating" ? (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <Loader2 size={22} className="text-[#2D2D2D]/40 animate-spin" />
+          </div>
+        ) : ad.status === "failed" ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-2">
+            <AlertTriangle size={18} className="text-rose-400" />
+            <p className="text-[9px] text-rose-400/80 text-center line-clamp-3">{ad.error ?? "Failed"}</p>
+          </div>
+        ) : (
+          <div className="absolute inset-0 flex items-center justify-center p-3">
+            <p className="text-[#2D2D2D] font-serif text-[10px] italic text-center leading-relaxed max-w-[160px]">
+              "{ad.message}"
+            </p>
           </div>
         )}
 
-        {/* Status badge */}
         <div
           className="absolute top-2 right-2 text-[8px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded"
           style={{
@@ -217,13 +175,13 @@ function AdCard({
         </div>
       </div>
 
-      {/* Actions */}
       <div className="p-3 border-t border-white/[0.06]">
         <p className="text-[10px] text-white/50 mb-2 line-clamp-2 leading-relaxed">{ad.message}</p>
         <div className="flex items-center gap-1">
           <button
             onClick={onApprove}
-            className={`flex-1 flex items-center justify-center gap-1 text-[9px] font-mono py-1.5 rounded-md transition-all ${
+            disabled={ad.status === "generating" || !ad.imageUrl}
+            className={`flex-1 flex items-center justify-center gap-1 text-[9px] font-mono py-1.5 rounded-md transition-all disabled:opacity-30 ${
               ad.status === "approved"
                 ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
                 : "bg-white/[0.04] text-white/40 hover:bg-emerald-500/10 hover:text-emerald-400 border border-white/[0.06]"
@@ -233,7 +191,8 @@ function AdCard({
           </button>
           <button
             onClick={onRegenerate}
-            className="flex-1 flex items-center justify-center gap-1 text-[9px] font-mono py-1.5 rounded-md bg-white/[0.04] text-white/40 hover:bg-amber-500/10 hover:text-amber-400 border border-white/[0.06] transition-all"
+            disabled={ad.status === "generating"}
+            className="flex-1 flex items-center justify-center gap-1 text-[9px] font-mono py-1.5 rounded-md bg-white/[0.04] text-white/40 hover:bg-amber-500/10 hover:text-amber-400 border border-white/[0.06] transition-all disabled:opacity-30"
           >
             <RefreshCw size={10} />
           </button>
@@ -250,13 +209,7 @@ function AdCard({
 }
 
 // ── Chat Panel ─────────────────────────────────────────────────
-function ChatPanel({
-  ad,
-  onClose,
-}: {
-  ad: MessageTestingAd;
-  onClose: () => void;
-}) {
+function ChatPanel({ ad, onClose }: { ad: LiveAd; onClose: () => void }) {
   const [chatInput, setChatInput] = useState("");
 
   return (
@@ -267,7 +220,6 @@ function ChatPanel({
       className="fixed top-0 right-0 w-[380px] h-full z-50 border-l border-white/[0.08] flex flex-col"
       style={{ background: "#0D0F12" }}
     >
-      {/* Header */}
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
         <div>
           <h3 className="text-sm font-semibold text-white/90">Refine Ad</h3>
@@ -278,14 +230,12 @@ function ChatPanel({
         </button>
       </div>
 
-      {/* Current Ad Preview */}
       <div className="p-4 border-b border-white/[0.06]">
         <div className="rounded-lg border border-white/[0.06] p-3" style={{ background: "#13161F" }}>
           <p className="text-[11px] text-white/60 leading-relaxed">"{ad.message}"</p>
         </div>
       </div>
 
-      {/* Chat Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {MOCK_CHAT_MESSAGES.map((msg, i) => (
           <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
@@ -302,7 +252,6 @@ function ChatPanel({
         ))}
       </div>
 
-      {/* Input */}
       <div className="p-4 border-t border-white/[0.06]">
         <div className="flex gap-2">
           <input
@@ -314,7 +263,7 @@ function ChatPanel({
           />
           <button
             onClick={() => {
-              toast("Regenerating with feedback...");
+              toast("Chat refinement not yet wired — regenerating uses the current prompt.");
               setChatInput("");
             }}
             className="px-3 py-2 rounded-lg bg-purple-500/20 text-purple-300 hover:bg-purple-500/30 transition-colors"
@@ -329,54 +278,370 @@ function ChatPanel({
 
 // ── Main Component ─────────────────────────────────────────────
 export default function MessageTestingAppPage() {
+  const { activeBrandId } = useBrand();
   const [step, setStep] = useState(1);
+
+  // Live products
+  const [products, setProducts] = useState<Product[]>([]);
+  const [productsLoading, setProductsLoading] = useState(true);
+  const [productsError, setProductsError] = useState<string | null>(null);
   const [selectedProductId, setSelectedProductId] = useState("");
-  const [selectedAngles, setSelectedAngles] = useState<string[]>([]);
-  const [selectedTemplateId, setSelectedTemplateId] = useState("");
-  const [generatedAds, setGeneratedAds] = useState<MessageTestingAd[]>([]);
-  const [chatAd, setChatAd] = useState<MessageTestingAd | null>(null);
-  const [exported, setExported] = useState(false);
   const [productDropdownOpen, setProductDropdownOpen] = useState(false);
+
+  // Research angles (name+block) for the selected product
+  const [angles, setAngles] = useState<ProductAngle[]>([]);
+  const [anglesLoading, setAnglesLoading] = useState(false);
+  const [anglesError, setAnglesError] = useState<string | null>(null);
+  const [selectedAngleNames, setSelectedAngleNames] = useState<string[]>([]);
+
+  // Messages generated from message_testing_copy (editable + confirmable per angle)
+  const [messageGroups, setMessageGroups] = useState<MessageAngleGroup[] | null>(null);
+  const [copyLoading, setCopyLoading] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const [confirmedAngleNames, setConfirmedAngleNames] = useState<Set<string>>(new Set());
+  const [regeneratingAngles, setRegeneratingAngles] = useState<Set<string>>(new Set());
+
+  // Template preview + feedback loop
+  const [templateFeedback, setTemplateFeedback] = useState("");
+  const [templatePreviewUrl, setTemplatePreviewUrl] = useState<string | null>(null);
+  const [templatePreviewLoading, setTemplatePreviewLoading] = useState(false);
+  const [templatePreviewError, setTemplatePreviewError] = useState<string | null>(null);
+
+  // Reference image + extracted style (used by nano-banana-pro/edit at 1:1 2K).
+  // When the reference file at client/public/templates/editorial-quote-reference.jpg
+  // is missing, these stay null and the hand-authored prompt is used.
+  const [referenceImageUrl, setReferenceImageUrl] = useState<string | null>(null);
+  const [referenceStyle, setReferenceStyle] = useState<Record<string, unknown> | null>(null);
+
+  // Approved preview: captured at the moment the user clicks "Generate All Ads".
+  // Every batch / single regeneration uses this as the ONLY reference so the
+  // whole set stays visually consistent — only the headline text changes.
+  const [approvedReferenceUrl, setApprovedReferenceUrl] = useState<string | null>(null);
+
+  // Generated ads (live fal.ai results)
+  const [generatedAds, setGeneratedAds] = useState<LiveAd[]>([]);
+  const [chatAd, setChatAd] = useState<LiveAd | null>(null);
+  const [exported, setExported] = useState(false);
   const [collapsedAngles, setCollapsedAngles] = useState<Set<string>>(new Set());
 
-  const completedProducts = MOCK_PRODUCTS.filter((p) => p.researchStatus === "complete");
-  const selectedProduct = MOCK_PRODUCTS.find((p) => p.id === selectedProductId);
-  const availableAngles = MOCK_MESSAGE_ANGLES[selectedProductId] || [];
-  const selectedTemplate = MOCK_MESSAGE_TEMPLATES.find((t) => t.id === selectedTemplateId);
+  // Fetch products for the active brand.
+  useEffect(() => {
+    if (!activeBrandId) return;
+    let cancelled = false;
+    setProductsLoading(true);
+    (async () => {
+      try {
+        const { products } = await listProducts(activeBrandId);
+        if (!cancelled) setProducts(products);
+      } catch (err) {
+        if (!cancelled) setProductsError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) setProductsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeBrandId]);
 
-  // Group ads by angle
+  // Fetch the reference-style spec once (cached server-side).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await getReferenceStyle();
+        if (cancelled) return;
+        if ("missing" in r && r.missing) {
+          // Reference file not dropped yet — use the hand-authored fallback prompt.
+          return;
+        }
+        setReferenceImageUrl(r.referenceImageUrl);
+        setReferenceStyle(r.style);
+      } catch (err) {
+        // Non-fatal: downstream calls will fall back to the hand-authored prompt.
+        console.warn("Reference style unavailable:", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const researchedProducts = useMemo(
+    () => products.filter((p) => p.researchStatus === "complete" && p.research?.markdown),
+    [products]
+  );
+  const selectedProduct = researchedProducts.find((p) => p.id === selectedProductId);
+
+  // Fetch angles whenever the selected product changes.
+  useEffect(() => {
+    if (!selectedProductId) {
+      setAngles([]);
+      setSelectedAngleNames([]);
+      setAnglesError(null);
+      setMessageGroups(null);
+      setCopyError(null);
+      setConfirmedAngleNames(new Set());
+      setTemplateFeedback("");
+      setTemplatePreviewUrl(null);
+      setTemplatePreviewError(null);
+      return;
+    }
+    let cancelled = false;
+    setAnglesLoading(true);
+    setAnglesError(null);
+    setMessageGroups(null);
+    setCopyError(null);
+    setConfirmedAngleNames(new Set());
+    setTemplateFeedback("");
+    setTemplatePreviewUrl(null);
+    setTemplatePreviewError(null);
+    (async () => {
+      try {
+        const { angles: fetched } = await getProductAngles(selectedProductId);
+        if (!cancelled) {
+          setAngles(fetched);
+          setSelectedAngleNames(fetched.map((a) => a.name));
+        }
+      } catch (err) {
+        if (!cancelled) setAnglesError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) setAnglesLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedProductId]);
+
+  const selectedAngles = useMemo(
+    () => angles.filter((a) => selectedAngleNames.includes(a.name)),
+    [angles, selectedAngleNames]
+  );
+
+  // Auto-generate template preview when entering step 3 without one.
+  useEffect(() => {
+    if (step !== 3) return;
+    if (templatePreviewUrl || templatePreviewLoading || templatePreviewError) return;
+    if (!selectedProduct) return;
+    const firstGroup = messageGroups?.find((g) => selectedAngleNames.includes(g.name));
+    if (!firstGroup?.messages[0]) return;
+    void regenerateTemplatePreview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
+
+  // Group ads by angle name
   const adsByAngle = useMemo(() => {
-    const groups: Record<string, MessageTestingAd[]> = {};
+    const groups: Record<string, LiveAd[]> = {};
     generatedAds.forEach((ad) => {
-      if (!groups[ad.angleId]) groups[ad.angleId] = [];
-      groups[ad.angleId].push(ad);
+      if (!groups[ad.angleName]) groups[ad.angleName] = [];
+      groups[ad.angleName].push(ad);
     });
     return groups;
   }, [generatedAds]);
 
   const approvedCount = generatedAds.filter((a) => a.status === "approved").length;
+  const readyCount = generatedAds.filter((a) => a.imageUrl).length;
   const totalCount = generatedAds.length;
 
-  // When product changes, preselect all angles
   const handleProductSelect = (productId: string) => {
     setSelectedProductId(productId);
-    const angles = MOCK_MESSAGE_ANGLES[productId] || [];
-    setSelectedAngles(angles.map((a) => a.id));
     setProductDropdownOpen(false);
   };
 
-  const toggleAngle = (angleId: string) => {
-    setSelectedAngles((prev) =>
-      prev.includes(angleId) ? prev.filter((id) => id !== angleId) : [...prev, angleId]
+  const toggleAngle = (name: string) => {
+    setSelectedAngleNames((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]
     );
   };
 
-  const handleGenerate = () => {
-    const allAds = generateMockMessageAds(selectedProductId, selectedTemplateId);
-    const filteredAds = allAds.filter((ad) => selectedAngles.includes(ad.angleId));
-    setGeneratedAds(filteredAds);
-    setStep(3);
+  // Step 1 → 2: run the copy writer, land on the message review screen.
+  const handleAdvanceToMessageReview = async () => {
+    if (!selectedProduct || selectedAngles.length === 0) return;
+    const haveAll =
+      messageGroups &&
+      selectedAngleNames.every((n) => messageGroups.some((g) => g.name === n));
+    if (haveAll) {
+      setStep(2);
+      return;
+    }
+    setCopyLoading(true);
+    setCopyError(null);
+    try {
+      const { groups } = await generateMessageTestingCopy({
+        product: selectedProduct.name,
+        angles: selectedAngles,
+      });
+      setMessageGroups(groups);
+      setConfirmedAngleNames(new Set());
+      setStep(2);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setCopyError(msg);
+      toast.error(`Copy writer failed: ${msg}`);
+    } finally {
+      setCopyLoading(false);
+    }
   };
+
+  const updateMessage = (angleName: string, idx: number, text: string) => {
+    setMessageGroups((prev) => {
+      if (!prev) return prev;
+      return prev.map((g) =>
+        g.name === angleName
+          ? { ...g, messages: g.messages.map((m, i) => (i === idx ? text : m)) }
+          : g
+      );
+    });
+  };
+
+  const removeMessage = (angleName: string, idx: number) => {
+    setMessageGroups((prev) => {
+      if (!prev) return prev;
+      return prev.map((g) =>
+        g.name === angleName
+          ? { ...g, messages: g.messages.filter((_, i) => i !== idx) }
+          : g
+      );
+    });
+  };
+
+  const addMessage = (angleName: string) => {
+    setMessageGroups((prev) => {
+      if (!prev) return prev;
+      return prev.map((g) =>
+        g.name === angleName ? { ...g, messages: [...g.messages, ""] } : g
+      );
+    });
+  };
+
+  const toggleConfirmAngle = (angleName: string) => {
+    setConfirmedAngleNames((prev) => {
+      const next = new Set(prev);
+      if (next.has(angleName)) next.delete(angleName);
+      else next.add(angleName);
+      return next;
+    });
+  };
+
+  const regenerateAngle = async (angleName: string) => {
+    if (!selectedProduct) return;
+    const angle = angles.find((a) => a.name === angleName);
+    if (!angle) return;
+    setRegeneratingAngles((prev) => new Set(prev).add(angleName));
+    try {
+      const { groups } = await generateMessageTestingCopy({
+        product: selectedProduct.name,
+        angles: [angle],
+      });
+      const fresh = groups.find((g) => g.name === angleName) ?? groups[0];
+      if (fresh) {
+        setMessageGroups((prev) =>
+          prev ? prev.map((g) => (g.name === angleName ? fresh : g)) : prev
+        );
+        setConfirmedAngleNames((prev) => {
+          const next = new Set(prev);
+          next.delete(angleName);
+          return next;
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Regenerate failed: ${msg}`);
+    } finally {
+      setRegeneratingAngles((prev) => {
+        const next = new Set(prev);
+        next.delete(angleName);
+        return next;
+      });
+    }
+  };
+
+  // Render a single-message preview using the current template + feedback.
+  async function regenerateTemplatePreview() {
+    if (!selectedProduct) return;
+    const firstGroup = messageGroups?.find((g) => selectedAngleNames.includes(g.name));
+    const sampleMessage = firstGroup?.messages[0];
+    if (!sampleMessage) {
+      toast.error("Need at least one message to preview the template.");
+      return;
+    }
+    setTemplatePreviewLoading(true);
+    setTemplatePreviewError(null);
+    const productImageUrl = selectedProduct.productImageUrl
+      ? selectedProduct.productImageUrl.replace(/^http:\/\//, "https://")
+      : null;
+    try {
+      const prompt = REFERENCE_TEMPLATE.previewComposition(sampleMessage, templateFeedback, referenceStyle);
+      const { model, input } = buildAdInput(prompt, [referenceImageUrl, productImageUrl]);
+      const res = await generateImage("message_ad", { input, model });
+      setTemplatePreviewUrl(res.urls[0]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setTemplatePreviewError(msg);
+      toast.error(`Preview failed: ${msg}`);
+    } finally {
+      setTemplatePreviewLoading(false);
+    }
+  }
+
+  // Step 3 → 4: kick off batch generation. CRITICAL: snapshot the approved preview
+  // image — every batch ad is generated from THAT exact image, only the headline
+  // changes. Guarantees visual consistency across the whole set.
+  const handleGenerateAll = () => {
+    if (!selectedProduct || !messageGroups) return;
+    if (!templatePreviewUrl) {
+      toast.error("Regenerate the template preview before generating all ads.");
+      return;
+    }
+
+    const seeds: LiveAd[] = [];
+    for (const group of messageGroups) {
+      if (!selectedAngleNames.includes(group.name)) continue;
+      group.messages.forEach((message, idx) => {
+        seeds.push({
+          id: `${group.name}-${idx}`,
+          angleName: group.name,
+          message,
+          status: "generating",
+        });
+      });
+    }
+    if (seeds.length === 0) {
+      toast.error("No messages to generate.");
+      return;
+    }
+
+    // Freeze the approved preview as the canonical reference for this batch.
+    const approved = templatePreviewUrl;
+    setApprovedReferenceUrl(approved);
+    setGeneratedAds(seeds);
+    setStep(4);
+
+    void runImageGeneration(seeds, templateFeedback, approved);
+  };
+
+  async function runImageGeneration(seeds: LiveAd[], feedback: string, approvedRef: string) {
+    const CONCURRENCY = 3;
+
+    let index = 0;
+    async function worker() {
+      while (index < seeds.length) {
+        const i = index++;
+        const seed = seeds[i];
+        try {
+          const prompt = REFERENCE_TEMPLATE.batchComposition(seed.message, feedback);
+          const { model, input } = buildAdInput(prompt, [approvedRef]);
+          const res = await generateImage("message_ad", { input, model });
+          const url = res.urls[0];
+          setGeneratedAds((prev) =>
+            prev.map((a) => (a.id === seed.id ? { ...a, status: "pending", imageUrl: url } : a))
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setGeneratedAds((prev) =>
+            prev.map((a) => (a.id === seed.id ? { ...a, status: "failed", error: msg } : a))
+          );
+        }
+      }
+    }
+
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, seeds.length) }, worker));
+  }
 
   const handleApproveAd = (adId: string) => {
     setGeneratedAds((prev) =>
@@ -387,27 +652,47 @@ export default function MessageTestingAppPage() {
   };
 
   const handleApproveAll = () => {
-    setGeneratedAds((prev) => prev.map((ad) => ({ ...ad, status: "approved" })));
-    toast.success("All ads approved");
+    setGeneratedAds((prev) =>
+      prev.map((ad) => (ad.imageUrl ? { ...ad, status: "approved" as AdStatus } : ad))
+    );
+    toast.success("All ready ads approved");
   };
 
-  const handleRegenerateAd = (adId: string) => {
+  const handleRegenerateAd = async (adId: string) => {
+    if (!selectedProduct) return;
+    const target = generatedAds.find((a) => a.id === adId);
+    if (!target) return;
+    const approvedRef = approvedReferenceUrl ?? templatePreviewUrl;
+    if (!approvedRef) {
+      toast.error("No approved template reference — go back to step 3 and regenerate the preview.");
+      return;
+    }
     setGeneratedAds((prev) =>
-      prev.map((ad) => (ad.id === adId ? { ...ad, status: "generating" } : ad))
+      prev.map((a) => (a.id === adId ? { ...a, status: "generating", error: undefined } : a))
     );
-    setTimeout(() => {
+    try {
+      const prompt = REFERENCE_TEMPLATE.batchComposition(target.message, templateFeedback);
+      const { model, input } = buildAdInput(prompt, [approvedRef]);
+      const res = await generateImage("message_ad", { input, model });
+      const url = res.urls[0];
       setGeneratedAds((prev) =>
-        prev.map((ad) => (ad.id === adId ? { ...ad, status: "pending" } : ad))
+        prev.map((a) => (a.id === adId ? { ...a, status: "pending", imageUrl: url } : a))
       );
       toast("Ad regenerated");
-    }, 1200);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setGeneratedAds((prev) =>
+        prev.map((a) => (a.id === adId ? { ...a, status: "failed", error: msg } : a))
+      );
+      toast.error(`Regenerate failed: ${msg}`);
+    }
   };
 
-  const toggleCollapseAngle = (angleId: string) => {
+  const toggleCollapseAngle = (angleName: string) => {
     setCollapsedAngles((prev) => {
       const next = new Set(prev);
-      if (next.has(angleId)) next.delete(angleId);
-      else next.add(angleId);
+      if (next.has(angleName)) next.delete(angleName);
+      else next.add(angleName);
       return next;
     });
   };
@@ -421,9 +706,19 @@ export default function MessageTestingAppPage() {
           SELECT PRODUCT & ANGLES
         </h2>
         <p className="text-xs text-white/40">
-          Choose a product and select which research angles to generate message testing ads for.
+          Choose a product and select which strategic research angles to generate message testing ads for.
         </p>
       </div>
+
+      {productsError && (
+        <div className="mb-6 rounded-xl border border-rose-500/30 bg-rose-500/[0.04] p-4 flex items-start gap-3">
+          <AlertTriangle size={16} className="text-rose-400 flex-shrink-0 mt-0.5" />
+          <div>
+            <div className="text-xs text-rose-300 font-mono mb-1">Failed to load products</div>
+            <div className="text-[11px] text-rose-200/70">{productsError}</div>
+          </div>
+        </div>
+      )}
 
       {/* Product Selector */}
       <div className="rounded-xl border border-white/[0.08] p-5 mb-6" style={{ background: "#13161F" }}>
@@ -433,26 +728,33 @@ export default function MessageTestingAppPage() {
         <div className="relative">
           <button
             onClick={() => setProductDropdownOpen(!productDropdownOpen)}
-            className="w-full flex items-center gap-3 p-3 rounded-lg border border-white/[0.08] bg-white/[0.02] hover:bg-white/[0.04] transition-colors text-left"
+            disabled={productsLoading}
+            className="w-full flex items-center gap-3 p-3 rounded-lg border border-white/[0.08] bg-white/[0.02] hover:bg-white/[0.04] transition-colors text-left disabled:opacity-50"
           >
-            {selectedProduct ? (
+            {productsLoading ? (
+              <span className="text-sm text-white/40 flex items-center gap-2">
+                <Loader2 size={14} className="animate-spin" /> Loading products...
+              </span>
+            ) : selectedProduct ? (
               <>
-                <img src={selectedProduct.productImage} alt="" className="w-10 h-10 rounded-lg object-contain bg-white/5" />
+                {selectedProduct.productImageUrl && (
+                  <img src={selectedProduct.productImageUrl} alt="" className="w-10 h-10 rounded-lg object-contain bg-white/5" />
+                )}
                 <div className="flex-1">
                   <div className="text-sm text-white/90">{selectedProduct.name}</div>
-                  <div className="text-[10px] text-white/30 font-mono">
-                    {selectedProduct.category} · {selectedProduct.research?.pricePoint}
-                  </div>
+                  <div className="text-[10px] text-white/30 font-mono">{selectedProduct.category}</div>
                 </div>
               </>
             ) : (
-              <span className="text-sm text-white/30">Choose a product...</span>
+              <span className="text-sm text-white/30">
+                {researchedProducts.length === 0 ? "No researched products yet" : "Choose a product..."}
+              </span>
             )}
             <ChevronDown size={14} className="text-white/30" />
           </button>
 
           <AnimatePresence>
-            {productDropdownOpen && (
+            {productDropdownOpen && researchedProducts.length > 0 && (
               <motion.div
                 initial={{ opacity: 0, y: -4 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -460,13 +762,15 @@ export default function MessageTestingAppPage() {
                 className="absolute top-full left-0 right-0 mt-1 rounded-lg border border-white/[0.08] overflow-hidden z-30"
                 style={{ background: "#1A1D28" }}
               >
-                {completedProducts.map((product) => (
+                {researchedProducts.map((product) => (
                   <button
                     key={product.id}
                     onClick={() => handleProductSelect(product.id)}
                     className="w-full flex items-center gap-3 p-3 hover:bg-white/[0.04] transition-colors text-left"
                   >
-                    <img src={product.productImage} alt="" className="w-8 h-8 rounded-lg object-contain bg-white/5" />
+                    {product.productImageUrl && (
+                      <img src={product.productImageUrl} alt="" className="w-8 h-8 rounded-lg object-contain bg-white/5" />
+                    )}
                     <div>
                       <div className="text-sm text-white/80">{product.name}</div>
                       <div className="text-[10px] text-white/30 font-mono">{product.category}</div>
@@ -480,138 +784,256 @@ export default function MessageTestingAppPage() {
       </div>
 
       {/* Angles Selection */}
-      {selectedProductId && availableAngles.length > 0 && (
+      {selectedProductId && (
         <div className="rounded-xl border border-white/[0.08] p-5 mb-6" style={{ background: "#13161F" }}>
           <div className="flex items-center justify-between mb-4">
             <label className="text-[10px] font-mono text-white/30 uppercase tracking-widest">
-              Research Angles ({selectedAngles.length}/{availableAngles.length} selected)
+              Research Angles{angles.length > 0 && ` (${selectedAngleNames.length}/${angles.length} selected)`}
             </label>
-            <button
-              onClick={() =>
-                setSelectedAngles(
-                  selectedAngles.length === availableAngles.length
-                    ? []
-                    : availableAngles.map((a) => a.id)
-                )
-              }
-              className="text-[10px] font-mono text-purple-400 hover:text-purple-300 transition-colors"
-            >
-              {selectedAngles.length === availableAngles.length ? "Deselect All" : "Select All"}
-            </button>
+            {angles.length > 0 && (
+              <button
+                onClick={() =>
+                  setSelectedAngleNames(
+                    selectedAngleNames.length === angles.length ? [] : angles.map((a) => a.name)
+                  )
+                }
+                className="text-[10px] font-mono text-purple-400 hover:text-purple-300 transition-colors"
+              >
+                {selectedAngleNames.length === angles.length ? "Deselect All" : "Select All"}
+              </button>
+            )}
           </div>
 
-          <div className="space-y-2">
-            {availableAngles.map((angle) => {
-              const isSelected = selectedAngles.includes(angle.id);
-              return (
-                <button
-                  key={angle.id}
-                  onClick={() => toggleAngle(angle.id)}
-                  className={`w-full flex items-center gap-3 p-3 rounded-lg border transition-all text-left ${
-                    isSelected
-                      ? "border-purple-500/30 bg-purple-500/[0.06]"
-                      : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04]"
-                  }`}
-                >
-                  <div
-                    className={`w-5 h-5 rounded flex items-center justify-center flex-shrink-0 transition-all ${
+          {anglesLoading && (
+            <div className="flex items-center gap-2 text-xs text-white/40 py-4">
+              <Loader2 size={14} className="animate-spin" />
+              Extracting angles from research...
+            </div>
+          )}
+
+          {anglesError && (
+            <div className="rounded-lg border border-rose-500/30 bg-rose-500/[0.04] p-3 text-[11px] text-rose-300">
+              {anglesError}
+            </div>
+          )}
+
+          {!anglesLoading && !anglesError && angles.length > 0 && (
+            <div className="space-y-2">
+              {angles.map((angle) => {
+                const isSelected = selectedAngleNames.includes(angle.name);
+                return (
+                  <button
+                    key={angle.name}
+                    onClick={() => toggleAngle(angle.name)}
+                    className={`w-full flex items-start gap-3 p-3 rounded-lg border transition-all text-left ${
                       isSelected
-                        ? "bg-purple-500 border-purple-500"
-                        : "border border-white/[0.15] bg-white/[0.02]"
+                        ? "border-purple-500/30 bg-purple-500/[0.06]"
+                        : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04]"
                     }`}
                   >
-                    {isSelected && <Check size={12} className="text-white" />}
-                  </div>
-                  <div className="flex-1">
-                    <div className="text-sm text-white/80">{angle.name}</div>
-                    <div className="text-[10px] text-white/30 font-mono">
-                      {angle.messages.length} messages
+                    <div
+                      className={`w-5 h-5 rounded flex items-center justify-center flex-shrink-0 transition-all mt-0.5 ${
+                        isSelected
+                          ? "bg-purple-500 border-purple-500"
+                          : "border border-white/[0.15] bg-white/[0.02]"
+                      }`}
+                    >
+                      {isSelected && <Check size={12} className="text-white" />}
                     </div>
-                  </div>
-                </button>
-              );
-            })}
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-white/80">{angle.name}</div>
+                      <div className="text-[10px] text-white/30 font-mono line-clamp-2 mt-0.5">
+                        {angle.block.slice(0, 160)}{angle.block.length > 160 ? "…" : ""}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {copyError && (
+        <div className="mb-6 rounded-xl border border-rose-500/30 bg-rose-500/[0.04] p-4 flex items-start gap-3">
+          <AlertTriangle size={16} className="text-rose-400 flex-shrink-0 mt-0.5" />
+          <div>
+            <div className="text-xs text-rose-300 font-mono mb-1">Copy writer failed</div>
+            <div className="text-[11px] text-rose-200/70">{copyError}</div>
           </div>
         </div>
       )}
 
-      {/* Summary & Next */}
-      {selectedProductId && selectedAngles.length > 0 && (
+      {selectedProductId && selectedAngleNames.length > 0 && (
         <div className="rounded-xl border border-purple-500/20 p-4 mb-6" style={{ background: "rgba(168,85,247,0.04)" }}>
-          <div className="flex items-center justify-between text-xs text-white/50 mb-1">
-            <span>Total ads to generate:</span>
-            <span className="text-purple-400 font-mono font-semibold">
-              {selectedAngles.reduce((sum, id) => {
-                const angle = availableAngles.find((a) => a.id === id);
-                return sum + (angle?.messages.length || 0);
-              }, 0)}{" "}
-              ads
-            </span>
-          </div>
           <div className="flex items-center justify-between text-xs text-white/50">
-            <span>Across angles:</span>
-            <span className="text-white/60 font-mono">{selectedAngles.length} angles</span>
+            <span>Angles selected:</span>
+            <span className="text-purple-400 font-mono font-semibold">{selectedAngleNames.length}</span>
+          </div>
+          <div className="flex items-center justify-between text-xs text-white/50 mt-1">
+            <span>Expected messages:</span>
+            <span className="text-white/60 font-mono">up to {selectedAngleNames.length * 10}</span>
           </div>
         </div>
       )}
 
       <button
-        onClick={() => setStep(2)}
-        disabled={!selectedProductId || selectedAngles.length === 0}
-        className="w-full py-3.5 rounded-xl font-mono text-sm uppercase tracking-wider transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+        onClick={handleAdvanceToMessageReview}
+        disabled={!selectedProductId || selectedAngleNames.length === 0 || copyLoading}
+        className="w-full py-3.5 rounded-xl font-mono text-sm uppercase tracking-wider transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2"
         style={{
-          background: selectedProductId && selectedAngles.length > 0
+          background: selectedProductId && selectedAngleNames.length > 0 && !copyLoading
             ? "linear-gradient(135deg, #A855F7, #7C3AED)"
             : "#1A1D28",
-          color: selectedProductId && selectedAngles.length > 0 ? "white" : "#555",
+          color: selectedProductId && selectedAngleNames.length > 0 ? "white" : "#555",
         }}
       >
-        NEXT: CHOOSE TEMPLATE
+        {copyLoading ? (
+          <>
+            <Loader2 size={14} className="animate-spin" />
+            Writing Messages...
+          </>
+        ) : (
+          <>Next: Review Messages</>
+        )}
       </button>
     </div>
   );
 
-  // ── Step 2: Choose Template ──────────────────────────────────
+  // ── Step 2: Review Messages ──────────────────────────────────
   const renderStep2 = () => {
-    const sampleMessage = availableAngles[0]?.messages[0] || "Sample message text";
+    const visibleGroups = (messageGroups ?? []).filter((g) => selectedAngleNames.includes(g.name));
+    const allConfirmed =
+      visibleGroups.length > 0 &&
+      visibleGroups.every((g) => confirmedAngleNames.has(g.name));
+    const totalMessages = visibleGroups.reduce((n, g) => n + g.messages.length, 0);
 
     return (
       <div className="max-w-4xl mx-auto">
-        <div className="mb-8">
+        <div className="mb-6">
           <h2 className="text-base font-semibold text-white/90 flex items-center gap-2 mb-1">
-            <Layers size={16} className="text-purple-400" />
-            CHOOSE TEMPLATE
+            <MessageSquare size={16} className="text-purple-400" />
+            REVIEW MESSAGES
           </h2>
           <p className="text-xs text-white/40">
-            Select one template style for all your message testing ads. Preview uses the first message from your first angle.
+            Edit any message inline, regenerate an angle if the copy misses, then confirm each angle before picking a template.
           </p>
         </div>
 
-        {/* Context Tags */}
         <div className="flex flex-wrap gap-2 mb-6">
           <span className="text-[10px] font-mono px-2.5 py-1 rounded-full bg-white/[0.04] border border-white/[0.08] text-white/50">
             ✦ {selectedProduct?.name}
           </span>
           <span className="text-[10px] font-mono px-2.5 py-1 rounded-full bg-white/[0.04] border border-white/[0.08] text-white/50">
-            ◎ {selectedAngles.length} angles
+            ◎ {visibleGroups.length} angles
+          </span>
+          <span className="text-[10px] font-mono px-2.5 py-1 rounded-full bg-white/[0.04] border border-white/[0.08] text-white/50">
+            ✉ {totalMessages} messages
+          </span>
+          <span className="text-[10px] font-mono px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+            {confirmedAngleNames.size}/{visibleGroups.length} confirmed
           </span>
         </div>
 
-        {/* Template Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mb-8">
-          {MOCK_MESSAGE_TEMPLATES.map((template) => (
-            <TemplatePreview
-              key={template.id}
-              template={template}
-              sampleMessage={sampleMessage}
-              selected={selectedTemplateId === template.id}
-              onSelect={() => setSelectedTemplateId(template.id)}
-            />
-          ))}
+        {visibleGroups.length === 0 && (
+          <div className="rounded-xl border border-white/[0.08] p-6 text-center text-xs text-white/40" style={{ background: "#13161F" }}>
+            No messages yet. Go back and pick at least one angle.
+          </div>
+        )}
+
+        <div className="space-y-5">
+          {visibleGroups.map((group) => {
+            const isConfirmed = confirmedAngleNames.has(group.name);
+            const isRegenerating = regeneratingAngles.has(group.name);
+            return (
+              <div
+                key={group.name}
+                className={`rounded-xl border p-5 transition-all ${
+                  isConfirmed
+                    ? "border-emerald-500/30 bg-emerald-500/[0.03]"
+                    : "border-white/[0.08]"
+                }`}
+                style={{ background: isConfirmed ? undefined : "#13161F" }}
+              >
+                <div className="flex items-center gap-3 mb-4">
+                  <div
+                    className="w-2 h-2 rounded-full"
+                    style={{
+                      background: isConfirmed ? "#10B981" : "#A855F7",
+                      boxShadow: `0 0 8px ${isConfirmed ? "rgba(16,185,129,0.5)" : "rgba(168,85,247,0.5)"}`,
+                    }}
+                  />
+                  <span className="text-xs font-mono text-white/80 uppercase tracking-widest flex-1">
+                    {group.name}
+                  </span>
+                  <span className="text-[10px] font-mono text-white/30">
+                    {group.messages.length} messages
+                  </span>
+                  <button
+                    onClick={() => regenerateAngle(group.name)}
+                    disabled={isRegenerating}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-mono bg-white/[0.04] text-white/40 hover:bg-amber-500/10 hover:text-amber-400 border border-white/[0.06] transition-all disabled:opacity-40"
+                  >
+                    {isRegenerating ? (
+                      <Loader2 size={10} className="animate-spin" />
+                    ) : (
+                      <RefreshCw size={10} />
+                    )}
+                    Regenerate
+                  </button>
+                  <button
+                    onClick={() => toggleConfirmAngle(group.name)}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-mono border transition-all ${
+                      isConfirmed
+                        ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
+                        : "bg-white/[0.04] text-white/40 hover:bg-emerald-500/10 hover:text-emerald-400 border-white/[0.06]"
+                    }`}
+                  >
+                    <CheckCircle2 size={10} />
+                    {isConfirmed ? "Confirmed" : "Confirm"}
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {group.messages.map((msg, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-start gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2"
+                    >
+                      <span className="text-[10px] font-mono text-white/30 mt-1.5 w-5 flex-shrink-0">
+                        {idx + 1}
+                      </span>
+                      <textarea
+                        value={msg}
+                        onChange={(e) => updateMessage(group.name, idx, e.target.value)}
+                        rows={1}
+                        className="flex-1 bg-transparent border-0 text-xs text-white/80 leading-relaxed resize-none focus:outline-none focus:ring-0 placeholder:text-white/20"
+                        placeholder="Message text..."
+                      />
+                      <button
+                        onClick={() => removeMessage(group.name, idx)}
+                        className="p-1 rounded text-white/30 hover:text-rose-400 hover:bg-rose-500/10 transition-all flex-shrink-0"
+                        aria-label="Remove message"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  onClick={() => addMessage(group.name)}
+                  className="mt-3 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[10px] font-mono bg-white/[0.04] text-white/40 hover:bg-purple-500/10 hover:text-purple-400 border border-white/[0.06] transition-all"
+                >
+                  <Plus size={10} />
+                  Add message
+                </button>
+              </div>
+            );
+          })}
         </div>
 
-        {/* Actions */}
-        <div className="flex gap-3">
+        <div className="flex gap-3 mt-8">
           <button
             onClick={() => setStep(1)}
             className="px-5 py-3 rounded-xl font-mono text-xs uppercase tracking-wider bg-white/[0.04] text-white/40 hover:bg-white/[0.08] border border-white/[0.06] transition-all"
@@ -619,14 +1041,151 @@ export default function MessageTestingAppPage() {
             Back
           </button>
           <button
-            onClick={handleGenerate}
-            disabled={!selectedTemplateId}
+            onClick={() => setStep(3)}
+            disabled={!allConfirmed}
             className="flex-1 py-3 rounded-xl font-mono text-sm uppercase tracking-wider transition-all disabled:opacity-30 disabled:cursor-not-allowed"
             style={{
-              background: selectedTemplateId
-                ? "linear-gradient(135deg, #A855F7, #7C3AED)"
-                : "#1A1D28",
-              color: selectedTemplateId ? "white" : "#555",
+              background: allConfirmed ? "linear-gradient(135deg, #A855F7, #7C3AED)" : "#1A1D28",
+              color: allConfirmed ? "white" : "#555",
+            }}
+          >
+            {allConfirmed
+              ? "Next: Review Template"
+              : `Confirm ${visibleGroups.length - confirmedAngleNames.size} more angle${visibleGroups.length - confirmedAngleNames.size === 1 ? "" : "s"}`}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // ── Step 3: Review Template ──────────────────────────────────
+  const renderStep3 = () => {
+    const firstSelectedGroup = messageGroups?.find((g) => selectedAngleNames.includes(g.name));
+    const sampleMessage = firstSelectedGroup?.messages[0] ?? "";
+    const totalMessages = (messageGroups ?? []).reduce(
+      (n, g) => n + (selectedAngleNames.includes(g.name) ? g.messages.length : 0),
+      0
+    );
+    const canGenerate = Boolean(templatePreviewUrl) && !templatePreviewLoading && totalMessages > 0;
+
+    return (
+      <div className="max-w-5xl mx-auto">
+        <div className="mb-6">
+          <h2 className="text-base font-semibold text-white/90 flex items-center gap-2 mb-1">
+            <Layers size={16} className="text-purple-400" />
+            REVIEW TEMPLATE
+          </h2>
+          <p className="text-xs text-white/40">
+            One template will be applied to every message. Preview below uses the first message of the first angle. Give feedback to adjust the layout, then regenerate. Confirm to generate all ads.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2 mb-6">
+          <span className="text-[10px] font-mono px-2.5 py-1 rounded-full bg-white/[0.04] border border-white/[0.08] text-white/50">
+            ✦ {selectedProduct?.name}
+          </span>
+          <span className="text-[10px] font-mono px-2.5 py-1 rounded-full bg-white/[0.04] border border-white/[0.08] text-white/50">
+            ◎ {selectedAngleNames.length} angles
+          </span>
+          <span className="text-[10px] font-mono px-2.5 py-1 rounded-full bg-white/[0.04] border border-white/[0.08] text-white/50">
+            ✉ {totalMessages} messages
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-[auto_1fr] gap-6 items-start mb-8">
+          {/* Live preview */}
+          <div className="rounded-xl border border-white/[0.08] overflow-hidden mx-auto lg:mx-0" style={{ background: "#13161F" }}>
+            <div
+              className="relative flex items-center justify-center overflow-hidden"
+              style={{ background: TEMPLATE_BG, width: 320, aspectRatio: "1/1" }}
+            >
+              {templatePreviewLoading ? (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-[#2D2D2D]/70">
+                  <Loader2 size={22} className="animate-spin" />
+                  <span className="text-[10px] font-mono uppercase tracking-wider">Rendering preview…</span>
+                </div>
+              ) : templatePreviewUrl ? (
+                <img src={templatePreviewUrl} alt="Template preview" className="w-full h-full object-cover" />
+              ) : templatePreviewError ? (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-4">
+                  <AlertTriangle size={20} className="text-rose-500" />
+                  <span className="text-[10px] text-rose-600 text-center leading-relaxed">{templatePreviewError}</span>
+                </div>
+              ) : (
+                <p className="text-[#2D2D2D] font-serif italic text-sm leading-relaxed text-center max-w-[230px] px-4">
+                  "{sampleMessage || "Sample message preview"}"
+                </p>
+              )}
+            </div>
+            <div className="p-3 border-t border-white/[0.06]">
+              <p className="text-[10px] font-mono text-white/50 uppercase tracking-wider text-center">
+                {REFERENCE_TEMPLATE.name}
+              </p>
+              <p className="text-[9px] font-mono text-white/30 mt-0.5 text-center">
+                {referenceImageUrl
+                  ? "1:1 · 2K · reference-locked"
+                  : "1:1 · 2K · hand-authored prompt"}
+              </p>
+              {sampleMessage && (
+                <p className="text-[9px] text-white/30 mt-1 text-center line-clamp-2">
+                  Preview uses: "{sampleMessage}"
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* Feedback panel */}
+          <div className="space-y-4">
+            <div className="rounded-xl border border-white/[0.08] p-4" style={{ background: "#13161F" }}>
+              <label className="text-[10px] font-mono text-white/30 uppercase tracking-widest mb-2 block">
+                Feedback (optional)
+              </label>
+              <textarea
+                value={templateFeedback}
+                onChange={(e) => setTemplateFeedback(e.target.value)}
+                placeholder="e.g. make the product larger, move the quote higher, softer lighting, add a subtle shadow under the product…"
+                rows={6}
+                className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg px-3 py-2 text-xs text-white/80 placeholder:text-white/25 focus:outline-none focus:border-purple-500/40 resize-none leading-relaxed"
+              />
+              <div className="mt-3">
+                <button
+                  onClick={() => regenerateTemplatePreview()}
+                  disabled={templatePreviewLoading || !selectedProduct || !sampleMessage}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-[11px] font-mono uppercase tracking-wider bg-purple-500/15 text-purple-300 border border-purple-500/30 hover:bg-purple-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {templatePreviewLoading ? (
+                    <Loader2 size={12} className="animate-spin" />
+                  ) : (
+                    <RefreshCw size={12} />
+                  )}
+                  {templateFeedback.trim() ? "Apply Feedback & Regenerate" : "Regenerate Preview"}
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-purple-500/20 p-4" style={{ background: "rgba(168,85,247,0.04)" }}>
+              <p className="text-[11px] text-white/60 leading-relaxed">
+                Once the layout feels right, hit{" "}
+                <span className="font-semibold text-purple-300">Generate All Ads</span> — every confirmed message will be rendered with this exact template and any feedback you've provided.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex gap-3">
+          <button
+            onClick={() => setStep(2)}
+            className="px-5 py-3 rounded-xl font-mono text-xs uppercase tracking-wider bg-white/[0.04] text-white/40 hover:bg-white/[0.08] border border-white/[0.06] transition-all"
+          >
+            Back
+          </button>
+          <button
+            onClick={handleGenerateAll}
+            disabled={!canGenerate}
+            className="flex-1 py-3 rounded-xl font-mono text-sm uppercase tracking-wider transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+            style={{
+              background: canGenerate ? "linear-gradient(135deg, #A855F7, #7C3AED)" : "#1A1D28",
+              color: canGenerate ? "white" : "#555",
             }}
           >
             GENERATE ALL ADS
@@ -636,30 +1195,32 @@ export default function MessageTestingAppPage() {
     );
   };
 
-  // ── Step 3: Review Ads ───────────────────────────────────────
-  const renderStep3 = () => (
+  // ── Step 4: Review Ads ───────────────────────────────────────
+  const renderStep4 = () => (
     <div>
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-base font-semibold text-white/90 flex items-center gap-2 mb-1">
             <Eye size={16} className="text-purple-400" />
-            REVIEW ADS ({totalCount})
+            REVIEW ADS ({readyCount}/{totalCount} ready)
           </h2>
           <p className="text-xs text-white/40">
-            Review, approve, or regenerate each ad. Click the chat icon to give specific feedback.
+            Review, approve, or regenerate each ad. Chat for more specific feedback.
           </p>
         </div>
         <div className="flex items-center gap-3">
           <button
             onClick={handleApproveAll}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-[10px] font-mono uppercase tracking-wider bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-all"
+            disabled={readyCount === 0}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-[10px] font-mono uppercase tracking-wider bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-all disabled:opacity-30"
           >
             <CheckCircle2 size={12} />
             APPROVE ALL
           </button>
           <button
-            onClick={() => setStep(4)}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-[10px] font-mono uppercase tracking-wider transition-all"
+            onClick={() => setStep(5)}
+            disabled={approvedCount === 0}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-[10px] font-mono uppercase tracking-wider transition-all disabled:opacity-30"
             style={{ background: "linear-gradient(135deg, #A855F7, #7C3AED)", color: "white" }}
           >
             <Download size={12} />
@@ -668,7 +1229,6 @@ export default function MessageTestingAppPage() {
         </div>
       </div>
 
-      {/* Context Tags */}
       <div className="flex flex-wrap gap-2 mb-6">
         <span className="text-[10px] font-mono px-2.5 py-1 rounded-full bg-white/[0.04] border border-white/[0.08] text-white/50">
           ✦ {selectedProduct?.name}
@@ -678,24 +1238,19 @@ export default function MessageTestingAppPage() {
         </span>
       </div>
 
-      {/* Ads grouped by angle */}
       <div className="space-y-8">
-        {Object.entries(adsByAngle).map(([angleId, ads]) => {
-          const angle = availableAngles.find((a) => a.id === angleId);
-          const isCollapsed = collapsedAngles.has(angleId);
+        {Object.entries(adsByAngle).map(([angleName, ads]) => {
+          const isCollapsed = collapsedAngles.has(angleName);
           const angleApproved = ads.filter((a) => a.status === "approved").length;
 
           return (
-            <div key={angleId}>
-              {/* Angle Header */}
+            <div key={angleName}>
               <button
-                onClick={() => toggleCollapseAngle(angleId)}
+                onClick={() => toggleCollapseAngle(angleName)}
                 className="w-full flex items-center gap-3 mb-4 group"
               >
                 <div className="w-2 h-2 rounded-full bg-purple-400" style={{ boxShadow: "0 0 8px rgba(168,85,247,0.5)" }} />
-                <span className="text-xs font-mono text-white/60 uppercase tracking-widest">
-                  {angle?.name || angleId}
-                </span>
+                <span className="text-xs font-mono text-white/60 uppercase tracking-widest">{angleName}</span>
                 <span className="text-[10px] font-mono text-white/30">
                   {angleApproved}/{ads.length} approved
                 </span>
@@ -707,7 +1262,6 @@ export default function MessageTestingAppPage() {
                 )}
               </button>
 
-              {/* Ads Grid */}
               <AnimatePresence>
                 {!isCollapsed && (
                   <motion.div
@@ -720,13 +1274,7 @@ export default function MessageTestingAppPage() {
                       <AdCard
                         key={ad.id}
                         ad={ad}
-                        templateLayout={selectedTemplate?.layout || "bold-headline"}
                         onApprove={() => handleApproveAd(ad.id)}
-                        onReject={() => {
-                          setGeneratedAds((prev) =>
-                            prev.map((a) => (a.id === ad.id ? { ...a, status: "rejected" } : a))
-                          );
-                        }}
                         onRegenerate={() => handleRegenerateAd(ad.id)}
                         onChat={() => setChatAd(ad)}
                         isSelected={chatAd?.id === ad.id}
@@ -740,15 +1288,14 @@ export default function MessageTestingAppPage() {
         })}
       </div>
 
-      {/* Chat Panel */}
       <AnimatePresence>
         {chatAd && <ChatPanel ad={chatAd} onClose={() => setChatAd(null)} />}
       </AnimatePresence>
     </div>
   );
 
-  // ── Step 4: Export ───────────────────────────────────────────
-  const renderStep4 = () => {
+  // ── Step 5: Export ───────────────────────────────────────────
+  const renderStep5 = () => {
     if (!exported) {
       return (
         <div className="max-w-3xl mx-auto">
@@ -758,11 +1305,10 @@ export default function MessageTestingAppPage() {
               EXPORT ADS
             </h2>
             <p className="text-xs text-white/40">
-              Download your approved ads organized by angle folders and save them to the brand workspace assets.
+              Download your approved ads organized by angle.
             </p>
           </div>
 
-          {/* Export Summary */}
           <div className="rounded-xl border border-white/[0.08] p-5 mb-6" style={{ background: "#13161F" }}>
             <div className="flex items-center justify-between mb-4">
               <span className="text-[10px] font-mono text-white/30 uppercase tracking-widest">Export Summary</span>
@@ -776,7 +1322,7 @@ export default function MessageTestingAppPage() {
               </div>
               <div className="flex items-center justify-between text-xs text-white/50">
                 <span>Template</span>
-                <span className="text-white/70">{selectedTemplate?.name}</span>
+                <span className="text-white/70">{REFERENCE_TEMPLATE.name}</span>
               </div>
               <div className="flex items-center justify-between text-xs text-white/50">
                 <span>Total Ads</span>
@@ -785,42 +1331,40 @@ export default function MessageTestingAppPage() {
             </div>
           </div>
 
-          {/* Folder Preview */}
           <div className="rounded-xl border border-white/[0.08] p-5 mb-6" style={{ background: "#13161F" }}>
             <span className="text-[10px] font-mono text-white/30 uppercase tracking-widest mb-4 block">
               Download Structure (by Angle)
             </span>
 
             <div className="space-y-3">
-              {Object.entries(adsByAngle).map(([angleId, ads]) => {
-                const angle = availableAngles.find((a) => a.id === angleId);
-                const approvedInAngle = ads.filter((a) => a.status === "approved").length;
+              {Object.entries(adsByAngle).map(([angleName, ads]) => {
+                const approvedInAngle = ads.filter((a) => a.status === "approved");
 
                 return (
                   <div
-                    key={angleId}
+                    key={angleName}
                     className="flex items-center gap-3 p-3 rounded-lg border border-white/[0.06] bg-white/[0.02]"
                   >
                     <FolderDown size={16} className="text-purple-400 flex-shrink-0" />
                     <div className="flex-1">
-                      <div className="text-xs text-white/70">{angle?.name || angleId}</div>
+                      <div className="text-xs text-white/70">{angleName}</div>
                       <div className="text-[10px] text-white/30 font-mono">
-                        {approvedInAngle} approved ads
+                        {approvedInAngle.length} approved ads
                       </div>
                     </div>
                     <div className="flex -space-x-2">
-                      {ads.filter((a) => a.status === "approved").slice(0, 4).map((ad, i) => (
+                      {approvedInAngle.slice(0, 4).map((ad, i) => (
                         <div
                           key={ad.id}
                           className="w-8 h-8 rounded border border-white/[0.1] overflow-hidden"
                           style={{ zIndex: 4 - i }}
                         >
-                          <img src={ad.image} alt="" className="w-full h-full object-cover" />
+                          {ad.imageUrl && <img src={ad.imageUrl} alt="" className="w-full h-full object-cover" />}
                         </div>
                       ))}
-                      {approvedInAngle > 4 && (
+                      {approvedInAngle.length > 4 && (
                         <div className="w-8 h-8 rounded border border-white/[0.1] bg-white/[0.04] flex items-center justify-center text-[9px] text-white/40 font-mono">
-                          +{approvedInAngle - 4}
+                          +{approvedInAngle.length - 4}
                         </div>
                       )}
                     </div>
@@ -831,9 +1375,58 @@ export default function MessageTestingAppPage() {
           </div>
 
           <button
-            onClick={() => {
-              setExported(true);
-              toast.success(`${approvedCount} ads exported and saved to brand assets`);
+            onClick={async () => {
+              const approvedAds = generatedAds.filter(
+                (a) => a.status === "approved" && a.imageUrl,
+              );
+              if (approvedAds.length === 0) {
+                toast.error("No approved ads to export");
+                return;
+              }
+              // Kick off downloads (staggered to avoid browser drops).
+              approvedAds.forEach((ad, i) => {
+                setTimeout(() => {
+                  const el = document.createElement("a");
+                  el.href = ad.imageUrl!;
+                  const safe = (ad.message || `ad-${ad.id}`).slice(0, 60).replace(/\s+/g, "-");
+                  el.download = `${safe}.jpg`;
+                  el.target = "_blank";
+                  el.rel = "noopener";
+                  document.body.appendChild(el);
+                  el.click();
+                  el.remove();
+                }, i * 350);
+              });
+              // Persist to Brand Assets.
+              if (!activeBrandId) {
+                toast.error("No active brand selected.");
+                return;
+              }
+              try {
+                await saveBrandAssets(
+                  activeBrandId,
+                  approvedAds.map((ad) => ({
+                    kind: "image" as const,
+                    url: ad.imageUrl!,
+                    title: ad.message?.slice(0, 120) || `Ad ${ad.id}`,
+                    sourceApp: "message_testing",
+                    productId: selectedProduct?.id ?? null,
+                    metadata: {
+                      angleName: ad.angleName,
+                      message: ad.message,
+                      template: REFERENCE_TEMPLATE.name,
+                    },
+                  })),
+                );
+                setExported(true);
+                toast.success(`${approvedAds.length} ads saved to Brand Assets`);
+              } catch (err) {
+                toast.error(
+                  `Downloaded locally but failed to save to Brand Assets: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                );
+              }
             }}
             className="w-full py-3.5 rounded-xl font-mono text-sm uppercase tracking-wider transition-all"
             style={{ background: "linear-gradient(135deg, #A855F7, #7C3AED)", color: "white" }}
@@ -847,10 +1440,8 @@ export default function MessageTestingAppPage() {
       );
     }
 
-    // Post-export: What's Next
     return (
       <div className="max-w-3xl mx-auto">
-        {/* Success */}
         <div className="text-center mb-10">
           <motion.div
             initial={{ scale: 0 }}
@@ -864,24 +1455,23 @@ export default function MessageTestingAppPage() {
             Export Complete
           </h2>
           <p className="text-xs text-white/40">
-            {approvedCount} ads downloaded and saved to your brand workspace assets.
+            {approvedCount} ads marked for export.
           </p>
         </div>
 
-        {/* Saved Summary */}
         <div className="rounded-xl border border-white/[0.08] p-5 mb-8" style={{ background: "#13161F" }}>
           <div className="flex items-center gap-2 mb-4">
             <FolderDown size={14} className="text-purple-400" />
-            <span className="text-xs font-mono text-white/50 uppercase tracking-widest">Saved to Assets</span>
+            <span className="text-xs font-mono text-white/50 uppercase tracking-widest">Approved Ads</span>
           </div>
 
           <div className="flex gap-2 overflow-x-auto pb-2">
             {generatedAds
-              .filter((a) => a.status === "approved")
+              .filter((a) => a.status === "approved" && a.imageUrl)
               .slice(0, 8)
               .map((ad) => (
                 <div key={ad.id} className="w-20 h-20 rounded-lg border border-white/[0.08] overflow-hidden flex-shrink-0">
-                  <img src={ad.image} alt="" className="w-full h-full object-cover" />
+                  <img src={ad.imageUrl} alt="" className="w-full h-full object-cover" />
                 </div>
               ))}
             {approvedCount > 8 && (
@@ -890,17 +1480,8 @@ export default function MessageTestingAppPage() {
               </div>
             )}
           </div>
-
-          <div className="mt-3 text-right">
-            <Link href="/workspace/assets">
-              <span className="text-[10px] font-mono text-purple-400 hover:text-purple-300 transition-colors cursor-pointer">
-                View in Assets →
-              </span>
-            </Link>
-          </div>
         </div>
 
-        {/* What's Next */}
         <div className="mb-6">
           <div className="flex items-center gap-2 mb-4">
             <div className="w-2 h-2 rounded-full bg-amber-400" style={{ boxShadow: "0 0 8px rgba(245,158,11,0.5)" }} />
@@ -911,11 +1492,13 @@ export default function MessageTestingAppPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <button
               onClick={() => {
-                setStep(2);
-                setSelectedTemplateId("");
+                setStep(3);
+                setTemplateFeedback("");
+                setTemplatePreviewUrl(null);
+                setTemplatePreviewError(null);
                 setGeneratedAds([]);
                 setExported(false);
-                toast("Choose a new template for the same angles");
+                toast("Adjust the template and regenerate");
               }}
               className="rounded-xl border border-white/[0.08] p-5 text-left hover:border-purple-500/30 hover:bg-purple-500/[0.02] transition-all group"
               style={{ background: "#13161F" }}
@@ -923,9 +1506,9 @@ export default function MessageTestingAppPage() {
               <div className="w-10 h-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center mb-3">
                 <RotateCcw size={18} className="text-purple-400" />
               </div>
-              <h4 className="text-sm font-semibold text-white/80 mb-1">Try a Different Template</h4>
+              <h4 className="text-sm font-semibold text-white/80 mb-1">Adjust Template</h4>
               <p className="text-[11px] text-white/35 leading-relaxed">
-                Keep the same product and angles but generate with a different template style.
+                Keep the same product and messages but regenerate with a different layout or feedback.
               </p>
               <span className="text-[10px] font-mono text-purple-400 mt-3 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
                 CHANGE TEMPLATE <ChevronRight size={10} />
@@ -935,9 +1518,12 @@ export default function MessageTestingAppPage() {
             <button
               onClick={() => {
                 setStep(1);
-                setSelectedAngles([]);
-                setSelectedTemplateId("");
+                setSelectedAngleNames([]);
+                setTemplateFeedback("");
+                setTemplatePreviewUrl(null);
+                setTemplatePreviewError(null);
                 setGeneratedAds([]);
+                setMessageGroups(null);
                 setExported(false);
                 toast("Select different angles for the same product");
               }}
@@ -949,7 +1535,7 @@ export default function MessageTestingAppPage() {
               </div>
               <h4 className="text-sm font-semibold text-white/80 mb-1">Different Angles</h4>
               <p className="text-[11px] text-white/35 leading-relaxed">
-                Go back and select different research angles to generate a new batch of message testing ads.
+                Go back and select different research angles to generate a new batch.
               </p>
               <span className="text-[10px] font-mono text-amber-400 mt-3 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
                 CHANGE ANGLES <ChevronRight size={10} />
@@ -990,7 +1576,6 @@ export default function MessageTestingAppPage() {
       {/* Step Indicator */}
       <div className="border-b border-white/[0.06] px-6 py-3 flex items-center gap-1 overflow-x-auto" style={{ background: "#0D0F12" }}>
         {STEPS.map((s, i) => {
-          const Icon = s.icon;
           const isActive = step === s.id;
           const isDone = step > s.id;
 
@@ -1027,6 +1612,7 @@ export default function MessageTestingAppPage() {
         {step === 2 && renderStep2()}
         {step === 3 && renderStep3()}
         {step === 4 && renderStep4()}
+        {step === 5 && renderStep5()}
       </div>
     </div>
   );

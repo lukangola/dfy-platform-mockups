@@ -9,8 +9,10 @@ import { Link, useLocation } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Package, Palette, LayoutGrid, ChevronLeft, ChevronRight,
-  Settings, HelpCircle, Sparkles, Box, FolderOpen, Zap,
+  Settings, HelpCircle, FolderOpen, Zap, LogOut, Crown, Shield,
 } from "lucide-react";
+import BrandSwitcher from "./BrandSwitcher";
+import { useAuth } from "@/contexts/AuthContext";
 
 interface WorkspaceLayoutProps {
   children: React.ReactNode;
@@ -27,8 +29,10 @@ const NAV_ITEMS = [
 export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
   const [location] = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const { user, role, logout } = useAuth();
 
   const isActive = (path: string) => location.startsWith(path);
+  const settingsActive = location.startsWith("/workspace/settings");
 
   return (
     <div
@@ -46,25 +50,8 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
         className="h-screen sticky top-0 border-r border-white/[0.06] flex flex-col shrink-0 overflow-hidden"
         style={{ background: "#0A0C0F" }}
       >
-        {/* Brand Header */}
-        <div className="h-14 border-b border-white/[0.06] flex items-center px-4 gap-3 shrink-0">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ background: "linear-gradient(135deg, #00D4FF 0%, #0099CC 100%)" }}>
-            <Sparkles size={16} className="text-[#0D0F12]" />
-          </div>
-          <AnimatePresence>
-            {!collapsed && (
-              <motion.div
-                initial={{ opacity: 0, width: 0 }}
-                animate={{ opacity: 1, width: "auto" }}
-                exit={{ opacity: 0, width: 0 }}
-                className="overflow-hidden whitespace-nowrap"
-              >
-                <div className="text-sm font-semibold text-white/90">Lumina Beauty</div>
-                <div className="text-[9px] font-mono text-white/30 uppercase tracking-wider">Workspace</div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
+        {/* Brand Header — click to switch brand or add new. */}
+        <BrandSwitcher collapsed={collapsed} />
 
         {/* Navigation */}
         <nav className="flex-1 p-2 space-y-1 overflow-y-auto">
@@ -117,6 +104,46 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
           })}
         </nav>
 
+        {/* User Profile Row — sits above System block. Single source of
+            truth for the signed-in user's identity in the workspace shell.
+            Click to navigate to Settings; the LogOut icon signs out. */}
+        {user && (
+          <div className="border-t border-white/[0.06] p-2">
+            {!collapsed ? (
+              <div className="flex items-center gap-2 px-2 py-2 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+                <div className="w-7 h-7 rounded-full bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-300 text-[11px] font-medium shrink-0">
+                  {user.name.slice(0, 1).toUpperCase()}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[11px] text-white/85 truncate leading-tight">{user.name}</div>
+                  <div className="text-[9px] font-mono text-white/40 flex items-center gap-1 mt-0.5">
+                    {role === "admin" ? <Crown size={9} className="text-amber-400" /> : <Shield size={9} />}
+                    <span className="uppercase tracking-wider">{role ?? "—"}</span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => void logout()}
+                  className="p-1.5 rounded text-white/30 hover:text-rose-400 hover:bg-rose-500/10 transition-all"
+                  title="Sign out"
+                >
+                  <LogOut size={12} />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => void logout()}
+                className="w-full flex items-center justify-center py-2 rounded-lg text-white/30 hover:text-rose-400 hover:bg-rose-500/10 transition-all group relative"
+                title="Sign out"
+              >
+                <LogOut size={13} />
+                <div className="absolute left-full ml-2 px-2 py-1 rounded bg-[#1A1D23] border border-white/[0.08] text-[10px] font-mono text-white/60 whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
+                  Sign out — {user.name}
+                </div>
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Bottom Section */}
         <div className="border-t border-white/[0.06] p-2 space-y-1">
           {!collapsed && (
@@ -124,15 +151,23 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
               System
             </div>
           )}
-          <button className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-xs text-white/30 hover:text-white/50 hover:bg-white/[0.03] transition-all group relative">
-            <Settings size={14} className="shrink-0" />
-            {!collapsed && <span className="font-mono tracking-wide">Settings</span>}
-            {collapsed && (
-              <div className="absolute left-full ml-2 px-2 py-1 rounded bg-[#1A1D23] border border-white/[0.08] text-[10px] font-mono text-white/60 whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
-                Settings
-              </div>
-            )}
-          </button>
+          <Link href="/workspace/settings">
+            <button
+              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-xs transition-all group relative ${
+                settingsActive
+                  ? "bg-cyan-500/10 text-cyan-400"
+                  : "text-white/30 hover:text-white/50 hover:bg-white/[0.03]"
+              }`}
+            >
+              <Settings size={14} className={`shrink-0 ${settingsActive ? "text-cyan-400" : ""}`} />
+              {!collapsed && <span className="font-mono tracking-wide">Settings</span>}
+              {collapsed && (
+                <div className="absolute left-full ml-2 px-2 py-1 rounded bg-[#1A1D23] border border-white/[0.08] text-[10px] font-mono text-white/60 whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
+                  Settings
+                </div>
+              )}
+            </button>
+          </Link>
           <button className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-xs text-white/30 hover:text-white/50 hover:bg-white/[0.03] transition-all group relative">
             <HelpCircle size={14} className="shrink-0" />
             {!collapsed && <span className="font-mono tracking-wide">Help</span>}

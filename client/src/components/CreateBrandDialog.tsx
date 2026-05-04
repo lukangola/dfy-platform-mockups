@@ -1,0 +1,383 @@
+/**
+ * New-brand creation form.
+ *
+ * Required inputs:
+ *   - Brand name
+ *   - Brand URL (drives brand_extract research)
+ *   - Either a product URL OR a pasted fact sheet (drives product_research)
+ *   - Mandatory clean front + back product images (uploaded to fal.storage
+ *     before we submit, so the server just stores the URLs).
+ *
+ * On submit the dialog hits POST /api/brands, which creates the brand + its
+ * first product and fires both research pipelines in parallel. We hand the
+ * fresh brand back to BrandContext which auto-switches the workspace to it.
+ */
+import { useRef, useState } from "react";
+import { AlertCircle, Image as ImageIcon, Loader2, Plus, Upload, X } from "lucide-react";
+import { useBrand } from "@/contexts/BrandContext";
+import { uploadProductImageRaw } from "@/lib/api";
+import { toast } from "sonner";
+
+type ImageSlot = {
+  dataUrl: string | null;
+  uploadedUrl: string | null;
+  uploading: boolean;
+  error: string | null;
+};
+
+function emptyImageSlot(): ImageSlot {
+  return { dataUrl: null, uploadedUrl: null, uploading: false, error: null };
+}
+
+type Props = {
+  open: boolean;
+  onClose: () => void;
+};
+
+export default function CreateBrandDialog({ open, onClose }: Props) {
+  const { createBrand } = useBrand();
+  const [brandUrl, setBrandUrl] = useState("");
+  const [productInputMode, setProductInputMode] = useState<"url" | "factSheet">("url");
+  const [productUrl, setProductUrl] = useState("");
+  const [factSheet, setFactSheet] = useState("");
+  const [productName, setProductName] = useState("");
+  const [front, setFront] = useState<ImageSlot>(emptyImageSlot());
+  const [back, setBack] = useState<ImageSlot>(emptyImageSlot());
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const frontRef = useRef<HTMLInputElement>(null);
+  const backRef = useRef<HTMLInputElement>(null);
+
+  if (!open) return null;
+
+  function resetAndClose() {
+    if (submitting) return;
+    setBrandUrl("");
+    setProductInputMode("url");
+    setProductUrl("");
+    setFactSheet("");
+    setProductName("");
+    setFront(emptyImageSlot());
+    setBack(emptyImageSlot());
+    setSubmitError(null);
+    onClose();
+  }
+
+  async function handleFile(
+    which: "front" | "back",
+    file: File | null,
+    update: (slot: ImageSlot) => void,
+  ) {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      update({ ...emptyImageSlot(), error: "Only image files are supported" });
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      update({ ...emptyImageSlot(), error: "Image exceeds 8MB limit" });
+      return;
+    }
+
+    const reader = new FileReader();
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    update({ dataUrl, uploadedUrl: null, uploading: true, error: null });
+
+    try {
+      const { url } = await uploadProductImageRaw(dataUrl, file.name);
+      update({ dataUrl, uploadedUrl: url, uploading: false, error: null });
+    } catch (err) {
+      update({
+        dataUrl,
+        uploadedUrl: null,
+        uploading: false,
+        error: err instanceof Error ? err.message : "Upload failed",
+      });
+    }
+  }
+
+  const canSubmit =
+    !submitting &&
+    brandUrl.trim() &&
+    (productInputMode === "url" ? productUrl.trim() : factSheet.trim()) &&
+    front.uploadedUrl &&
+    back.uploadedUrl &&
+    !front.uploading &&
+    !back.uploading;
+
+  async function handleSubmit() {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await createBrand({
+        brandUrl: brandUrl.trim(),
+        productUrl: productInputMode === "url" ? productUrl.trim() : undefined,
+        factSheet: productInputMode === "factSheet" ? factSheet.trim() : undefined,
+        productName: productName.trim() || undefined,
+        productImageUrl: front.uploadedUrl!,
+        productBackImageUrl: back.uploadedUrl!,
+      });
+      toast("Brand created — name & logo extracting in the background");
+      resetAndClose();
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) resetAndClose();
+      }}
+    >
+      <div
+        className="w-full max-w-2xl rounded-2xl border border-white/[0.08] overflow-hidden max-h-[90vh] flex flex-col"
+        style={{ background: "#0F1218" }}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-white/[0.06]">
+          <div>
+            <h2 className="text-sm font-semibold text-white/90 flex items-center gap-2">
+              <Plus size={16} className="text-cyan-400" />
+              Add new brand
+            </h2>
+            <p className="text-xs text-white/40 font-mono mt-1">
+              Brand info + first product, researched automatically
+            </p>
+          </div>
+          <button
+            onClick={resetAndClose}
+            disabled={submitting}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-white/40 hover:text-white/80 hover:bg-white/[0.06] transition disabled:opacity-30"
+          >
+            <X size={14} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+          {/* Brand fields */}
+          <section className="space-y-3">
+            <label className="block">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-white/40">Brand URL</span>
+              <input
+                value={brandUrl}
+                onChange={(e) => setBrandUrl(e.target.value)}
+                placeholder="https://acmeskincare.com"
+                className="mt-1.5 w-full px-3 py-2 rounded-lg border border-white/[0.08] bg-[#13161F] text-sm text-white/90 placeholder:text-white/20 focus:outline-none focus:border-cyan-500/40"
+              />
+              <span className="text-[10px] text-white/30 mt-1 block">
+                Brand name, logo, tone, colors, and fonts are auto-extracted from this URL.
+              </span>
+            </label>
+          </section>
+
+          {/* Product input — URL vs fact sheet toggle */}
+          <section className="space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-white/40">First product</span>
+              <div className="flex-1 h-px bg-white/[0.06]" />
+            </div>
+
+            <div className="inline-flex rounded-lg border border-white/[0.08] p-0.5 bg-[#0A0C0F]">
+              <button
+                onClick={() => setProductInputMode("url")}
+                className={`px-3 py-1.5 rounded-md text-xs font-mono transition ${
+                  productInputMode === "url"
+                    ? "bg-cyan-500/15 text-cyan-300"
+                    : "text-white/40 hover:text-white/70"
+                }`}
+              >
+                Product URL
+              </button>
+              <button
+                onClick={() => setProductInputMode("factSheet")}
+                className={`px-3 py-1.5 rounded-md text-xs font-mono transition ${
+                  productInputMode === "factSheet"
+                    ? "bg-cyan-500/15 text-cyan-300"
+                    : "text-white/40 hover:text-white/70"
+                }`}
+              >
+                Fact sheet
+              </button>
+            </div>
+
+            {productInputMode === "url" ? (
+              <input
+                value={productUrl}
+                onChange={(e) => setProductUrl(e.target.value)}
+                placeholder="https://acmeskincare.com/products/glow-serum"
+                className="w-full px-3 py-2 rounded-lg border border-white/[0.08] bg-[#13161F] text-sm text-white/90 placeholder:text-white/20 focus:outline-none focus:border-cyan-500/40"
+              />
+            ) : (
+              <textarea
+                value={factSheet}
+                onChange={(e) => setFactSheet(e.target.value)}
+                placeholder={`Paste product details here:\n• Name, category\n• Ingredients / contents\n• Claims, benefits, mechanism\n• Target customer, pricing`}
+                rows={8}
+                className="w-full px-3 py-2 rounded-lg border border-white/[0.08] bg-[#13161F] text-sm text-white/90 placeholder:text-white/20 focus:outline-none focus:border-cyan-500/40 font-mono resize-none"
+              />
+            )}
+
+            <label className="block">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-white/40">
+                Product name <span className="text-white/25 normal-case">(optional — auto-detected otherwise)</span>
+              </span>
+              <input
+                value={productName}
+                onChange={(e) => setProductName(e.target.value)}
+                placeholder="e.g. Glow Serum"
+                className="mt-1.5 w-full px-3 py-2 rounded-lg border border-white/[0.08] bg-[#13161F] text-sm text-white/90 placeholder:text-white/20 focus:outline-none focus:border-cyan-500/40"
+              />
+            </label>
+          </section>
+
+          {/* Mandatory front + back images */}
+          <section className="space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-white/40">
+                Clean product shots <span className="text-amber-400">— required</span>
+              </span>
+              <div className="flex-1 h-px bg-white/[0.06]" />
+            </div>
+            <p className="text-[11px] text-white/40 leading-relaxed">
+              Upload a clean front and back shot of the product on a plain background. These become the
+              canonical references for every downstream image/video generator.
+            </p>
+
+            <div className="grid grid-cols-2 gap-3">
+              <ImageUploadSlot
+                label="Front"
+                slot={front}
+                fileInputRef={frontRef}
+                onChange={(file) =>
+                  handleFile("front", file, (slot) => setFront(slot))
+                }
+                onClear={() => setFront(emptyImageSlot())}
+              />
+              <ImageUploadSlot
+                label="Back"
+                slot={back}
+                fileInputRef={backRef}
+                onChange={(file) =>
+                  handleFile("back", file, (slot) => setBack(slot))
+                }
+                onClear={() => setBack(emptyImageSlot())}
+              />
+            </div>
+          </section>
+
+          {submitError && (
+            <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
+              <AlertCircle size={14} className="shrink-0 mt-0.5" />
+              <span>{submitError}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-white/[0.06] bg-[#0A0C0F]">
+          <button
+            onClick={resetAndClose}
+            disabled={submitting}
+            className="px-3 py-2 rounded-lg text-xs font-mono text-white/50 hover:text-white/80 hover:bg-white/[0.04] transition disabled:opacity-30"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={!canSubmit}
+            className="px-4 py-2 rounded-lg text-xs font-mono text-[#0D0F12] font-semibold transition disabled:opacity-30 disabled:cursor-not-allowed"
+            style={{ background: "linear-gradient(135deg, #00D4FF 0%, #0099CC 100%)" }}
+          >
+            {submitting ? (
+              <span className="flex items-center gap-2">
+                <Loader2 size={12} className="animate-spin" />
+                Creating brand…
+              </span>
+            ) : (
+              "Create brand"
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImageUploadSlot({
+  label,
+  slot,
+  fileInputRef,
+  onChange,
+  onClear,
+}: {
+  label: string;
+  slot: ImageSlot;
+  fileInputRef: React.RefObject<HTMLInputElement | null>;
+  onChange: (file: File | null) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] font-mono uppercase tracking-wider text-white/40">{label}</span>
+        {slot.dataUrl && (
+          <button
+            onClick={onClear}
+            className="text-[10px] font-mono text-white/30 hover:text-red-400 transition"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+      <div
+        onClick={() => fileInputRef.current?.click()}
+        className="aspect-square rounded-lg border border-dashed border-white/[0.12] hover:border-cyan-500/40 bg-[#0A0C0F] flex items-center justify-center cursor-pointer transition overflow-hidden relative"
+      >
+        {slot.dataUrl ? (
+          <>
+            <img src={slot.dataUrl} alt={label} className="w-full h-full object-contain" />
+            {slot.uploading && (
+              <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+                <Loader2 size={18} className="animate-spin text-cyan-300" />
+              </div>
+            )}
+            {slot.uploadedUrl && !slot.uploading && (
+              <div className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-[9px] font-mono text-emerald-300">
+                Uploaded
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="flex flex-col items-center gap-1.5 text-white/25">
+            <ImageIcon size={20} />
+            <div className="flex items-center gap-1 text-[10px] font-mono">
+              <Upload size={10} />
+              Click to upload
+            </div>
+          </div>
+        )}
+      </div>
+      {slot.error && (
+        <div className="text-[10px] text-red-400 font-mono">{slot.error}</div>
+      )}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => onChange(e.target.files?.[0] ?? null)}
+      />
+    </div>
+  );
+}
