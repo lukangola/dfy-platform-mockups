@@ -2,6 +2,9 @@ import express from "express";
 import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
+import pg from "pg";
 import { env, isDev } from "./lib/env.js";
 import { eq, inArray } from "drizzle-orm";
 import { db, schema } from "./lib/db.js";
@@ -26,7 +29,42 @@ import { uploadsRouter } from "./routes/uploads.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/**
+ * In production, run drizzle migrations before opening the listener.
+ *
+ * Railway / Fly / Render rebuild the container on every deploy. By running
+ * migrations here we get a clean "schema-up-to-date guarantee" on every
+ * boot — no separate deploy hook to forget about, and no race where
+ * /api/auth/register is called before the `users` table exists. The pool
+ * is fresh each call, isolated from the runtime pool that the request
+ * handlers use, so a migration mid-flight can't deadlock against an
+ * existing connection.
+ *
+ * Skipped in dev — `pnpm db:migrate` is the explicit dev command and we
+ * don't want every `pnpm dev` save-and-restart to hammer the dev DB with
+ * idempotent ALTER TABLE statements.
+ */
+async function runMigrationsOnBoot() {
+  // process.cwd() = repo root in both dev and prod (pnpm runs from project
+  // root). Avoiding __dirname so the path works whether the entry is
+  // `server/index.ts` (dev) or the bundled `dist/index.js` (prod).
+  const migrationsFolder = path.resolve(process.cwd(), "drizzle");
+  const pool = new pg.Pool({ connectionString: env.DATABASE_URL });
+  try {
+    const migrationDb = drizzle(pool);
+    console.log(`[boot] applying drizzle migrations from ${migrationsFolder}`);
+    await migrate(migrationDb, { migrationsFolder });
+    console.log(`[boot] migrations complete`);
+  } finally {
+    await pool.end();
+  }
+}
+
 async function startServer() {
+  if (!isDev) {
+    await runMigrationsOnBoot();
+  }
+
   const app = express();
   const server = createServer(app);
 

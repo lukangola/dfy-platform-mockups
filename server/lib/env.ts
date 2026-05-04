@@ -5,9 +5,21 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Explicitly load .env.local and OVERRIDE shell-inherited vars.
-// Node's --env-file refuses to override existing env — and some shells pre-set
-// empty ANTHROPIC_API_KEY etc. — so we parse the file ourselves.
+// Explicitly load .env.local. We parse the file ourselves (instead of relying
+// on Node's `--env-file`) so we can fill in vars that the shell pre-set as
+// empty strings — some shell setups inject an empty `ANTHROPIC_API_KEY` etc.
+// that would otherwise look "set" to consumers.
+//
+// **Existing non-empty env vars take precedence**, which matters in two
+// places the previous "always override" logic was breaking:
+//   1. Production hosts (Railway, Fly, etc.) populate env vars through
+//      their dashboard, not a checked-in file. `.env.local` doesn't exist
+//      in production, so this is belt-and-braces — but the principle stays
+//      right: the host is the source of truth, the file is a fallback.
+//   2. One-off CLI runs like `DATABASE_URL=... pnpm db:migrate` — pointing
+//      a migration at a DIFFERENT database than the dev one, without
+//      editing `.env.local`. Previously the file was silently winning and
+//      the migration appeared to no-op against the wrong target.
 function loadEnvFile() {
   const envPath = path.resolve(__dirname, "..", "..", ".env.local");
   if (!fs.existsSync(envPath)) return;
@@ -23,7 +35,11 @@ function loadEnvFile() {
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
-    process.env[key] = value;
+    // Only fill in if the existing value is missing or empty — lets an
+    // inline shell override (or the production host's injected env) win.
+    if (!process.env[key]) {
+      process.env[key] = value;
+    }
   }
 }
 
@@ -41,7 +57,10 @@ export const env = {
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "",
   FAL_KEY: process.env.FAL_KEY ?? "",
   DATABASE_URL: process.env.DATABASE_URL!,
-  API_PORT: Number(process.env.API_PORT ?? 3001),
+  // Railway / Fly / Render / Heroku all inject `PORT`. Our existing dev
+  // setup uses `API_PORT=3001`. Honor `PORT` first so the production host
+  // controls binding, fall back to API_PORT for dev, then default 3001.
+  API_PORT: Number(process.env.PORT ?? process.env.API_PORT ?? 3001),
   NODE_ENV: process.env.NODE_ENV ?? "development",
 };
 
