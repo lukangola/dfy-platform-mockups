@@ -1,0 +1,43 @@
+{
+  "referenceImageUrl": "https://v3b.fal.media/files/b/0a96c2c0/jMUg9ZgaA43nLi7jItkLx_editorial-quote-reference.png",
+  "style": {
+    "layout": "Oversized testimonial quote dominates upper two-thirds, left-aligned; product bottle placed bottom-right overlapping; dark rounded pill-shaped badge with '#1' and supporting claim anchored bottom-left",
+    "aspect_ratio": "1:1",
+    "background": {
+      "description": "Soft cream off-white flat background",
+      "primary_color_hex": "#F4F1DF",
+      "secondary_color_hex": null,
+      "texture": "smooth"
+    },
+    "typography": {
+      "headline": {
+        "font_family_style": "high-contrast editorial serif with distinctive ligatures",
+        "weight": "regular",
+        "style": "roman, sentence case, wrapped in curly quotation marks",
+        "color_hex": "#0B0B0B",
+        "alignment": "left",
+        "size_emphasis": "oversized"
+      },
+      "supporting_text": "Bold geometric sans-serif claim in a dark olive-green rounded pill badge, with a large white '#1' on the left side and a two-line black claim on the right"
+    },
+    "product_placement": {
+      "position": "lower right",
+      "scale": "balanced",
+      "lighting": "soft studio",
+      "shadow": "subtle soft drop shadow to the lower-left"
+    },
+    "color_palette_hex": [
+      "#F4F1DF",
+      "#0B0B0B",
+      "#4E5B2E",
+      "#FFFFFF",
+      "#D59A58"
+    ],
+    "mood": "editorial direct-response, warm and confident",
+    "brand_voice": "direct-response wellness with editorial quiet-luxury styling",
+    "direct_response_tone": true,
+    "no_text_except_quote": false
+  },
+  "sourceHash": "595029:1776524089980.675",
+  "extractedAt": "2026-04-18T14:56:24.114Z"
+}

@@ -199,3 +199,236 @@ html {
 .animate-neon-pulse {
   animation: neon-pulse 2s ease-in-out infinite;
 }
+
+/* Markdown report styling (Streamdown output) on dark theme */
+.prose-report {
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 14px;
+  line-height: 1.75;
+}
+.prose-report h1 {
+  font-size: 1.75rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.95);
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+  letter-spacing: -0.01em;
+}
+.prose-report h1:first-child { margin-top: 0; }
+.prose-report h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: rgba(0, 212, 255, 0.95);
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding-bottom: 0.5rem;
+}
+.prose-report h3 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+.prose-report h4 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.8);
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+}
+.prose-report p {
+  margin-bottom: 1rem;
+}
+.prose-report strong {
+  color: rgba(255, 255, 255, 0.95);
+  font-weight: 600;
+}
+.prose-report em {
+  color: rgba(255, 255, 255, 0.65);
+}
+.prose-report ul, .prose-report ol {
+  margin-bottom: 1rem;
+  padding-left: 1.5rem;
+}
+.prose-report ul { list-style: disc; }
+.prose-report ol { list-style: decimal; }
+.prose-report li {
+  margin-bottom: 0.4rem;
+}
+.prose-report li::marker {
+  color: rgba(0, 212, 255, 0.5);
+}
+.prose-report blockquote {
+  border-left: 2px solid rgba(0, 212, 255, 0.4);
+  padding-left: 1rem;
+  color: rgba(255, 255, 255, 0.6);
+  margin: 1rem 0;
+  font-style: italic;
+}
+.prose-report hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin: 2rem 0;
+}
+.prose-report code {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: rgba(0, 212, 255, 0.9);
+}
+.prose-report pre {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+  margin: 1rem 0;
+}
+.prose-report pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.85);
+}
+.prose-report a {
+  color: rgb(0, 212, 255);
+  text-decoration: underline;
+  text-decoration-color: rgba(0, 212, 255, 0.3);
+  text-underline-offset: 2px;
+}
+.prose-report a:hover {
+  text-decoration-color: rgba(0, 212, 255, 0.8);
+}
+.prose-report table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.9em;
+}
+.prose-report th, .prose-report td {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.prose-report th {
+  background: rgba(255, 255, 255, 0.03);
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+/* Markdown rendering for the Copy Engine output (rose accent, ad-copy feel). */
+.prose-copy {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 14px;
+  line-height: 1.7;
+  font-family: var(--font-sans);
+}
+.prose-copy h1 {
+  font-size: 1.85rem;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.97);
+  margin-top: 1.75rem;
+  margin-bottom: 1rem;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+}
+.prose-copy h1:first-child { margin-top: 0; }
+.prose-copy h2 {
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.95);
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+  letter-spacing: -0.01em;
+}
+.prose-copy h3 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.95);
+  margin-top: 1.75rem;
+  margin-bottom: 0.4rem;
+  letter-spacing: -0.005em;
+}
+.prose-copy h3 + p {
+  /* Italic flavor / quoted-reaction line right under a section headline. */
+  margin-top: 0.1rem;
+}
+.prose-copy h4 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+  margin-top: 1.25rem;
+  margin-bottom: 0.4rem;
+}
+.prose-copy p {
+  margin-bottom: 0.9rem;
+}
+.prose-copy strong {
+  color: rgba(255, 255, 255, 0.97);
+  font-weight: 700;
+}
+.prose-copy em {
+  color: rgba(255, 255, 255, 0.65);
+}
+.prose-copy a {
+  color: rgb(244, 63, 94);
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-color: rgba(244, 63, 94, 0.45);
+  text-underline-offset: 2.5px;
+}
+.prose-copy a:hover {
+  text-decoration-color: rgba(244, 63, 94, 0.9);
+}
+.prose-copy ul, .prose-copy ol {
+  margin-bottom: 1rem;
+  padding-left: 1.4rem;
+}
+.prose-copy ul { list-style: disc; }
+.prose-copy ol { list-style: decimal; }
+.prose-copy li {
+  margin-bottom: 0.35rem;
+}
+.prose-copy li::marker {
+  color: rgba(244, 63, 94, 0.7);
+}
+.prose-copy blockquote {
+  border-left: 2px solid rgba(244, 63, 94, 0.45);
+  padding-left: 1rem;
+  color: rgba(255, 255, 255, 0.65);
+  margin: 1rem 0;
+  font-style: italic;
+}
+.prose-copy hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin: 1.75rem 0;
+}
+.prose-copy code {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: rgba(244, 63, 94, 0.9);
+}
+.prose-copy pre {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+  margin: 1rem 0;
+}
+.prose-copy pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.85);
+}

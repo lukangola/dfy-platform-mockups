@@ -130,8 +130,7 @@ export interface BrandInfo {
   colorPalette: { name: string; hex: string; usage: string }[];
   fonts: { name: string; usage: string; weight: string }[];
   tone: string;
-  tagline: string;
-  logoUrl?: string;
+  logoUrl: string | null;
 }
 
 export interface WorkspaceApp {
@@ -161,7 +160,7 @@ export const MOCK_BRAND: BrandInfo = {
     { name: "DM Mono", usage: "Product codes, technical details", weight: "400" },
   ],
   tone: "Sophisticated yet approachable. Uses scientific language sparingly to build trust without alienating. Warm, confident, and empowering.",
-  tagline: "Radiance, Refined.",
+  logoUrl: null,
 };
 
 export const MOCK_PRODUCTS: Product[] = [
@@ -561,6 +560,24 @@ export const WORKSPACE_APPS: WorkspaceApp[] = [
     color: "#00D4FF",
   },
   {
+    id: "character-broll",
+    name: "Character B-Roll",
+    description: "Generate UGC-style B-roll with a real character. Start from an angle or paste a script, upload a character image, render shots + videos with identity preserved.",
+    icon: "User",
+    status: "active",
+    route: "/workspace/apps/character-broll",
+    color: "#F472B6",
+  },
+  {
+    id: "single-scene",
+    name: "Single Scene Generator",
+    description: "Direct entry — pick a character, optionally a product, write one scene per line, and render images + videos. Same Nano-Banana-Pro + Kling pipeline as Character B-Roll, no shot-list architect.",
+    icon: "Wand2",
+    status: "active",
+    route: "/workspace/apps/single-scene",
+    color: "#A78BFA",
+  },
+  {
     id: "static-ads",
     name: "Static Ads Recreator",
     description: "Recreate and adapt static ad references with your product and brand. Select from a library or upload your own references.",
@@ -568,6 +585,15 @@ export const WORKSPACE_APPS: WorkspaceApp[] = [
     status: "active",
     route: "/workspace/apps/static-ads",
     color: "#F59E0B",
+  },
+  {
+    id: "static-ads-iterations",
+    name: "Static Ads Iterations",
+    description: "Turn a winning static ad into headline variations. Generate ten alternate hooks, pick the strongest, and render new ads with the same look.",
+    icon: "Copy",
+    status: "active",
+    route: "/workspace/apps/static-ads-iterations",
+    color: "#EC4899",
   },
   {
     id: "message-testing",
@@ -599,9 +625,9 @@ export const WORKSPACE_APPS: WorkspaceApp[] = [
   {
     id: "copy-engine",
     name: "Copy Engine",
-    description: "Generate product descriptions, email sequences, and landing page copy aligned with your brand voice.",
+    description: "Generate listicle-style advertorial copy aligned with your brand voice and a chosen strategic angle. More copy types coming.",
     icon: "Type",
-    status: "beta",
+    status: "active",
     route: "/workspace/apps/copy-engine",
     color: "#F43F5E",
   },

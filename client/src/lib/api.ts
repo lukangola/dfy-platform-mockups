@@ -1,0 +1,960 @@
+export type ApiError = {
+  error: string;
+  action?: string;
+  kind?: string;
+  // Present on /api/static-ads/recreate failures so the UI can render a
+  // specific explanation and decide whether retry is worth offering.
+  errorCode?: string;
+  retryable?: boolean;
+  rawError?: string;
+};
+
+/**
+ * Error thrown by post() on non-OK responses. Carries the structured fields
+ * from the server payload so callers can branch on them without re-parsing.
+ */
+export class ApiCallError extends Error {
+  errorCode?: string;
+  retryable?: boolean;
+  rawError?: string;
+  status: number;
+  constructor(status: number, payload: ApiError) {
+    super(payload.error || `Request failed: ${status}`);
+    this.name = "ApiCallError";
+    this.status = status;
+    this.errorCode = payload.errorCode;
+    this.retryable = payload.retryable;
+    this.rawError = payload.rawError;
+  }
+}
+
+export type TextGenResponse = {
+  id: string | null;
+  action: string;
+  promptVersion: string;
+  model: string;
+  text: string;
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number;
+  durationMs: number;
+};
+
+export type MediaGenResponse = {
+  id: string | null;
+  action: string;
+  model: string;
+  urls: string[];
+  durationMs: number;
+};
+
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  const payload = (await res.json().catch(() => ({}))) as T | ApiError;
+  if (!res.ok) {
+    throw new ApiCallError(res.status, payload as ApiError);
+  }
+  return payload as T;
+}
+
+export function generateText(
+  action: string,
+  vars: Record<string, unknown> = {},
+  opts: { model?: string; maxTokens?: number } = {},
+): Promise<TextGenResponse> {
+  return post<TextGenResponse>(`/api/generate/text/${action}`, { vars, ...opts });
+}
+
+export function generateImage(
+  action: string,
+  args: { vars?: Record<string, unknown>; model?: string; input?: Record<string, unknown> } = {},
+): Promise<MediaGenResponse> {
+  return post<MediaGenResponse>(`/api/generate/image/${action}`, args);
+}
+
+export function generateVideo(
+  action: string,
+  args: { vars?: Record<string, unknown>; model?: string; input?: Record<string, unknown> } = {},
+): Promise<MediaGenResponse> {
+  return post<MediaGenResponse>(`/api/generate/video/${action}`, args);
+}
+
+// ---------- Brands ----------
+
+export type BrandResearch = {
+  name?: string;
+  websiteUrl?: string;
+  logoUrl?: string | null;
+  description?: string;
+  tone?: string;
+  colorPalette?: Array<{ name: string; hex: string; usage: string }>;
+  fonts?: Array<{ name: string; usage: string; weight: string }>;
+  // Anything else the model returned.
+  [key: string]: unknown;
+};
+
+export type Brand = {
+  id: string;
+  createdAt: string;
+  name: string;
+  brandUrl: string | null;
+  logoUrl: string | null;
+  research: BrandResearch | null;
+  researchStatus: "pending" | "researching" | "complete" | "failed";
+  researchError: string | null;
+};
+
+async function get<T>(path: string): Promise<T> {
+  const res = await fetch(path);
+  const payload = (await res.json().catch(() => ({}))) as T | ApiError;
+  if (!res.ok) {
+    const msg = (payload as ApiError)?.error ?? `Request failed: ${res.status}`;
+    throw new Error(msg);
+  }
+  return payload as T;
+}
+
+async function del<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: "DELETE",
+    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const payload = (await res.json().catch(() => ({}))) as T | ApiError;
+  if (!res.ok) {
+    throw new ApiCallError(res.status, payload as ApiError);
+  }
+  return payload as T;
+}
+
+export function listBrands(): Promise<{ brands: Brand[] }> {
+  return get<{ brands: Brand[] }>("/api/brands");
+}
+
+export function getBrand(id: string): Promise<{ brand: Brand }> {
+  return get<{ brand: Brand }>(`/api/brands/${id}`);
+}
+
+export function createBrand(args: {
+  brandUrl: string;
+  productUrl?: string;
+  factSheet?: string;
+  productName?: string;
+  productImageUrl: string;
+  productBackImageUrl: string;
+}): Promise<{ brand: Brand; product: Product }> {
+  return post<{ brand: Brand; product: Product }>("/api/brands", args);
+}
+
+export async function patchBrand(
+  id: string,
+  patch: { name?: string; brandUrl?: string | null; logoUrl?: string | null; research?: BrandResearch },
+): Promise<{ brand: Brand }> {
+  const res = await fetch(`/api/brands/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const payload = (await res.json().catch(() => ({}))) as { brand: Brand } | ApiError;
+  if (!res.ok) throw new Error((payload as ApiError)?.error ?? `Request failed: ${res.status}`);
+  return payload as { brand: Brand };
+}
+
+export function retriggerBrandResearch(id: string): Promise<{ ok: true }> {
+  return post<{ ok: true }>(`/api/brands/${id}/research`, {});
+}
+
+export function uploadProductImageRaw(
+  dataUrl: string,
+  filename?: string,
+): Promise<{ url: string }> {
+  return post<{ url: string }>("/api/uploads/product-image", { dataUrl, filename });
+}
+
+// ---------- Products ----------
+
+export type ProductAngle = { name: string; block: string };
+
+export type ProductImageCandidate = {
+  url: string;
+  width: number | null;
+  height: number | null;
+  source: string;
+  score: number;
+};
+
+export type ProductMechanismEntry = {
+  product_id: string;
+  physical_description: string;
+  container_material: string;
+  opening: string;
+  dispensing: string;
+  closing: string;
+  content_color: string;
+  viscosity: string;
+};
+
+export type SubJobStatus = "running" | "complete" | "failed";
+
+export type ProductResearchPayload = {
+  markdown?: string;
+  angles?: ProductAngle[];
+  imageCandidates?: ProductImageCandidate[];
+  mechanism?: ProductMechanismEntry[];
+  mechanismStatus?: SubJobStatus;
+  mechanismError?: string | null;
+  mechanismGeneratedAt?: string;
+  mechanismEditedAt?: string;
+  referenceSheetUrl?: string;
+  referenceSheetStatus?: SubJobStatus;
+  referenceSheetError?: string | null;
+  referenceSheetGeneratedAt?: string;
+  model?: string;
+  promptVersion?: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  costUsd?: number;
+  durationMs?: number;
+  completedAt?: string;
+};
+
+export type Product = {
+  id: string;
+  createdAt: string;
+  brandId: string;
+  name: string;
+  category: string;
+  productUrl: string | null;
+  factSheet: string | null;
+  productImageUrl: string | null;
+  productBackImageUrl: string | null;
+  contentImageUrl: string | null;
+  research: ProductResearchPayload | null;
+  researchStatus: "pending" | "researching" | "complete" | "failed";
+  researchError: string | null;
+};
+
+export function listProducts(brandId: string): Promise<{ products: Product[] }> {
+  return get<{ products: Product[] }>(`/api/products?brandId=${encodeURIComponent(brandId)}`);
+}
+
+export function getProduct(id: string): Promise<{ product: Product }> {
+  return get<{ product: Product }>(`/api/products/${id}`);
+}
+
+export function createProduct(args: {
+  brandId: string;
+  productUrl?: string;
+  factSheet?: string;
+  name?: string;
+  category?: string;
+  productImageUrl?: string;
+  productBackImageUrl?: string;
+  contentImageUrl?: string;
+}): Promise<{ product: Product }> {
+  return post<{ product: Product }>("/api/products", args);
+}
+
+export function retriggerResearch(id: string): Promise<{ ok: true }> {
+  return post<{ ok: true }>(`/api/products/${id}/research`, {});
+}
+
+export async function deleteProduct(id: string): Promise<{ ok: true; id: string }> {
+  const res = await fetch(`/api/products/${id}`, { method: "DELETE" });
+  const payload = (await res.json().catch(() => ({}))) as { ok: true; id: string } | ApiError;
+  if (!res.ok) {
+    const msg = (payload as ApiError)?.error ?? `Request failed: ${res.status}`;
+    throw new Error(msg);
+  }
+  return payload as { ok: true; id: string };
+}
+
+export function getProductAngles(id: string): Promise<{ angles: ProductAngle[]; cached: boolean }> {
+  return get<{ angles: ProductAngle[]; cached: boolean }>(`/api/products/${id}/angles`);
+}
+
+/**
+ * Elaborates a user-supplied strategic angle description into a full angle
+ * block and appends it to the product's research.angles array. The server
+ * runs the angle_elaborate master prompt for this single angle only — the
+ * existing angles and research markdown are left untouched.
+ */
+export function addProductAngle(
+  productId: string,
+  description: string,
+): Promise<{ angle: ProductAngle; angles: ProductAngle[] }> {
+  return post<{ angle: ProductAngle; angles: ProductAngle[] }>(
+    `/api/products/${productId}/angles`,
+    { description },
+  );
+}
+
+export function uploadProductImage(
+  id: string,
+  dataUrl: string,
+  filename?: string,
+): Promise<{ url: string; candidate: ProductImageCandidate; imageCandidates: ProductImageCandidate[] }> {
+  return post(`/api/products/${id}/upload-image`, { dataUrl, filename });
+}
+
+export function setProductMainImage(id: string, url: string): Promise<{ ok: true; productImageUrl: string }> {
+  return post(`/api/products/${id}/main-image`, { url });
+}
+
+export function addProductImageCandidate(
+  id: string,
+  url: string,
+): Promise<{ ok: true; candidate?: ProductImageCandidate; imageCandidates: ProductImageCandidate[] }> {
+  return post(`/api/products/${id}/image-candidate`, { url });
+}
+
+export function deleteProductImageCandidate(
+  id: string,
+  url: string,
+): Promise<{ ok: true; imageCandidates: ProductImageCandidate[]; productImageUrl: string | null }> {
+  return del(`/api/products/${id}/image-candidate`, { url });
+}
+
+export type ReferenceStyleResponse =
+  | { missing: true; message: string }
+  | {
+      missing?: undefined;
+      referenceImageUrl: string;
+      style: Record<string, unknown>;
+      cached: boolean;
+      extractedAt: string;
+    };
+
+export async function getReferenceStyle(): Promise<ReferenceStyleResponse> {
+  const res = await fetch("/api/message-testing/reference-style");
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(payload?.error ?? `Request failed: ${res.status}`);
+  return payload as ReferenceStyleResponse;
+}
+
+export type ProductMechanism = {
+  product_id: string;
+  physical_description: string;
+  container_material: string;
+  opening: string;
+  dispensing: string;
+  closing: string;
+  content_color: string;
+  viscosity: string;
+};
+
+export function getProductMechanism(id: string): Promise<{ mechanism: ProductMechanism[]; cached: boolean }> {
+  return get<{ mechanism: ProductMechanism[]; cached: boolean }>(`/api/products/${id}/mechanism`);
+}
+
+export function generateReferenceSheet(
+  id: string,
+  opts: { feedback?: string } = {},
+): Promise<{ ok: true }> {
+  // When feedback is provided, the server uses the existing reference sheet
+  // as the edit base (nano-banana-pro/edit) and applies the feedback as a
+  // targeted change rather than regenerating from scratch.
+  const body: { feedback?: string } = {};
+  if (opts.feedback && opts.feedback.trim()) body.feedback = opts.feedback.trim();
+  return post<{ ok: true }>(`/api/products/${id}/reference-sheet`, body);
+}
+
+/**
+ * Save a user-edited mechanism array. The server validates the shape and
+ * writes it to research.mechanism — mechanismStatus stays "complete" and
+ * the downstream B-roll / image pipelines will read the edited values on
+ * the next run.
+ */
+export async function updateProductMechanism(
+  id: string,
+  mechanism: ProductMechanism[],
+): Promise<{ ok: true; mechanism: ProductMechanism[] }> {
+  const res = await fetch(`/api/products/${id}/mechanism`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mechanism }),
+  });
+  const payload = (await res.json().catch(() => ({}))) as
+    | { ok: true; mechanism: ProductMechanism[] }
+    | ApiError;
+  if (!res.ok) throw new ApiCallError(res.status, payload as ApiError);
+  return payload as { ok: true; mechanism: ProductMechanism[] };
+}
+
+// ---------- B-Roll ----------
+
+export type BrollShot = {
+  id: number;
+  shot_type: "Unboxing" | "Product Presentation" | "Product Usage" | "Proof / Results";
+  action: string;
+  location: string;
+  visual_example: string;
+};
+
+export type BrollShotList = {
+  project: string;
+  location_default: string;
+  shots: BrollShot[];
+};
+
+export async function generateBrollShots(args: {
+  product: string;
+  research: string;
+  assetLimits?: string;
+}): Promise<{ shots: BrollShotList; meta: TextGenResponse }> {
+  const meta = await generateText("broll_shots_generate", {
+    product: args.product,
+    research: args.research,
+    assetLimits: args.assetLimits ?? "",
+  });
+  let parsed: BrollShotList;
+  try {
+    parsed = JSON.parse(meta.text);
+  } catch {
+    const m = meta.text.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error("Shot list generator did not return valid JSON");
+    parsed = JSON.parse(m[0]);
+  }
+  return { shots: parsed, meta };
+}
+
+/**
+ * Splits a paragraph-style response (image or video prompt writer) on lines
+ * containing only `*`. Trims each paragraph. Filters empties.
+ */
+function splitStarredParagraphs(text: string): string[] {
+  return text
+    .split(/^\s*\*+\s*$/m)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+}
+
+export async function generateBrollImagePrompts(args: {
+  product: string;
+  mechanism: unknown;
+  avatar?: string;
+  shots: BrollShot[];
+}): Promise<{ prompts: string[]; meta: TextGenResponse }> {
+  const meta = await generateText("broll_image_prompts", {
+    product: args.product,
+    avatar: args.avatar ?? "",
+    mechanism: JSON.stringify(args.mechanism ?? [], null, 2),
+    shots: JSON.stringify(args.shots, null, 2),
+  });
+  const prompts = splitStarredParagraphs(meta.text);
+  if (prompts.length === 0) throw new Error("Image prompt writer returned no paragraphs");
+  return { prompts, meta };
+}
+
+export async function generateBrollVideoPrompts(args: {
+  product: string;
+  mechanism: unknown;
+  avatar?: string;
+  shots: BrollShot[];
+}): Promise<{ prompts: string[]; meta: TextGenResponse }> {
+  const meta = await generateText("broll_video_prompts", {
+    product: args.product,
+    avatar: args.avatar ?? "",
+    mechanism: JSON.stringify(args.mechanism ?? [], null, 2),
+    shots: JSON.stringify(args.shots, null, 2),
+  });
+  const prompts = splitStarredParagraphs(meta.text);
+  if (prompts.length === 0) throw new Error("Video prompt writer returned no paragraphs");
+  return { prompts, meta };
+}
+
+// ---------- Character B-Roll ----------
+
+export type CharacterBrollCategory =
+  | "Hook / Scroll-Stopper"
+  | "Problem"
+  | "Failed Solution"
+  | "Product"
+  | "Authority / Credibility"
+  | "Emotional Payoff / Transformation"
+  | "Lifestyle / Context";
+
+export type CharacterBrollShot = {
+  id: number;
+  category: CharacterBrollCategory | string;
+  shot_type: string;
+  action: string;
+  location: string;
+  visual_example: string;
+  script_beat?: string;
+};
+
+export type CharacterBrollShotList = {
+  project: string;
+  input_mode: "angle" | "script";
+  character_ref: string;
+  location_default: string;
+  shots: CharacterBrollShot[];
+};
+
+export async function uploadCharacterImage(
+  dataUrl: string,
+  filename?: string,
+): Promise<{ url: string }> {
+  return post<{ url: string }>("/api/uploads/character-image", { dataUrl, filename });
+}
+
+/**
+ * Character library — reference photos shown in the Character B-roll picker.
+ * Two tiers, returned in one response: `defaults` are shared across every
+ * brand (curated via the `client/public/characters/library/` seed folder),
+ * `brand` are private to the active brand and uploaded via the UI.
+ */
+export type CharacterPrepStatus = "pending" | "running" | "complete" | "failed";
+
+export type CharacterRef = {
+  id: string;
+  createdAt: string;
+  brandId: string | null;
+  title: string;
+  /** Original image — used for image generation (Nano-Banana accepts realistic photos). */
+  imageUrl: string;
+  thumbnailUrl: string | null;
+  sourcePath: string | null;
+  sourceSignature: string | null;
+  /**
+   * Step 1 output — turnaround / reference sheet on white background.
+   * Persisted for inspection / regen; not currently sent to any model directly.
+   */
+  seedanceSheetUrl: string | null;
+  /**
+   * Step 2 output — close-up synthetic portrait. THIS is what we pass to
+   * Seedance ref-to-video as `@Image2`, never the original photo (the
+   * likeness detector flags realistic photos as "real people").
+   */
+  seedancePortraitUrl: string | null;
+  seedancePrepStatus: CharacterPrepStatus;
+  seedancePrepError: string | null;
+};
+
+export function listCharacters(brandId: string | null): Promise<{ defaults: CharacterRef[]; brand: CharacterRef[] }> {
+  const qs = brandId ? `?brandId=${encodeURIComponent(brandId)}` : "";
+  return get<{ defaults: CharacterRef[]; brand: CharacterRef[] }>(`/api/characters${qs}`);
+}
+
+export function createCharacter(args: {
+  brandId: string;
+  dataUrl: string;
+  filename?: string;
+  title?: string;
+}): Promise<{ character: CharacterRef }> {
+  return post<{ character: CharacterRef }>("/api/characters", args);
+}
+
+export function prepareCharacterForSeedance(id: string): Promise<{ ok: true; queued: true }> {
+  return post<{ ok: true; queued: true }>(`/api/characters/${id}/prepare-seedance`, {});
+}
+
+// ---------- Team & invites ----------
+
+export type TeamRole = "admin" | "member";
+
+export type TeamMemberRow = {
+  userId: string;
+  name: string;
+  email: string;
+  role: TeamRole;
+  joinedAt: string;
+};
+
+export type InviteRow = {
+  id: string;
+  email: string;
+  role: TeamRole;
+  token: string;
+  invitedByUserId: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+  createdAt: string;
+};
+
+export type TeamSnapshot = {
+  team: { id: string; name: string };
+  role: TeamRole;
+  members: TeamMemberRow[];
+  invites: InviteRow[];
+  acceptedInvites: InviteRow[];
+};
+
+export function getTeam(): Promise<TeamSnapshot> {
+  return get<TeamSnapshot>("/api/team");
+}
+
+export function createTeamInvite(args: { email: string; role: TeamRole }): Promise<{ invite: InviteRow }> {
+  return post<{ invite: InviteRow }>("/api/team/invites", args);
+}
+
+export async function revokeTeamInvite(id: string): Promise<{ ok: true }> {
+  const res = await fetch(`/api/team/invites/${id}`, { method: "DELETE" });
+  const payload = (await res.json().catch(() => ({}))) as { ok: true } | ApiError;
+  if (!res.ok) {
+    const msg = (payload as ApiError)?.error ?? `Request failed: ${res.status}`;
+    throw new Error(msg);
+  }
+  return payload as { ok: true };
+}
+
+export async function updateTeamMemberRole(userId: string, role: TeamRole): Promise<{ ok: true }> {
+  const res = await fetch(`/api/team/members/${userId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  const payload = (await res.json().catch(() => ({}))) as { ok: true } | ApiError;
+  if (!res.ok) {
+    const msg = (payload as ApiError)?.error ?? `Request failed: ${res.status}`;
+    throw new Error(msg);
+  }
+  return payload as { ok: true };
+}
+
+export async function removeTeamMember(userId: string): Promise<{ ok: true }> {
+  const res = await fetch(`/api/team/members/${userId}`, { method: "DELETE" });
+  const payload = (await res.json().catch(() => ({}))) as { ok: true } | ApiError;
+  if (!res.ok) {
+    const msg = (payload as ApiError)?.error ?? `Request failed: ${res.status}`;
+    throw new Error(msg);
+  }
+  return payload as { ok: true };
+}
+
+export type InvitePreview = { email: string; role: TeamRole; teamName: string | null };
+
+export function previewInvite(token: string): Promise<InvitePreview> {
+  return get<InvitePreview>(`/api/auth/invite/${token}`);
+}
+
+export async function deleteCharacter(id: string): Promise<{ ok: true }> {
+  const res = await fetch(`/api/characters/${id}`, { method: "DELETE" });
+  const payload = (await res.json().catch(() => ({}))) as { ok: true } | ApiError;
+  if (!res.ok) {
+    const msg = (payload as ApiError)?.error ?? `Request failed: ${res.status}`;
+    throw new Error(msg);
+  }
+  return payload as { ok: true };
+}
+
+export async function generateCharacterBrollShots(args: {
+  product: string;
+  inputMode: "angle" | "script";
+  research?: string;
+  script?: string;
+  assetLimits?: string;
+}): Promise<{ shots: CharacterBrollShotList; meta: TextGenResponse }> {
+  const meta = await generateText("character_broll_shots_generate", {
+    product: args.product,
+    inputMode: args.inputMode,
+    research: args.research ?? "",
+    script: args.script ?? "",
+    assetLimits: args.assetLimits ?? "",
+  });
+  let parsed: CharacterBrollShotList;
+  try {
+    parsed = JSON.parse(meta.text);
+  } catch {
+    const m = meta.text.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error("Character shot list generator did not return valid JSON");
+    parsed = JSON.parse(m[0]);
+  }
+  return { shots: parsed, meta };
+}
+
+export async function generateCharacterBrollImagePrompts(args: {
+  product: string;
+  mechanism: unknown;
+  shots: CharacterBrollShot[];
+}): Promise<{ prompts: string[]; meta: TextGenResponse }> {
+  const meta = await generateText("character_broll_image_prompts", {
+    product: args.product,
+    mechanism: JSON.stringify(args.mechanism ?? [], null, 2),
+    shots: JSON.stringify(args.shots, null, 2),
+  });
+  const prompts = splitStarredParagraphs(meta.text);
+  if (prompts.length === 0) throw new Error("Image prompt writer returned no paragraphs");
+  return { prompts, meta };
+}
+
+export async function generateCharacterBrollVideoPrompts(args: {
+  product: string;
+  mechanism: unknown;
+  shots: CharacterBrollShot[];
+}): Promise<{ prompts: string[]; meta: TextGenResponse }> {
+  const meta = await generateText("character_broll_video_prompts", {
+    product: args.product,
+    mechanism: JSON.stringify(args.mechanism ?? [], null, 2),
+    shots: JSON.stringify(args.shots, null, 2),
+  });
+  const prompts = splitStarredParagraphs(meta.text);
+  if (prompts.length === 0) throw new Error("Video prompt writer returned no paragraphs");
+  return { prompts, meta };
+}
+
+/**
+ * Single-Scene Generator — image prompt writer.
+ *
+ * Takes free-form scene lines (one per scene the user wants to generate) plus
+ * optional product context, returns one Nano-Banana-Pro-ready prompt per
+ * scene line. Mirrors the b-roll image prompt writer in shape (one Anthropic
+ * call → array of `*`-separated paragraphs) but the master prompt
+ * (`prompts/single_scene_image_prompt.md`) is purpose-built for free-form
+ * single-shot inputs rather than the 7-category B-roll arc.
+ */
+export async function generateSingleSceneImagePrompts(args: {
+  product: string;
+  mechanism: unknown;
+  scenes: string[];
+}): Promise<{ prompts: string[]; meta: TextGenResponse }> {
+  const meta = await generateText("single_scene_image_prompt", {
+    product: args.product,
+    mechanism: JSON.stringify(args.mechanism ?? [], null, 2),
+    scenes: args.scenes.map((s, i) => `${i + 1}. ${s}`).join("\n"),
+  });
+  const prompts = splitStarredParagraphs(meta.text);
+  if (prompts.length === 0) throw new Error("Single-scene image prompt writer returned no paragraphs");
+  return { prompts, meta };
+}
+
+// ---------- Brand Assets ----------
+
+export type BrandAssetKind = "image" | "video" | "document";
+
+export type BrandAsset = {
+  id: string;
+  createdAt: string;
+  kind: BrandAssetKind;
+  url: string;
+  thumbnailUrl: string | null;
+  title: string;
+  sourceApp: string;
+  productId: string | null;
+  metadata: Record<string, unknown> | null;
+};
+
+export type NewBrandAssetInput = {
+  kind: BrandAssetKind;
+  url: string;
+  title: string;
+  sourceApp: string;
+  thumbnailUrl?: string | null;
+  productId?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export function listBrandAssets(brandId: string): Promise<{ assets: BrandAsset[] }> {
+  return get<{ assets: BrandAsset[] }>(`/api/brand-assets?brandId=${encodeURIComponent(brandId)}`);
+}
+
+export function saveBrandAssets(
+  brandId: string,
+  assets: NewBrandAssetInput[],
+): Promise<{ assets: BrandAsset[] }> {
+  return post<{ assets: BrandAsset[] }>("/api/brand-assets", { brandId, assets });
+}
+
+export async function deleteBrandAsset(id: string): Promise<{ ok: true }> {
+  const res = await fetch(`/api/brand-assets/${id}`, { method: "DELETE" });
+  const payload = (await res.json().catch(() => ({}))) as { ok: true } | ApiError;
+  if (!res.ok) {
+    const msg = (payload as ApiError)?.error ?? `Request failed: ${res.status}`;
+    throw new Error(msg);
+  }
+  return payload as { ok: true };
+}
+
+// ---------- Message Testing ----------
+
+export type MessageAngleGroup = { name: string; messages: string[] };
+
+/**
+ * Parses the `Angle: <name>\nmessage\nmessage\n...` format from
+ * prompts/message_testing_copy.md. Blank lines separate angles.
+ */
+function parseMessagesByAngle(text: string): MessageAngleGroup[] {
+  const lines = text.split("\n").map((l) => l.trim());
+  const result: MessageAngleGroup[] = [];
+  let current: MessageAngleGroup | null = null;
+  for (const line of lines) {
+    if (!line) continue;
+    const m = line.match(/^Angle:\s*(.+)$/i);
+    if (m) {
+      if (current && current.messages.length > 0) result.push(current);
+      current = { name: m[1].trim(), messages: [] };
+    } else if (current) {
+      // Strip stray leading bullets/quotes if the model slipped up.
+      const cleaned = line.replace(/^[-•*]\s*/, "").replace(/^["'"]|["'"]$/g, "").trim();
+      if (cleaned) current.messages.push(cleaned);
+    }
+  }
+  if (current && current.messages.length > 0) result.push(current);
+  return result;
+}
+
+// ---------- Static Ad References ----------
+
+export type StaticAdDeconstructionStatus = "pending" | "running" | "complete" | "failed";
+
+export type StaticAdReference = {
+  id: string;
+  createdAt: string;
+  title: string;
+  niche: string;
+  imageUrl: string;
+  thumbnailUrl: string | null;
+  sourcePath: string | null;
+  sourceSignature: string | null;
+  deconstruction: Record<string, unknown> | null;
+  deconstructionStatus: StaticAdDeconstructionStatus;
+  deconstructionError: string | null;
+  deconstructionGeneratedAt: string | null;
+  promptVersion: string | null;
+  model: string | null;
+};
+
+export function listStaticAdReferences(): Promise<{ references: StaticAdReference[] }> {
+  return get<{ references: StaticAdReference[] }>("/api/static-ad-references");
+}
+
+export function rescanStaticAdReferences(): Promise<{ ok: true; ingested: number; ids: string[] }> {
+  return post<{ ok: true; ingested: number; ids: string[] }>(
+    "/api/static-ad-references/rescan",
+    {},
+  );
+}
+
+export function getStaticAdReference(id: string): Promise<{ reference: StaticAdReference }> {
+  return get<{ reference: StaticAdReference }>(`/api/static-ad-references/${id}`);
+}
+
+export function createStaticAdReference(args: {
+  imageUrl?: string;
+  dataUrl?: string;
+  filename?: string;
+  title?: string;
+  niche: string;
+}): Promise<{ reference: StaticAdReference }> {
+  return post<{ reference: StaticAdReference }>("/api/static-ad-references", args);
+}
+
+export async function updateStaticAdReference(
+  id: string,
+  patch: { title?: string; niche?: string },
+): Promise<{ reference: StaticAdReference }> {
+  const res = await fetch(`/api/static-ad-references/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const payload = (await res.json().catch(() => ({}))) as { reference: StaticAdReference } | ApiError;
+  if (!res.ok) {
+    const msg = (payload as ApiError)?.error ?? `Request failed: ${res.status}`;
+    throw new Error(msg);
+  }
+  return payload as { reference: StaticAdReference };
+}
+
+export function retriggerStaticAdDeconstruction(id: string): Promise<{ ok: true }> {
+  return post<{ ok: true }>(`/api/static-ad-references/${id}/deconstruct`, {});
+}
+
+export type StaticAdRecreationResult = {
+  url: string;
+  referenceId: string;
+  durationMs: number;
+  model: string;
+  promptVersion: string;
+};
+
+export type StaticAdRecreationBrand = {
+  name: string;
+  websiteUrl?: string;
+  description?: string;
+  tone?: string;
+  colorPalette?: Array<{ name: string; hex: string; usage: string }>;
+  fonts?: Array<{ name: string; usage: string; weight: string }>;
+  logoUrl?: string | null;
+};
+
+export function recreateStaticAd(args: {
+  productId: string;
+  angleName: string;
+  language?: string;
+  referenceId: string;
+  brand?: StaticAdRecreationBrand | null;
+  feedback?: string;
+}): Promise<StaticAdRecreationResult> {
+  return post<StaticAdRecreationResult>("/api/static-ads/recreate", args);
+}
+
+export async function deleteStaticAdReference(id: string): Promise<{ ok: true }> {
+  const res = await fetch(`/api/static-ad-references/${id}`, { method: "DELETE" });
+  const payload = (await res.json().catch(() => ({}))) as { ok: true } | ApiError;
+  if (!res.ok) {
+    const msg = (payload as ApiError)?.error ?? `Request failed: ${res.status}`;
+    throw new Error(msg);
+  }
+  return payload as { ok: true };
+}
+
+// ---------- Static Ads Iterations ----------
+
+export type IterationsHeadlinesResponse = {
+  headlines: string[];
+  model: string;
+  promptVersion: string;
+  durationMs: number;
+};
+
+export type IterationsVariationResponse = {
+  url: string;
+  model: string;
+  promptVersion: string;
+  durationMs: number;
+};
+
+export function generateIterationsHeadlines(args: {
+  sourceImageUrl: string;
+  angle: string;
+  product?: string;
+  feedback?: string;
+  existingHeadlines?: string[];
+  count?: number;
+}): Promise<IterationsHeadlinesResponse> {
+  return post<IterationsHeadlinesResponse>("/api/static-ads-iterations/headlines", args);
+}
+
+export function generateIterationsVariation(args: {
+  sourceImageUrl: string;
+  headline: string;
+  feedback?: string;
+}): Promise<IterationsVariationResponse> {
+  return post<IterationsVariationResponse>("/api/static-ads-iterations/variation", args);
+}
+
+export function uploadIterationsSource(args: {
+  dataUrl: string;
+  filename?: string;
+}): Promise<{ url: string; filename: string }> {
+  return post<{ url: string; filename: string }>("/api/static-ads-iterations/upload-source", args);
+}
+
+export async function generateMessageTestingCopy(args: {
+  product: string;
+  angles: ProductAngle[];
+}): Promise<{ groups: MessageAngleGroup[]; meta: TextGenResponse }> {
+  const meta = await generateText("message_testing_copy", {
+    product: args.product,
+    angles: JSON.stringify(args.angles, null, 2),
+  });
+  const groups = parseMessagesByAngle(meta.text);
+  if (groups.length === 0) throw new Error("Message testing copy writer returned no messages");
+  return { groups, meta };
+}
