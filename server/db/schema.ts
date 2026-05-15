@@ -253,3 +253,79 @@ export type NewTeamMember = typeof teamMembers.$inferInsert;
 export type Invite = typeof invites.$inferSelect;
 export type NewInvite = typeof invites.$inferInsert;
 export type Role = "admin" | "member";
+
+// ──────────────────────────────────────────────────────────────────────────
+// LISTICLE BUILDER
+//
+// Two tables. A `listicle` row holds the draft + its publish state through
+// every step of the builder: copy generation → image generation → HTML
+// rendering → LanderLab deploy. The `listicle_images` rows are per-section
+// (one image per numbered reason in the listicle) with the same approve /
+// regen / feedback lifecycle the b-roll apps use.
+//
+// State machine on listicles.status:
+//   drafting   — copy step in progress (or just saved)
+//   images     — copy approved, image generation in progress / under review
+//   rendering  — HTML render in progress
+//   ready      — HTML rendered, user reviewing preview, hasn't deployed yet
+//   deployed   — pushed to LanderLab; landerlab_lander_id, landerlab_variant_id
+//                and the URL fields are populated
+//   failed     — terminal error somewhere; see `error` field for details
+// ──────────────────────────────────────────────────────────────────────────
+
+export const listicles = pgTable("listicles", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+  brandId: uuid("brand_id").notNull(),
+  productId: uuid("product_id").notNull(),
+  /** "generate" if produced by the Copy Engine listicle prompt, "paste" if user-supplied */
+  source: text("source").notNull(),
+  status: text("status").notNull().default("drafting"), // drafting | images | rendering | ready | deployed | failed
+  angleName: text("angle_name"),
+  language: text("language").notNull().default("en"),
+  /** The user's destination URL — the offer/checkout page. Used for CTA_URL + offer extraction. */
+  destinationUrl: text("destination_url"),
+  /** Structured offer fields extracted from destinationUrl via the offer_extract prompt */
+  offerExtract: jsonb("offer_extract"),
+  /** The listicle markdown — either generated or pasted */
+  copyMarkdown: text("copy_markdown"),
+  /** Free-form guidance the user provided alongside the copy generation request */
+  guidance: text("guidance"),
+  /** The fully-rendered HTML page (output of listicle_lander_html prompt). Stored verbatim. */
+  renderedHtml: text("rendered_html"),
+  /** User feedback when regenerating the HTML render */
+  htmlFeedback: text("html_feedback"),
+  /** LanderLab identifiers — populated when status >= 'deployed' */
+  landerlabLanderId: text("landerlab_lander_id"),
+  landerlabVariantId: text("landerlab_variant_id"),
+  landerlabEncryptedVariantId: text("landerlab_encrypted_variant_id"),
+  landerlabDomainId: text("landerlab_domain_id"),
+  publishedUrl: text("published_url"),
+  previewUrl: text("preview_url"),
+  editorUrl: text("editor_url"),
+  error: text("error"),
+});
+
+export const listicleImages = pgTable("listicle_images", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  listicleId: uuid("listicle_id").notNull(),
+  /** Section number (1-based), matching the listicle's numbered sections */
+  sectionIdx: integer("section_idx").notNull(),
+  /** Headline of the section this image illustrates */
+  sectionHeadline: text("section_headline"),
+  /** The image-generation prompt produced by listicle_image_prompts */
+  imagePrompt: text("image_prompt"),
+  /** fal.ai output URL once generated */
+  imageUrl: text("image_url"),
+  imageStatus: text("image_status").notNull().default("idle"), // idle | generating | ready | failed
+  imageApproval: text("image_approval").notNull().default("pending"), // pending | approved | rejected
+  imageFeedback: text("image_feedback"),
+  imageError: text("image_error"),
+});
+
+export type Listicle = typeof listicles.$inferSelect;
+export type NewListicle = typeof listicles.$inferInsert;
+export type ListicleImage = typeof listicleImages.$inferSelect;
+export type NewListicleImage = typeof listicleImages.$inferInsert;

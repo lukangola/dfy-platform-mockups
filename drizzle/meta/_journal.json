@@ -57,6 +57,13 @@
       "when": 1777911914487,
       "tag": "0007_fast_toro",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1778854457494,
+      "tag": "0008_clammy_quasimodo",
+      "breakpoints": true
     }
   ]
 }

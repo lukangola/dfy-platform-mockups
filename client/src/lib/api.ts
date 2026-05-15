@@ -958,3 +958,130 @@ export async function generateMessageTestingCopy(args: {
   if (groups.length === 0) throw new Error("Message testing copy writer returned no messages");
   return { groups, meta };
 }
+
+// ---------- Listicle Builder ----------
+
+export type ListicleStatus =
+  | "drafting" | "images" | "rendering" | "ready" | "deployed" | "failed";
+
+export type ListicleRow = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  brandId: string;
+  productId: string;
+  source: "generate" | "paste";
+  status: ListicleStatus;
+  angleName: string | null;
+  language: string;
+  destinationUrl: string | null;
+  offerExtract: Record<string, unknown> | null;
+  copyMarkdown: string | null;
+  guidance: string | null;
+  renderedHtml: string | null;
+  htmlFeedback: string | null;
+  landerlabLanderId: string | null;
+  landerlabVariantId: string | null;
+  landerlabEncryptedVariantId: string | null;
+  landerlabDomainId: string | null;
+  publishedUrl: string | null;
+  previewUrl: string | null;
+  editorUrl: string | null;
+  error: string | null;
+};
+
+export type ListicleImageRow = {
+  id: string;
+  createdAt: string;
+  listicleId: string;
+  sectionIdx: number;
+  sectionHeadline: string | null;
+  imagePrompt: string | null;
+  imageUrl: string | null;
+  imageStatus: "idle" | "generating" | "ready" | "failed";
+  imageApproval: "pending" | "approved" | "rejected";
+  imageFeedback: string | null;
+  imageError: string | null;
+};
+
+export function createListicle(args: {
+  brandId: string;
+  productId: string;
+  source: "generate" | "paste";
+  language?: string;
+  destinationUrl?: string;
+  angleName?: string;
+  copyMarkdown?: string;
+  guidance?: string;
+}): Promise<{ listicle: ListicleRow }> {
+  return post<{ listicle: ListicleRow }>("/api/listicles", args);
+}
+
+export function getListicle(id: string): Promise<{ listicle: ListicleRow; images: ListicleImageRow[] }> {
+  return get<{ listicle: ListicleRow; images: ListicleImageRow[] }>(`/api/listicles/${id}`);
+}
+
+export async function patchListicle(
+  id: string,
+  patch: Partial<Pick<ListicleRow, "copyMarkdown" | "angleName" | "guidance" | "destinationUrl" | "htmlFeedback" | "language">>,
+): Promise<{ listicle: ListicleRow }> {
+  const res = await fetch(`/api/listicles/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const payload = (await res.json().catch(() => ({}))) as { listicle: ListicleRow } | ApiError;
+  if (!res.ok) throw new Error((payload as ApiError)?.error ?? `Request failed: ${res.status}`);
+  return payload as { listicle: ListicleRow };
+}
+
+export function extractListicleOffer(id: string): Promise<{ offer: Record<string, unknown> }> {
+  return post<{ offer: Record<string, unknown> }>(`/api/listicles/${id}/extract-offer`, {});
+}
+
+export function generateListicleCopy(id: string): Promise<{ copyMarkdown: string }> {
+  return post<{ copyMarkdown: string }>(`/api/listicles/${id}/generate-copy`, {});
+}
+
+export function generateListicleImagePrompts(id: string): Promise<{ images: ListicleImageRow[] }> {
+  return post<{ images: ListicleImageRow[] }>(`/api/listicles/${id}/generate-image-prompts`, {});
+}
+
+export function generateListicleImage(
+  id: string,
+  imageId: string,
+  feedback?: string,
+): Promise<{ image: ListicleImageRow }> {
+  return post<{ image: ListicleImageRow }>(`/api/listicles/${id}/images/${imageId}/generate`, feedback ? { feedback } : {});
+}
+
+export async function patchListicleImage(
+  id: string,
+  imageId: string,
+  patch: Partial<Pick<ListicleImageRow, "imageApproval" | "imageFeedback">>,
+): Promise<{ image: ListicleImageRow }> {
+  const res = await fetch(`/api/listicles/${id}/images/${imageId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const payload = (await res.json().catch(() => ({}))) as { image: ListicleImageRow } | ApiError;
+  if (!res.ok) throw new Error((payload as ApiError)?.error ?? `Request failed: ${res.status}`);
+  return payload as { image: ListicleImageRow };
+}
+
+export function renderListicleHtml(id: string): Promise<{ renderedHtml: string }> {
+  return post<{ renderedHtml: string }>(`/api/listicles/${id}/render-html`, {});
+}
+
+export function deployListicle(id: string): Promise<{
+  publishedUrl: string;
+  previewUrl: string;
+  editorUrl: string;
+  slug: string;
+}> {
+  return post<{ publishedUrl: string; previewUrl: string; editorUrl: string; slug: string }>(
+    `/api/listicles/${id}/deploy`,
+    {},
+  );
+}

@@ -21,6 +21,7 @@ import StaticAdsIterationsAppPage from "./pages/workspace/StaticAdsIterationsApp
 import AssetsPage from "./pages/workspace/AssetsPage";
 import MessageTestingAppPage from "./pages/workspace/MessageTestingAppPage";
 import CopyEngineAppPage from "./pages/workspace/CopyEngineAppPage";
+import ListicleBuilderAppPage from "./pages/workspace/ListicleBuilderAppPage";
 import WorkflowsPage from "./pages/workspace/WorkflowsPage";
 import DFYWorkflowPage from "./pages/workspace/DFYWorkflowPage";
 import SettingsPage from "./pages/workspace/SettingsPage";
@@ -113,6 +114,10 @@ function Router() {
 
       <Route path="/workspace/apps/copy-engine">
         <RequireAuth><WorkspaceLayout><CopyEngineAppPage /></WorkspaceLayout></RequireAuth>
+      </Route>
+
+      <Route path="/workspace/apps/listicle-builder">
+        <RequireAuth><WorkspaceLayout><ListicleBuilderAppPage /></WorkspaceLayout></RequireAuth>
       </Route>
 
       <Route path="/workspace/assets">

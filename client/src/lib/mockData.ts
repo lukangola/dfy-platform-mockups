@@ -605,6 +605,15 @@ export const WORKSPACE_APPS: WorkspaceApp[] = [
     color: "#A855F7",
   },
   {
+    id: "listicle-builder",
+    name: "Listicle Builder",
+    description: "Build a long-form advertorial listicle landing page end-to-end: copy, per-section images, and a full LanderLab-hosted page with one click.",
+    icon: "FileText",
+    status: "active",
+    route: "/workspace/apps/listicle-builder",
+    color: "#FB923C",
+  },
+  {
     id: "ugc-scripts",
     name: "UGC Script Writer",
     description: "Generate authentic UGC scripts tailored to your product and target audience with hook variations.",

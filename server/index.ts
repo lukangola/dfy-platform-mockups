@@ -17,6 +17,7 @@ import { brandAssetsRouter } from "./routes/brandAssets.js";
 import { brandsRouter } from "./routes/brands.js";
 import { charactersRouter } from "./routes/characters.js";
 import { generateRouter } from "./routes/generate.js";
+import { listiclesRouter } from "./routes/listicles.js";
 import { teamRouter } from "./routes/team.js";
 import { isNull } from "drizzle-orm";
 import { messageTestingRouter } from "./routes/messageTesting.js";
@@ -89,6 +90,7 @@ async function startServer() {
   app.use("/api/message-testing", messageTestingRouter);
   app.use("/api/brand-assets", brandAssetsRouter);
   app.use("/api/characters", charactersRouter);
+  app.use("/api/listicles", listiclesRouter);
   app.use("/api/static-ad-references", staticAdReferencesRouter);
   app.use("/api/static-ads", staticAdsRouter);
   app.use("/api/static-ads-iterations", staticAdsIterationsRouter);
