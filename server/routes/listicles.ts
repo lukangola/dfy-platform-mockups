@@ -358,7 +358,11 @@ listiclesRouter.post("/:id/images/:imageId/generate", async (req: Request, res: 
         input: {
           prompt: finalPrompt,
           image_urls: imageUrls,
-          aspect_ratio: "16:9",
+          // Square 1:1 — matches the reference listicle template and the
+          // user's explicit preference. Different from B-Roll (9:16
+          // mobile-vertical) — this is for editorial-style images that
+          // sit inline with body text.
+          aspect_ratio: "1:1",
           num_images: 1,
           output_format: "jpeg",
         },

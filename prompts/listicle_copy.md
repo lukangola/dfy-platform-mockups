@@ -53,7 +53,7 @@ Mirror this structure exactly. It is the proven listicle layout.
 
 ## VOICE & TONE RULES
 
-- **First person where natural** ("I tried it", "what surprised me"), second person where punchier ("you'll feel it on day two"). Never marketing third person.
+- **SECOND PERSON IS THE DEFAULT** ("Read this BEFORE you book another appointment", "If you tried turmeric capsules and felt nothing, you're not alone", "you'll feel it on day two"). The narrator speaks DIRECTLY to the reader about THEIR experience. Never marketing third person. **Only drop into first person** for short anecdotal beats inside a section where you're describing a real customer's transformation (e.g. "One reader told us she dropped her 3pm latte habit by week two") — and use those sparingly. The PRIMARY voice across hook line, H1, TLDR, every section body, every CTA microcopy, and the closing offer block is "you".
 - **Specific over vague.** Say "I dropped my 3pm latte habit" not "I cut back on coffee". Say "$2,400/year" not "lots of money".
 - **Short sentences.** A reader should be able to skim. Long flowing paragraphs are forbidden — every body block is 2–4 short sentences.
 - **No corporate hedge words.** Avoid: *may help*, *can support*, *is designed to*, *clinically formulated to*. Replace with concrete observable outcomes.
@@ -70,6 +70,7 @@ Mirror this structure exactly. It is the proven listicle layout.
 - ❌ Generic intro paragraph ("In today's fast-paced world, more and more people are turning to..."). Skip it. The hook line and the H1 ARE the intro.
 - ❌ A "conclusion" header. The closing offer block IS the conclusion.
 - ❌ Bullet lists inside the numbered sections (the body is prose).
+- ❌ Writing the entire listicle in first person as if the byline author is recounting their own experience throughout. Sections like "I tried it for two weeks and...", "I was skeptical but...", "I noticed within three days..." are forbidden as the primary voice. The reader is "you"; the author is observing/explaining to the reader. Save first-person sentences for short embedded anecdotes ("One reader, 59, told us...").
 - ❌ Quoting yourself as if you're an authority. The voice is a real customer / friend, not an editor or expert.
 - ❌ Using the words *unleash*, *revolutionary*, *game-changer*, *next-level*, *cutting-edge*, *synergy*. Banned.
 - ❌ Repeating the same CTA microcopy twice. Every 👉 CTA line is unique.

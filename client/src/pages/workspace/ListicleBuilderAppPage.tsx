@@ -169,7 +169,13 @@ export default function ListicleBuilderAppPage() {
     return { l, imgs };
   }
 
-  // ── Step 1 → Step 2 (Setup → Copy) ──
+  // ── Step 0 → Step 1 (Setup → Confirm copy) ──
+  // UX rule: jump to the destination step IMMEDIATELY, then run the slow
+  // work in the background. The destination step's render handles the
+  // "data not ready yet" case with a progress UI. This matches the user's
+  // ask: "When clicking to generate, always jump to next screen and show
+  // progress bar so user knows it's working and something is being
+  // processed."
   async function handleGenerateOrPaste() {
     if (!setupReady || !activeBrandId) return;
     setGenerating(true);
@@ -188,10 +194,13 @@ export default function ListicleBuilderAppPage() {
       });
       setListicle(created);
       setImages([]);
-      // Fire offer extraction (async, no await — non-blocking)
+      setCurrentStep(1); // ← jump immediately; the step 1 view shows progress while copy generates
+
+      // Offer extraction runs async, no await
       void extractListicleOffer(created.id).then((r) => {
         setListicle((prev) => prev ? { ...prev, offerExtract: r.offer as Record<string, unknown> } : prev);
       }).catch(() => undefined);
+
       if (mode === "generate") {
         const { copyMarkdown } = await generateListicleCopy(created.id);
         await refreshListicle(created.id);
@@ -199,7 +208,6 @@ export default function ListicleBuilderAppPage() {
       } else {
         setCopyDraft(pastedCopy.trim());
       }
-      setCurrentStep(1);
     } catch (err) {
       setPipelineError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -237,16 +245,21 @@ export default function ListicleBuilderAppPage() {
     }
   }
 
-  // ── Step 2 → Step 3 (Copy → Images) ──
+  // ── Step 1 → Step 2 (Confirm copy → Images) ──
+  // Same jump-then-work UX as the Step 0 → 1 transition. The images step
+  // renders a "creating image prompts..." placeholder until the prompts
+  // come back, then shows the per-image cards in their generating state.
   async function advanceToImages() {
     if (!listicle) return;
     setGenerating(true);
     setPipelineError(null);
+    setImages([]); // clear so the step 2 view shows the "preparing prompts" loader
+    setCurrentStep(2); // ← jump immediately
     try {
       const { images: created } = await generateListicleImagePrompts(listicle.id);
       setImages(created);
-      setCurrentStep(2);
-      // Auto-fire all image generations in parallel
+      // Fire all image generations in parallel — each card updates itself
+      // via setImages on completion so the user sees them stream in.
       await Promise.all(created.map((img) => generateOneImage(img.id)));
     } catch (err) {
       setPipelineError(err instanceof Error ? err.message : String(err));
@@ -286,19 +299,24 @@ export default function ListicleBuilderAppPage() {
       .forEach((i) => void setImageApproval(i.id, "approved"));
   }
 
-  // ── Step 3 → Step 4 (Images → Deploy) ──
+  // ── Step 2 → Step 3 (Images → Deploy) ──
+  // Same jump-then-work UX. The deploy step shows the "Rendering full
+  // HTML page..." placeholder until renderListicleHtml resolves.
   async function advanceToDeploy() {
     if (!listicle) return;
     setRendering(true);
     setPipelineError(null);
+    setShowHtmlFeedback(false);
+    // Clear any prior renderedHtml so the step 3 view doesn't briefly show
+    // the OLD render before the new one is ready.
+    setListicle((prev) => prev ? { ...prev, renderedHtml: null } : prev);
+    setCurrentStep(3); // ← jump immediately
     try {
       if (htmlFeedback.trim()) {
         await patchListicle(listicle.id, { htmlFeedback: htmlFeedback.trim() });
       }
       await renderListicleHtml(listicle.id);
       await refreshListicle(listicle.id);
-      setCurrentStep(3);
-      setShowHtmlFeedback(false);
     } catch (err) {
       setPipelineError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -645,9 +663,23 @@ export default function ListicleBuilderAppPage() {
                     onChange={(e) => setCopyDraft(e.target.value)}
                     className="w-full min-h-[60vh] bg-white/[0.03] border border-white/[0.08] rounded-md px-4 py-3 text-[13px] text-white/85 outline-none font-mono leading-relaxed resize-y"
                   />
+                ) : !listicle.copyMarkdown ? (
+                  // Progress UI — the user just hit Generate, we jumped here
+                  // immediately, and the copy is being written in the background.
+                  // Matches the "jump-to-next + progress" UX rule.
+                  <article className="prose-copy max-w-3xl mx-auto bg-white/[0.02] border border-white/[0.06] rounded-lg p-12 md:p-16 text-center">
+                    <Loader2 size={28} className="animate-spin text-orange-400 mx-auto mb-4" />
+                    <h2 className="text-base font-medium text-white/85 mb-2">Writing your listicle…</h2>
+                    <p className="text-[12px] text-white/40 font-mono leading-relaxed max-w-md mx-auto">
+                      Claude is reading the angle, the product research, and the offer details from your destination URL. This usually takes 30–60 seconds.
+                    </p>
+                    <div className="mt-6 max-w-md mx-auto h-1 rounded-full bg-white/[0.06] overflow-hidden">
+                      <div className="h-full w-1/3 bg-orange-400/60 animate-pulse" />
+                    </div>
+                  </article>
                 ) : (
                   <article className="prose-copy max-w-3xl mx-auto bg-white/[0.02] border border-white/[0.06] rounded-lg p-6 md:p-8">
-                    <div dangerouslySetInnerHTML={{ __html: renderMarkdown(listicle.copyMarkdown ?? "") }} />
+                    <div dangerouslySetInnerHTML={{ __html: renderMarkdown(listicle.copyMarkdown) }} />
                   </article>
                 )}
               </motion.div>
@@ -685,10 +717,27 @@ export default function ListicleBuilderAppPage() {
 
                 {pipelineError && <ErrorRow message={pipelineError} />}
 
+                {/* Progress UI — Step 1 → 2 transition jumps here immediately
+                    while the image-prompt generator runs. Shows while the
+                    image cards don't exist yet. Once the prompts come back,
+                    the cards render in their per-card "generating" state. */}
+                {images.length === 0 && generating ? (
+                  <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-12 md:p-16 text-center">
+                    <Loader2 size={28} className="animate-spin text-orange-400 mx-auto mb-4" />
+                    <h2 className="text-base font-medium text-white/85 mb-2">Preparing image prompts…</h2>
+                    <p className="text-[12px] text-white/40 font-mono leading-relaxed max-w-md mx-auto">
+                      Reading the listicle to figure out one image prompt per numbered section. Image generation kicks off automatically right after.
+                    </p>
+                    <div className="mt-6 max-w-md mx-auto h-1 rounded-full bg-white/[0.06] overflow-hidden">
+                      <div className="h-full w-1/3 bg-orange-400/60 animate-pulse" />
+                    </div>
+                  </div>
+                ) : null}
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                   {images.map((img) => (
                     <div key={img.id} className="rounded-lg overflow-hidden border border-white/[0.08] bg-white/[0.02]">
-                      <div className="relative aspect-[16/9] bg-black/40 flex items-center justify-center">
+                      <div className="relative aspect-square bg-black/40 flex items-center justify-center">
                         {img.imageStatus === "ready" && img.imageUrl ? (
                           <img src={img.imageUrl} alt={img.sectionHeadline ?? ""} className="w-full h-full object-cover" />
                         ) : img.imageStatus === "generating" ? (
@@ -838,8 +887,18 @@ export default function ListicleBuilderAppPage() {
                     <iframe srcDoc={listicle.renderedHtml} title="Listicle preview" className="w-full" style={{ minHeight: "80vh", border: 0 }} sandbox="allow-same-origin" />
                   </div>
                 ) : rendering ? (
-                  <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-12 text-center text-white/50 font-mono text-sm flex items-center justify-center gap-2">
-                    <Loader2 size={16} className="animate-spin" /> Rendering full HTML page...
+                  // Step 2 → 3 transition jumps here immediately, before the
+                  // HTML is rendered. Big, friendly loader so the user
+                  // doesn't think the deploy button was a no-op.
+                  <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-12 md:p-16 text-center">
+                    <Loader2 size={28} className="animate-spin text-orange-400 mx-auto mb-4" />
+                    <h2 className="text-base font-medium text-white/85 mb-2">Rendering full HTML page…</h2>
+                    <p className="text-[12px] text-white/40 font-mono leading-relaxed max-w-md mx-auto">
+                      Claude is composing the entire LanderLab page from your listicle copy, the approved images, brand colors, and the offer details. ~30–60 seconds.
+                    </p>
+                    <div className="mt-6 max-w-md mx-auto h-1 rounded-full bg-white/[0.06] overflow-hidden">
+                      <div className="h-full w-1/3 bg-orange-400/60 animate-pulse" />
+                    </div>
                   </div>
                 ) : (
                   <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-12 text-center text-white/40 font-mono text-sm">

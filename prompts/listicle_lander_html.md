@@ -13,6 +13,32 @@ not a product page. Single-column, narrow content width, mobile-first, but ALSO
 correctly proportioned on desktop.
 
 ═══════════════════════════════════════
+REFERENCE TEMPLATE — MATCH THIS DESIGN
+═══════════════════════════════════════
+
+The output should closely match the visual structure and rhythm of this
+canonical listicle template:
+
+  https://sensenaturals.ca/pages/10-reasons-why-best-joint-pain-remedy
+
+Key elements from that reference to replicate (adapted to OUR content):
+- Slim near-black announcement bar with brand discount + countdown timer
+- Headline H1 sits tight under the bar — no hero image, no large hero spacing
+- Compact author byline directly under H1 (small circular photo + name + date)
+- Single bold hook callout under the byline
+- Each numbered section uses the SAME visual block: bold H2 → square 1:1
+  image → 2-4 short body paragraphs. Generous vertical rhythm between
+  sections but no dividers
+- Big bottom offer block on brand-primary background with:
+  - "UP TO X% OFF FOR A LIMITED TIME ONLY" headline
+  - Product image
+  - Two stacked CTA buttons (primary + a repeated secondary "Yes, GET X% OFF")
+  - Countdown timer
+  - "Sell-Out Risk: HIGH" scarcity badge
+  - "FREE shipping" + "30-Day Money Back Guarantee" trust markers
+  - "Verified Lowest Price Ever" closing claim in small italic
+
+═══════════════════════════════════════
 CRITICAL LAYOUT REQUIREMENTS — READ FIRST
 ═══════════════════════════════════════
 
@@ -106,22 +132,34 @@ No pros/cons lists. No star ratings. No comparison tables.
 Just headline → image → body. This is the entire pattern.
 
 SECTION 5 — OFFER BLOCK
-(full viewport width, breaks out of the 720px column)
+(full viewport width, breaks out of the 720px column. Match the
+sensenaturals reference template feel — bold, urgent, dense.)
 - Background: brand primary color, full viewport width edge-to-edge
-- Inside, content centered with max-width 720px:
+- Inside, content centered with max-width 720px, generous vertical padding
+  (~64px top and bottom):
   - Small caps label at top: "{{OFFER_LABEL}}"
   - Product image, centered, max 300px wide
-  - H1, white, centered: "{{OFFER_HEADLINE}}"
-  - Subline, centered: "{{OFFER_SUBLINE}}"
-  - Large CTA button, contrasting color, centered:
+  - H1, white, centered, large and bold (3xl on mobile, 4xl on desktop):
+    "{{OFFER_HEADLINE}}"
+  - Subline, centered (max-width ~500px so it doesn't sprawl):
+    "{{OFFER_SUBLINE}}"
+  - **PRIMARY CTA button** (large, full-column-width on mobile, ~360px on
+    desktop, contrasting accent color, white text, all-caps, bold):
     "{{CTA_TEXT}}" → links to {{CTA_URL}}
-  - Below button, smaller text, centered:
-    - "{{COUNTDOWN_LABEL}}" with countdown timer
-    - "{{SCARCITY_LINE}}"
-    - "{{SHIPPING_LINE}}"
-    - "{{GUARANTEE_LINE}}"
-  - Secondary smaller button below: "{{SECONDARY_CTA_TEXT}}"
-  - Trust line at bottom in small italic: "{{TRUST_LINE}}"
+  - Compact stack below the primary button, centered, white text on the
+    primary-colored background:
+    - "{{COUNTDOWN_LABEL}}" with countdown timer (HH:MM:SS) — visually
+      prominent
+    - **Scarcity badge** (small pill, lighter background tint within the
+      offer block): "Sell-Out Risk: {{SCARCITY_LINE}}" (e.g. "HIGH")
+    - "{{SHIPPING_LINE}}" — small, ✓ marker
+    - "{{GUARANTEE_LINE}}" — small, ✓ marker
+  - **SECONDARY CTA button** (slightly smaller than the primary, same
+    accent color, same destination URL — repeats the offer to capture
+    bottom-of-page intent): "{{SECONDARY_CTA_TEXT}}" → also links to
+    {{CTA_URL}}
+  - Trust line at very bottom, small italic, off-white: "{{TRUST_LINE}}"
+    (e.g. "Verified Lowest Price Ever")
 
 SECTION 6 — FOOTER
 (full viewport width, content centered)
