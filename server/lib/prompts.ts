@@ -1,13 +1,16 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { isDev } from "./env.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const PROMPTS_DIR = path.resolve(__dirname, "..", "..", "prompts");
+// Resolve prompts/ relative to the process working directory (which is the
+// repo root both in dev — `pnpm dev` runs there — and in production —
+// Railway runs `pnpm start` from /app/). We deliberately avoid the older
+// `__dirname` + `../../` pattern: after esbuild bundles to `dist/index.js`,
+// `__dirname` is `/app/dist/` and `../../prompts` resolves to `/prompts/`,
+// which doesn't exist. Using `process.cwd()` keeps the behaviour consistent
+// across dev source-tree and prod bundled output.
+const PROMPTS_DIR = path.resolve(process.cwd(), "prompts");
 
 export type PromptConfig = {
   tools?: string[]; // e.g. ["web_search", "web_fetch"]
