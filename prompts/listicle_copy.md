@@ -14,40 +14,122 @@ Your job: produce a single, finished listicle for the supplied product, written 
 
 ## THE FORMAT (NON-NEGOTIABLE STRUCTURE)
 
-Mirror this structure exactly. It is the proven listicle layout.
+Mirror this structure exactly. It is the proven listicle layout from the
+canonical reference at https://try.javvycoffee.com/ps/. Do NOT include a
+comparison table — we explicitly remove it from our adaptation.
 
-1. **Hook line** — short, urgent, all in one short sentence. Must read like a friend texting you, not a brand. Example shape: *"Read this BEFORE your next coffee run!"* / *"Read this BEFORE your next gym session!"*. One single line.
+1. **Pre-headline callout** — italic + bold, ONE LINE, sits ABOVE the H1.
+   Same shape as the canonical reference: *"Read this **BEFORE** your
+   next coffee run!"* / *"Read this **BEFORE** you book another
+   appointment!"*. The italic surrounds the whole line; the urgent
+   directive ("BEFORE…") is bolded inside the italic. This is a tease,
+   not a sales pitch.
 
-2. **H1 — The numbered headline.** A bold, opinionated headline that names the product and the number of reasons. Pattern:
-   `# 11 Reasons Why [Product Name] is the [#1 Trending Thing] for [Year]`
-   **The number is exactly 11. Always 11. Never 10, 12, or 13.** This matches the canonical listicle reference and is non-negotiable. The H1 says "11 Reasons" verbatim. The TLDR says "11+". The piece contains 11 numbered sections — no more, no fewer.
+2. **H1 — The numbered headline.** A bold, opinionated headline. **DO NOT
+   include the brand name or the exact product name in the H1.** Instead,
+   describe the product by its CATEGORY / TYPE and position it inside the
+   angle's audience-facing category.
 
-3. **Byline strip** — a fake author name (first name + last initial), a recent-looking date in the form `Month Day, Year`, and a small reading-time hint. Keep it on one line, separated by `·`. Example: *Jade M. · February 4, 2026 · 4 min read*
+   Pattern (mirrors the Javvy reference):
+   `# 11 Reasons Why This [Product Type] is the #1 [Angle-Derived Category] for [Year]`
+
+   Where:
+   - `[Product Type]` = a short generic descriptor for what the product
+     IS — e.g. *"High-Protein Iced Coffee"*, *"Collagen Supplement"*,
+     *"Joint-Support Powder"*, *"Adaptogenic Mushroom Blend"*. Inferred
+     from the product category / research, never the brand or product
+     name.
+   - `[Angle-Derived Category]` = the audience-facing label that maps
+     to the strategic angle — e.g. for an "Aching Joints" angle this
+     might be *"Joint-Pain Remedy"* or *"Mobility Solution"*; for a
+     "Cortisol Belly Fat" angle this might be *"Belly-Fat Fighter"*.
+     Pull from the angle's framing, not the product's clinical name.
+
+   Examples:
+   - Angle "Aching Joints / Mobility Panic" + product "wellbe Beauty Kollagen" →
+     `# 11 Reasons Why This Collagen Supplement is the #1 Joint-Pain Remedy for 2026`
+   - Angle "Cortisol-driven belly fat" + product "Ryze Mushroom Coffee" →
+     `# 11 Reasons Why This Mushroom Coffee is the #1 Cortisol-Reduction Drink for 2026`
+   - Javvy reference (canonical) — angle "high-protein, low-sugar coffee" + product "Javvy" →
+     `# 11 Reasons Why This High-Protein Iced Coffee is the #1 Trending Drink for Spring 2026`
+
+   **The number is exactly 11.** Matches the canonical reference's H1
+   verbatim. The H1 says "11 Reasons" — even though only 10 numbered
+   sections appear in the body; the offer block functions as the
+   implied 11th reason. This is the established convention.
+
+   The product NAME (the brand-branded full name) goes in the **body
+   sections** and the **offer block**, not in the H1. The H1 stays
+   category-agnostic and angle-anchored so the article feels editorial,
+   not branded.
+
+3. **Byline strip** — a fake author name (first name + last initial), a
+   recent-looking date in the form `Month Day, Year`, and a small
+   reading-time hint. Keep it on one line, separated by `·`. Example:
+   *Jade M. · February 4, 2026 · 4 min read*
 
 4. **TLDR line** — exactly one sentence, ending in `👇`. Pattern:
    `**TLDR:** Using [Product Name] has 11+ life-changing benefits 👇`
 
-5. **The 11 numbered sections.** Each section follows this exact micro-structure:
+5. **The 10 numbered sections.** The body has exactly 10 numbered
+   sections (NOT 11 — the offer block at the end is the implied 11th
+   reason). Each section follows this exact micro-structure:
 
    ### [n]. [Bold benefit headline — short, punchy, opinionated]
    *[Optional one-line italic flavor / quoted reaction. Use this on roughly 60–70% of sections, not all.]*
-   [2–4 sentence body. First-person or second-person. Conversational. Specific. No corporate voice. Reference a sensory detail, a number, a moment, or a small story whenever you can. Tie it back to the angle.]
-   👉 **[Bold underlined CTA microcopy that names the desired action.]**
+   [2–4 sentence body. Second person ("you") by default. Conversational. Specific. No corporate voice. Reference a sensory detail, a number, a moment, or a small story whenever you can. Tie it back to the angle.]
+   👉 **[Bold CTA microcopy that names the desired action]({{destination_url}})**
 
-   - The CTA microcopy line is mandatory on **most** sections (aim for ~80% of them — skip it on 1–2 reflective sections so it doesn't feel mechanical).
+   **CTA microcopy placement rules:**
+   - **Sections #1 and #2 must NOT have the `👉` CTA microcopy line.**
+     They end after the body paragraph(s). This mirrors the canonical
+     reference — the early sections build curiosity without yet pushing
+     the click.
+   - **Sections #3 through #10 MUST have the `👉` CTA microcopy line.**
+     One per section, no exceptions.
+   - **Every CTA microcopy link target is `{{destination_url}}` — the
+     exact URL the user supplied** (or `#` if none was supplied). Do
+     NOT use `#`, do NOT use placeholder URLs, do NOT use `[Product
+     URL]`. The link in the markdown source is literally
+     `{{destination_url}}` — the renderer substitutes the URL at
+     generation time.
    - CTA microcopy varies in flavor. Examples: *Try it free for 7 days*, *Grab the starter pack while it's 58% off*, *See the 60-second routine*, *Lock in your launch-week price*. Vary verb + payoff every time.
    - Section #1 should be the strongest single benefit driven by the angle.
-   - The **last numbered section** should nudge the reader back to the top / make them feel like they've now seen the whole picture and the offer is the obvious next step.
+   - The **last numbered section (#10)** should nudge the reader back to the top / make them feel like they've now seen the whole picture and the offer is the obvious next step.
 
-6. **Closing offer block** — sits below the last numbered section. The offer details are **supplied by the user** in the `OFFER` input below — use them verbatim. Do not invent a discount %, do not invent free gifts, do not invent bonuses Claude wasn't told about. Required components, in this order:
+6. **Closing offer block** — sits below the last numbered section. Matches
+   the rhythm of the Javvy reference template (https://try.javvycoffee.com/ps/) — tight, urgent, no
+   ceremony. The offer details are **supplied by the user** in the `OFFER`
+   input below; use them verbatim. Do not invent a discount %, free gifts,
+   or bonuses Claude wasn't told about. Required components, in this order:
 
-   - One short transition line that frames the offer (e.g. *"Reaching #11 means one thing — you should probably try [Product Name] today."*).
-   - A short bullet list of what's included (3–5 bullets max). Use ✅ for each bullet. **Pull the bullets directly from the supplied `OFFER` text** — discount %, free gift(s), free shipping, bonuses, guarantee. If the user's offer text mentions "free shaker", a bullet says `✅ Free shaker bottle with every order`. If they said "30% off", the discount bullet says `✅ Save 30% on your first order`. Do not pad the list with bullets the offer didn't mention.
-   - A bold call-to-action button line, formatted as a Markdown link: `**[GET [DISCOUNT]% OFF →](#)**`. **The discount % must come from the supplied `OFFER` text.** If the user wrote "Up to 58% off", the button reads `**[GET UP TO 58% OFF →](#)**`. If they wrote "30% off", it reads `**[GET 30% OFF →](#)**`. Do not pick a different number.
-   - A scarcity / urgency line (e.g. *"⏰ Sell-out risk: high — last batch shipped in under 48 hours."*).
-   - A guarantee reassurance line ending with the literal phrase **"30-Day Money-Back Guarantee"** (this stays as the universal close, even if the user's offer mentions a different guarantee window — in that case, replace "30-Day" with the user's window, e.g. "60-Day Money-Back Guarantee").
+   - One short transition line that frames the offer (e.g. *"You've seen
+     why this works. Here's how to get it."*) — single line, no bullet list.
+   - A bold call-to-action button line, formatted as a Markdown link
+     pointing to **`{{destination_url}}`** (the exact URL the user
+     supplied, NOT `#`):
+     `**[GET [DISCOUNT]% OFF →]({{destination_url}})**`.
+     **The discount % must come from the supplied `OFFER` text.** If the
+     user wrote "Up to 58% off", the button reads
+     `**[GET UP TO 58% OFF →]({{destination_url}})**`. If they wrote
+     "30% off", it reads `**[GET 30% OFF →]({{destination_url}})**`. Do
+     not pick a different number. The link target is **always**
+     `{{destination_url}}` — the renderer substitutes the URL at
+     generation time.
+   - A scarcity / urgency line (e.g. *"⏰ Sell-out risk: high — last batch
+     shipped in under 48 hours."*).
+   - A guarantee reassurance line ending with the literal phrase **"30-Day
+     Money-Back Guarantee"** (replace "30-Day" with the user's window if
+     their offer specifies a different one, e.g. "60-Day Money-Back
+     Guarantee").
 
-7. **Soft signature line at the bottom** — italic, one short sentence. Example: *"— Written by a real customer, not a brand intern."* Vary it; do not repeat verbatim across runs.
+   **DO NOT** include a bullet list of what's included. The trust markers
+   (✓ free shipping, ✓ guarantee, etc.) are rendered as inline trust lines
+   downstream by the LanderLab page generator — keep them OUT of the
+   markdown output.
+
+   **DO NOT** append a signature line, byline, or "written by" attribution
+   at the very bottom. The guarantee line IS the last line of the output.
 
 ---
 
@@ -74,13 +156,14 @@ Mirror this structure exactly. It is the proven listicle layout.
 - ❌ Quoting yourself as if you're an authority. The voice is a real customer / friend, not an editor or expert.
 - ❌ Using the words *unleash*, *revolutionary*, *game-changer*, *next-level*, *cutting-edge*, *synergy*. Banned.
 - ❌ Repeating the same CTA microcopy twice. Every 👉 CTA line is unique.
-- ❌ **Wrong section count.** It is always exactly 11 sections. Not 10. Not 12. Not 13. The H1 reads "11 Reasons", the TLDR reads "11+", and the body contains 11 numbered sections. Count them before you finish.
+- ❌ **Wrong section count.** The body contains EXACTLY 10 numbered sections (matching the canonical reference at https://try.javvycoffee.com/ps/). The H1 reads "11 Reasons" (the offer block at the end is the implied 11th). The TLDR reads "11+". Count the numbered sections in the body before you finish — must be exactly 10.
+- ❌ **Including a comparison table** at the top of the listicle, between the byline and the numbered sections. The canonical reference has one; we explicitly REMOVE it from our adaptation. The first numbered section starts immediately after the byline / TLDR. No table, no chart, no row of icons comparing the product to alternatives.
 
 ---
 
 ## OUTPUT FORMAT
 
-Output **only** the finished listicle, in clean Markdown. No preamble, no closing meta-commentary, no "I hope this helps" sign-off. The first character of your output is the hook line; the last character of your output is the period of the signature line.
+Output **only** the finished listicle, in clean Markdown. No preamble, no closing meta-commentary, no "I hope this helps" sign-off, no signature line, no byline at the bottom. The first character of your output is the italic pre-headline callout (item #1 in the structure above). The last character of your output is the period at the end of the guarantee reassurance line.
 
 ---
 
@@ -102,13 +185,19 @@ Output **only** the finished listicle, in clean Markdown. No preamble, no closin
 {{offer}}
 ```
 
+**DESTINATION URL — the exact URL every CTA link in the listicle must point to.** All the `👉 **[...]({{destination_url}})**` microcopy links on sections #3-#10 and the closing offer block's `**[GET X% OFF →]({{destination_url}})**` button must use this URL as their link target verbatim. If this value is `#` or a placeholder, use it as-is — the renderer fills it in correctly.
+
+```
+{{destination_url}}
+```
+
 **Extra guidance from the user (treat as steering input — must be honored unless it directly contradicts a HARD RULE above):**
 
 {{guidance}}
 
 **Output language:** {{language}}
 
-Write **the entire listicle in this language** — hook line, H1, byline, TLDR, every section headline, every body block, every 👉 CTA microcopy line, the closing offer block, the signature line. The product name stays as-is (do not translate brand names). The 👉 / 👇 / ✅ marker emojis stay as-is. Idioms, sentence rhythm, and cultural references should feel native — not a literal translation of an English source. If the language uses a non-Latin script, use that script throughout (no transliteration). If the language is English, ignore this block.
+Write **the entire listicle in this language** — pre-headline callout, H1, byline, TLDR, every section headline, every body block, every 👉 CTA microcopy line, the closing offer block. The product name stays as-is (do not translate brand names). The 👉 / 👇 marker emojis stay as-is. Idioms, sentence rhythm, and cultural references should feel native — not a literal translation of an English source. If the language uses a non-Latin script, use that script throughout (no transliteration). If the language is English, ignore this block.
 
 **User feedback on the previous draft (apply this on top of everything above — keep the rest of the listicle intact and only adjust what's called out):**
 

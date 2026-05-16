@@ -341,6 +341,44 @@ export default function ListicleBuilderAppPage() {
     }
   }
 
+  // Plain re-render — no feedback, just re-run the HTML render with the
+  // FRESHEST possible offer data + the current prompt template. Used
+  // when the prompt template or the extract-offer logic has been
+  // updated server-side and the user wants to retry without typing.
+  //
+  // Order matters: we re-run extract-offer FIRST so the discount %,
+  // free-gift list, scarcity, etc. all reflect the latest fact-checked
+  // Shopify data. Then re-render the HTML on top of the refreshed
+  // offer.
+  async function regenerateHtmlFresh() {
+    if (!listicle) return;
+    setRendering(true);
+    setPipelineError(null);
+    setShowHtmlFeedback(false);
+    setListicle((prev) => prev ? { ...prev, renderedHtml: null } : prev);
+    try {
+      await patchListicle(listicle.id, { htmlFeedback: "" });
+      // Re-fetch the offer from the destination URL so stale fields
+      // (like a hallucinated discount %) get corrected. Tolerated as
+      // best-effort — if it fails, we still render with whatever's
+      // already in the row.
+      try {
+        if (listicle.destinationUrl) {
+          await extractListicleOffer(listicle.id);
+        }
+      } catch (err) {
+        console.warn("[regen] extract-offer refresh failed (non-fatal):", err);
+      }
+      await renderListicleHtml(listicle.id);
+      await refreshListicle(listicle.id);
+      setHtmlFeedback("");
+    } catch (err) {
+      setPipelineError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRendering(false);
+    }
+  }
+
   async function handleDeploy() {
     if (!listicle) return;
     setDeploying(true);
@@ -832,6 +870,14 @@ export default function ListicleBuilderAppPage() {
                     <p className="text-[11px] text-white/40 font-mono mt-1">{listicle.status === "deployed" ? "Lander deployed." : "Preview the lander, regenerate with feedback if needed, then deploy."}</p>
                   </div>
                   <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => void regenerateHtmlFresh()}
+                      disabled={rendering || deploying}
+                      title="Re-render the full HTML from scratch with the latest prompt + offer data"
+                      className="px-3 py-2 rounded text-[11px] font-mono uppercase tracking-wider border transition-all flex items-center gap-1.5 bg-white/[0.04] text-white/60 border-white/[0.08] hover:bg-white/[0.08] disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {rendering ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Regenerate
+                    </button>
                     <button onClick={() => setShowHtmlFeedback((p) => !p)} disabled={rendering || deploying} className={`px-3 py-2 rounded text-[11px] font-mono uppercase tracking-wider border transition-all flex items-center gap-1.5 ${showHtmlFeedback ? "bg-amber-500/20 text-amber-300 border-amber-500/40" : "bg-white/[0.04] text-white/60 border-white/[0.08] hover:bg-white/[0.08]"}`}>
                       <MessageSquare size={11} /> Regenerate w/ Feedback
                     </button>
@@ -881,10 +927,51 @@ export default function ListicleBuilderAppPage() {
                   </div>
                 )}
 
-                {/* iframe preview */}
+                {/* iframe preview — two iframes side-by-side so the user
+                    can review both breakpoints simultaneously. On wide
+                    viewports (≥1280px) they sit horizontally; on narrow
+                    viewports they stack. */}
                 {listicle.renderedHtml ? (
-                  <div className="rounded-lg overflow-hidden border border-white/[0.08] bg-white">
-                    <iframe srcDoc={listicle.renderedHtml} title="Listicle preview" className="w-full" style={{ minHeight: "80vh", border: 0 }} sandbox="allow-same-origin" />
+                  <div className="grid grid-cols-1 xl:grid-cols-[1fr_440px] gap-4">
+                    {/* Desktop preview — full-width responsive iframe */}
+                    <div className="flex flex-col gap-2 min-w-0">
+                      <div className="text-[10px] font-mono text-white/40 uppercase tracking-widest flex items-center gap-2">
+                        <span>Desktop preview</span>
+                        <span className="text-white/20">·</span>
+                        <span className="text-white/30 normal-case">full-width responsive</span>
+                      </div>
+                      <div className="rounded-lg overflow-hidden border border-white/[0.08] bg-white">
+                        <iframe
+                          srcDoc={listicle.renderedHtml}
+                          title="Listicle preview (desktop)"
+                          className="w-full block"
+                          style={{ minHeight: "80vh", border: 0 }}
+                          sandbox="allow-same-origin allow-scripts"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Mobile preview — constrained to 414px so the iframe's
+                        internal CSS media queries trigger the mobile layout.
+                        On xl screens this sits to the right of the desktop
+                        view; on smaller screens it stacks below. Centered
+                        in its grid cell so it looks like a phone frame. */}
+                    <div className="flex flex-col gap-2 min-w-0">
+                      <div className="text-[10px] font-mono text-white/40 uppercase tracking-widest flex items-center gap-2">
+                        <span>Mobile preview</span>
+                        <span className="text-white/20">·</span>
+                        <span className="text-white/30 normal-case">414 px wide</span>
+                      </div>
+                      <div className="rounded-lg overflow-hidden border border-white/[0.08] bg-white mx-auto" style={{ width: "100%", maxWidth: "414px" }}>
+                        <iframe
+                          srcDoc={listicle.renderedHtml}
+                          title="Listicle preview (mobile)"
+                          className="block"
+                          style={{ width: "414px", minHeight: "80vh", border: 0 }}
+                          sandbox="allow-same-origin allow-scripts"
+                        />
+                      </div>
+                    </div>
                   </div>
                 ) : rendering ? (
                   // Step 2 → 3 transition jumps here immediately, before the

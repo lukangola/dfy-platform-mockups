@@ -134,7 +134,16 @@ export async function publishLander(args: {
       };
     }
     const message = JSON.stringify(body);
-    const isPathTaken = /path.*taken|already.*used|duplicate/i.test(message);
+    // LanderLab returns various phrasings on slug collisions. Observed:
+    //   - "path is taken"
+    //   - "already used"
+    //   - "duplicate ..."
+    //   - "There is already a published lander on this domain and path"
+    // Treat any of these as a path-collision and retry with a suffix.
+    const isPathTaken =
+      /path.*taken|already.*used|duplicate|already.*published|already.*exist|path.*exist|domain.*and.*path/i.test(
+        message,
+      );
     if (!isPathTaken || attempt === maxRetries) {
       throw new Error(`LanderLab publish failed (${res.status}): ${message}`);
     }

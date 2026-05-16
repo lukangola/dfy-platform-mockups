@@ -35,6 +35,11 @@ Hard rules:
 - **No invented free gifts or claims.** The `free_gifts` array contains only items explicitly mentioned on the page as included free; empty array if none.
 - `raw_offer_summary` is the single line the upstream copy generator will weave into the listicle's CTA block — make it concrete and benefit-stacked.
 
+**DISCOUNT PERCENTAGE RULES (the most-hallucinated field — read carefully):**
+- If a "VERIFIED SHOPIFY PRICING" block appears at the bottom of the page content, the **MAX DISCOUNT** number in that block is the ground truth. Use it exactly. Do NOT pick a different number from anywhere else in the HTML. The HTML may contain dozens of unrelated percent values (badges, loyalty tiers, savings calculator widgets, comparison ribbons) — those are noise. Only the verified max discount counts.
+- If there is NO verified pricing block, you may extract a discount only if the page renders a clear single headline like "Bis zu 40% Rabatt" or "Up to 40% off" in plain HTML text near the product title or hero. Otherwise return `null` for `discount_label`. Do NOT pick the largest random `%` you see in the markup — it's almost always wrong.
+- Never fabricate a percentage. Never round up or down for visual appeal. Never average. Never guess based on "what feels promo-worthy".
+
 Output ONLY the JSON object. No markdown fences, no commentary, no preamble.
 
 ---

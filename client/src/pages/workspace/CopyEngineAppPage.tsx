@@ -295,6 +295,13 @@ export default function CopyEngineAppPage() {
         language: selectedLang.label,
         guidance: guidanceBlock,
         feedback: feedbackBlock,
+        // listicle_copy now expects {{destination_url}} for every CTA
+        // link target. The Copy Engine doesn't collect a destination
+        // URL (the Listicle Builder does), so we pass "#" as a safe
+        // placeholder. The model is instructed to use this value
+        // verbatim; the user can search-replace "#" later if they
+        // want a real URL on the Copy Engine path.
+        destination_url: "#",
       };
       if (mode === "rewrite") {
         vars.source_copy = sourceCopy.trim();

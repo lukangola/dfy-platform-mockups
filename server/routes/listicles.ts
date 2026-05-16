@@ -33,6 +33,110 @@ function sendError(res: Response, status: number, message: string) {
   res.status(status).json({ error: message });
 }
 
+/**
+ * Conditional product-reference inclusion for the per-section image
+ * generation. The image-prompt master tells NBP to "ignore the attached
+ * product image if not needed" but NBP isn't reliable about that — when
+ * product pixels are in the input pool, they bleed into outputs even
+ * when the section isn't about the product (lifestyle shots, problem
+ * shots, etc.).
+ *
+ * Fix: scan the actual per-section image prompt. If it doesn't mention
+ * the product (by name token or by generic packaging noun), pass NO
+ * product refs. The image-prompt master already produces clean generic
+ * descriptions for non-product sections; without the input pixels
+ * there's nothing for NBP to leak.
+ */
+function imagePromptMentionsProduct(text: string, productName: string | null | undefined): boolean {
+  if (!text) return false;
+  const lc = text.toLowerCase();
+  const nameTokens = (productName ?? "")
+    .toLowerCase()
+    .split(/\s+/)
+    .map((t) => t.replace(/[^a-z0-9]/g, ""))
+    .filter((t) => t.length >= 4);
+  if (nameTokens.some((t) => lc.includes(t))) return true;
+  const generic = [
+    "the product", "this product", "the packaging", "the pouch", "the bag",
+    "the bottle", "the jar", "the tube", "the spray", "the sachet",
+    "the can", "the tin", "the box", "the container", "the label",
+    "the cap", "the lid", "the pump", "the dropper", "the nozzle",
+    "the trigger", "the wrapper", "product packaging", "supplement bag",
+    "powder bag", "powder pouch",
+  ];
+  return generic.some((g) => lc.includes(g));
+}
+
+/**
+ * Discover real, working policy/legal links from a brand's website footer.
+ *
+ * Strategy: fetch the origin homepage, scan ALL anchors, find ones whose
+ * text OR href slug matches a policy keyword (impressum, datenschutz, agb,
+ * widerruf, privacy, terms, refund, legal, imprint, contact, kontakt).
+ * Resolve relative URLs to absolute against the origin. Return up to 6
+ * unique links — these are the actual published policy pages the brand
+ * owns, so the lander we deploy can link to them and they will resolve
+ * for end users.
+ *
+ * Falls back to an empty array on any fetch error — the prompt then just
+ * omits the footer link bar instead of rendering broken /policies/* URLs.
+ */
+async function discoverFooterLinks(originUrl: string): Promise<{ label: string; href: string }[]> {
+  try {
+    const origin = new URL(originUrl).origin;
+    const r = await fetch(origin + "/", {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; InanaBot/1.0)" },
+    });
+    if (!r.ok) return [];
+    const html = (await r.text()).slice(0, 200_000);
+
+    // Match every <a href="..." ...>text</a> in the page.
+    const anchorRe = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    const keywordRe =
+      /(impressum|datenschutz|datenschutzerkl|agb|widerruf|widerrufsbelehrung|privacy|terms|refund|legal[- ]?notice|imprint|kontakt|contact|shipping|versand)/i;
+    const seen = new Set<string>();
+    const found: { label: string; href: string; priority: number }[] = [];
+
+    let m: RegExpExecArray | null;
+    while ((m = anchorRe.exec(html)) !== null) {
+      const rawHref = m[1].trim();
+      const rawText = m[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+      if (!rawText || rawText.length > 40) continue;
+      const haystack = rawHref + " " + rawText;
+      if (!keywordRe.test(haystack)) continue;
+
+      let absoluteHref: string;
+      try {
+        absoluteHref = new URL(rawHref, origin).toString();
+      } catch {
+        continue;
+      }
+      // Only same-origin links — we don't want to link to external
+      // social profiles, third-party cookie pages, etc.
+      if (new URL(absoluteHref).origin !== origin) continue;
+      if (seen.has(absoluteHref)) continue;
+      seen.add(absoluteHref);
+
+      // Priority order: imprint > privacy > terms > refund > shipping > contact
+      const slug = (rawHref + " " + rawText).toLowerCase();
+      let priority = 99;
+      if (/impressum|imprint|legal[- ]?notice/.test(slug)) priority = 1;
+      else if (/datenschutz|privacy/.test(slug)) priority = 2;
+      else if (/agb|terms/.test(slug)) priority = 3;
+      else if (/widerruf|refund/.test(slug)) priority = 4;
+      else if (/shipping|versand/.test(slug)) priority = 5;
+      else if (/kontakt|contact/.test(slug)) priority = 6;
+      found.push({ label: rawText, href: absoluteHref, priority });
+    }
+
+    found.sort((a, b) => a.priority - b.priority);
+    return found.slice(0, 6).map(({ label, href }) => ({ label, href }));
+  } catch (err) {
+    console.warn(`[listicles] discoverFooterLinks failed for ${originUrl}:`, err);
+    return [];
+  }
+}
+
 async function loadListicle(id: string) {
   const [row] = await db
     .select()
@@ -161,7 +265,64 @@ listiclesRouter.post("/:id/extract-offer", async (req: Request, res: Response) =
       return res.json({ offer: { raw_offer_summary: null } });
     }
 
-    const prompt = loadPrompt("offer_extract", { page_content: pageContent });
+    // SHOPIFY DETERMINISTIC PRICING FACT-CHECK
+    //
+    // The HTML alone is unreliable for discount extraction — Shopify product
+    // pages render pricing in JS, so the raw HTML contains lots of percent
+    // values (15%, 20%, 30%, 40% across variants, plus unrelated noise) and
+    // no single headline "X% off" number. Claude tends to confabulate a
+    // number that "feels right" rather than pulling one verbatim.
+    //
+    // Shopify exposes the canonical product data at `<product-url>.json`
+    // (no auth required, public). We fetch it, compute the actual max
+    // discount across all variants (Math.round((1 - price/compare) * 100)),
+    // and feed that as a verified fact to the offer_extract prompt — so
+    // Claude can't invent a different number.
+    let pricingFacts = "";
+    try {
+      const m = row.destinationUrl.match(/^(.+\/products\/[^/?#]+)/);
+      if (m) {
+        const jsonUrl = m[1] + ".json";
+        const jr = await fetch(jsonUrl, {
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; InanaBot/1.0)" },
+        });
+        if (jr.ok) {
+          const productJson = (await jr.json()) as {
+            product?: {
+              variants?: { title?: string; price?: string | number; compare_at_price?: string | number | null }[];
+            };
+          };
+          const variants = productJson.product?.variants ?? [];
+          const rows: string[] = [];
+          let maxDiscount = 0;
+          for (const v of variants) {
+            const price = typeof v.price === "string" ? parseFloat(v.price) : (v.price ?? 0);
+            const compare =
+              v.compare_at_price == null
+                ? 0
+                : typeof v.compare_at_price === "string"
+                  ? parseFloat(v.compare_at_price)
+                  : v.compare_at_price;
+            const discount = compare > 0 && price > 0 ? Math.round((1 - price / compare) * 100) : 0;
+            if (discount > maxDiscount) maxDiscount = discount;
+            rows.push(`  - ${v.title ?? "(untitled)"}: price=${price}, compare_at=${compare || "(none)"}, discount=${discount}%`);
+          }
+          if (variants.length > 0) {
+            pricingFacts =
+              `\n\n## VERIFIED SHOPIFY PRICING (canonical — use this, not your interpretation of the HTML)\n\n` +
+              `Variants:\n${rows.join("\n")}\n\n` +
+              `**MAX DISCOUNT ACROSS ALL VARIANTS: ${maxDiscount}%**\n\n` +
+              `Use exactly ${maxDiscount}% in the discount_label (the canonical headline % for a "Bis zu X%" / "Up to X%" message). ` +
+              `If max discount is 0, return null for discount_label — do NOT invent one.\n`;
+            console.log(`[listicles] Shopify pricing fact-check: max discount = ${maxDiscount}% across ${variants.length} variants`);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[listicles] Shopify .json fetch failed (non-fatal):`, err);
+    }
+
+    const prompt = loadPrompt("offer_extract", { page_content: pageContent + pricingFacts });
     const result = await generateText({
       systemPrompt: prompt.rendered,
       userMessage: "Extract the offer from the page content above. Return only JSON.",
@@ -223,6 +384,12 @@ listiclesRouter.post("/:id/generate-copy", async (req: Request, res: Response) =
       angle: angleBlock,
       brand_context: brandContext || "(no brand context available)",
       offer,
+      // Destination URL drives every CTA link target in the rendered
+      // markdown — both the per-section `👉` microcopy and the final
+      // offer block button. Fall back to "#" if the user didn't paste
+      // one (which shouldn't happen on the Listicle Builder, but the
+      // shared Copy Engine path passes "#" too — see CopyEngineAppPage).
+      destination_url: row.destinationUrl?.trim() || "#",
       language: row.language,
       guidance: row.guidance?.trim() || "(no extra guidance)",
       feedback: "(no prior draft to revise)",
@@ -332,7 +499,12 @@ listiclesRouter.post("/:id/images/:imageId/generate", async (req: Request, res: 
       .from(schema.products)
       .where(eq(schema.products.id, listicleRow.productId))
       .limit(1);
-    const productRefs = product ? [product.productImageUrl, product.productBackImageUrl, product.contentImageUrl].filter((u): u is string => !!u) : [];
+    const allProductRefs = product
+      ? [product.productImageUrl, product.productBackImageUrl, product.contentImageUrl].filter((u): u is string => !!u)
+      : [];
+
+    const productMentioned = imagePromptMentionsProduct(imgRow.imagePrompt, product?.name);
+    const productRefs = productMentioned ? allProductRefs : [];
 
     await db
       .update(schema.listicleImages)
@@ -343,7 +515,24 @@ listiclesRouter.post("/:id/images/:imageId/generate", async (req: Request, res: 
       // Feedback path: use the focused rework prompt (same as character b-roll
       // image feedback path), passing the prior image first as the edit
       // source. Otherwise: fresh generation with the original prompt.
-      let finalPrompt = imgRow.imagePrompt;
+      //
+      // In-flight prompt sanitizer: earlier versions of the image-prompt
+      // generator appended "Don't include any written copy in the image."
+      // which NBP/edit (correctly) interpreted as "strip ALL text, including
+      // the product packaging branding" — producing blank generic pouches
+      // instead of the real product. We replace that legacy suffix with the
+      // corrected guidance so cached image rows on older listicles benefit
+      // from the fix on Regen without needing to restart from step 1.
+      const sanitizePrompt = (text: string): string => {
+        if (!text) return text;
+        const legacyRe = /Don'?t include any written copy in the image\.?/gi;
+        if (!legacyRe.test(text)) return text;
+        return text.replace(
+          legacyRe,
+          "Do not add any ad copy, captions, headlines, or text overlays to the image. If the product appears in the scene, keep the packaging exactly as shown in the reference image — preserve the original logo, brand name, and all label text verbatim; do not invent, alter, translate, or remove any text on the packaging."
+        );
+      };
+      let finalPrompt = sanitizePrompt(imgRow.imagePrompt);
       let imageUrls: string[];
       if (feedback && imgRow.imageUrl) {
         const reworkPrompt = loadPrompt("character_broll_image_feedback", { feedback });
@@ -353,19 +542,33 @@ listiclesRouter.post("/:id/images/:imageId/generate", async (req: Request, res: 
         imageUrls = productRefs;
       }
 
+      // Pick the right fal model: nano-banana-pro/edit is image-to-image and
+      // requires at least one image_url. When the per-section prompt does
+      // NOT mention the product (and we therefore deliberately withheld the
+      // product reference images), fall back to the plain nano-banana-pro
+      // text-to-image variant — same image style/family, just no img2img.
+      // Same fallback shape as Single Scene.
+      const hasInputImages = imageUrls.length > 0;
       const result = await generateImage({
-        model: "fal-ai/nano-banana-pro/edit",
-        input: {
-          prompt: finalPrompt,
-          image_urls: imageUrls,
-          // Square 1:1 — matches the reference listicle template and the
-          // user's explicit preference. Different from B-Roll (9:16
-          // mobile-vertical) — this is for editorial-style images that
-          // sit inline with body text.
-          aspect_ratio: "1:1",
-          num_images: 1,
-          output_format: "jpeg",
-        },
+        model: hasInputImages ? "fal-ai/nano-banana-pro/edit" : "fal-ai/nano-banana-pro",
+        input: hasInputImages
+          ? {
+              prompt: finalPrompt,
+              image_urls: imageUrls,
+              // Square 1:1 — matches the reference listicle template and the
+              // user's explicit preference. Different from B-Roll (9:16
+              // mobile-vertical) — this is for editorial-style images that
+              // sit inline with body text.
+              aspect_ratio: "1:1",
+              num_images: 1,
+              output_format: "jpeg",
+            }
+          : {
+              prompt: finalPrompt,
+              aspect_ratio: "1:1",
+              num_images: 1,
+              output_format: "jpeg",
+            },
       });
       const url = result.urls[0];
       if (!url) throw new Error("No image URL returned");
@@ -463,7 +666,30 @@ listiclesRouter.post("/:id/render-html", async (req: Request, res: Response) => 
       secondary_cta_text?: string;
       countdown_label?: string;
       raw_offer_summary?: string;
+      free_gifts?: string[];
     };
+
+    // Discover real, working policy links from the brand's actual website
+    // footer (Impressum, Datenschutz, AGB, Widerruf, etc.) so the lander
+    // we publish can link to legitimate pages that resolve in production.
+    // Falls back to an empty string on failure — the prompt then renders
+    // the footer link-free.
+    const footerLinks = row.destinationUrl ? await discoverFooterLinks(row.destinationUrl) : [];
+    const footerLinksHtml = footerLinks.length
+      ? footerLinks
+          .map(({ label, href }) => `<a href="${href}" target="_blank" rel="noopener">${label}</a>`)
+          .join(' <span style="opacity:0.4;margin:0 4px;">·</span> ')
+      : "";
+
+    // Derive the bare percent number from the discount_label so the prompt
+    // can compose the structured Javvy-style headline + CTA button
+    // ("UP TO 58% OFF" + "GET 58% OFF →"). The offer_extract step is the
+    // single source of truth for the discount — it pulls it verbatim from
+    // the user's destination URL. Here we just parse the number out of the
+    // label so we don't depend on the model to do that arithmetic.
+    const discountPercentMatch =
+      offer.discount_label?.match(/(\d{1,3})\s*%/) ?? offer.raw_offer_summary?.match(/(\d{1,3})\s*%/) ?? null;
+    const discountPercent = discountPercentMatch ? discountPercentMatch[1] : "";
 
     // Parse the listicle markdown into structured reasons. Re-uses the
     // same section regex from generate-image-prompts so the order matches.
@@ -511,13 +737,34 @@ listiclesRouter.post("/:id/render-html", async (req: Request, res: Response) => 
     const mainHeadline = h1Match?.[1]?.trim() ?? `${parsedReasons.length} reasons to try ${product.name}`;
     const hookLine = hookMatch?.[1]?.trim() ?? `Read this BEFORE you ${row.angleName ? "decide on your next " + row.angleName.toLowerCase() : "make your next purchase"}.`;
 
+    // Build the two-line announcement strings — Javvy pattern:
+    //   Line 1 = campaign-style label (the visible top line like
+    //            "🇺🇸 MEMORIAL DAY SPECIAL ✨")
+    //   Line 2 = discount + free-gifts callout (like "UP TO 58% OFF
+    //            WITH FREE GIFTS")
+    // Localized for the listicle language. Free-gifts suffix only
+    // appears when the offer extract actually found free gifts.
+    const isDe = row.language === "de";
+    const announcementLine1 = isDe ? "✨ ZEITLICH BEGRENZTES ANGEBOT ✨" : "✨ LIMITED-TIME OFFER ✨";
+    const hasFreeGifts = Boolean(offer.free_gifts && offer.free_gifts.length > 0);
+    const announcementLine2 = (() => {
+      if (!discountPercent && !offer.discount_label) return "";
+      const discountText = discountPercent
+        ? isDe
+          ? `BIS ZU ${discountPercent}% RABATT`
+          : `UP TO ${discountPercent}% OFF`
+        : (offer.discount_label ?? "").toUpperCase();
+      const suffix = hasFreeGifts ? (isDe ? " MIT GRATIS-GESCHENKEN" : " WITH FREE GIFTS") : "";
+      return discountText + suffix;
+    })();
+
     const vars: Record<string, string> = {
       LANGUAGE: row.language,
       PRODUCT_NAME: product.name,
       PRODUCT_CATEGORY: product.category ?? "product",
       AUDIENCE_DESCRIPTION: research.description ?? "people interested in this category",
-      ANNOUNCEMENT_LINE_1: offer.discount_label ?? "Limited-time offer",
-      ANNOUNCEMENT_LINE_2: offer.shipping_line ?? offer.guarantee_line ?? "",
+      ANNOUNCEMENT_LINE_1: announcementLine1,
+      ANNOUNCEMENT_LINE_2: announcementLine2,
       MAIN_HEADLINE: mainHeadline,
       AUTHOR_NAME: author.name,
       AUTHOR_PHOTO_URL: author.img,
@@ -528,8 +775,12 @@ listiclesRouter.post("/:id/render-html", async (req: Request, res: Response) => 
       OFFER_PRODUCT_IMAGE_URL: product.productImageUrl ?? "",
       OFFER_HEADLINE: offer.discount_label ?? `Get ${product.name} today`,
       OFFER_SUBLINE: offer.raw_offer_summary ?? "",
+      DISCOUNT_PERCENT: discountPercent,
+      DISCOUNT_LABEL: offer.discount_label ?? "",
+      HAS_FREE_GIFTS: offer.free_gifts && offer.free_gifts.length > 0 ? "yes" : "no",
       CTA_TEXT: offer.cta_text ?? "Get the offer",
       CTA_URL: row.destinationUrl ?? "#",
+      FOOTER_LINKS_HTML: footerLinksHtml,
       COUNTDOWN_LABEL: offer.countdown_label ?? "Offer ends in",
       SCARCITY_LINE: offer.scarcity_line ?? "",
       SHIPPING_LINE: offer.shipping_line ?? "",
