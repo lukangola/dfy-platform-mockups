@@ -69,9 +69,12 @@ async function startServer() {
   const app = express();
   const server = createServer(app);
 
-  // 20 MB gives headroom above the 8 MB raw-image cap in upload-image —
-  // base64 encoding adds ~33%, so an 8 MB image becomes ~10.7 MB on the wire.
-  app.use(express.json({ limit: "20mb" }));
+  // 60 MB to accommodate uploaded video ads in the Listicle Builder's
+  // "winning ad" workflow (30-60s ad clips at decent quality ≈ 20-50 MB
+  // raw; base64 wire-encoding adds ~33%). The 8 MB raw-image cap in
+  // upload-image is enforced separately in that handler — this is just
+  // the outer Express body parser limit.
+  app.use(express.json({ limit: "60mb" }));
 
   // Mount globally so every downstream handler has `req.auth` (or null).
   // Auth-required endpoints opt in via the requireAuth / requireAdmin

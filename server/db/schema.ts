@@ -279,9 +279,9 @@ export const listicles = pgTable("listicles", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
   brandId: uuid("brand_id").notNull(),
   productId: uuid("product_id").notNull(),
-  /** "generate" if produced by the Copy Engine listicle prompt, "paste" if user-supplied */
+  /** "generate" (Copy Engine), "paste" (user-supplied), "winning_ad" (analyzed from uploaded ad) */
   source: text("source").notNull(),
-  status: text("status").notNull().default("drafting"), // drafting | images | rendering | ready | deployed | failed
+  status: text("status").notNull().default("drafting"), // drafting | analyzing | images | rendering | ready | deployed | failed
   angleName: text("angle_name"),
   language: text("language").notNull().default("en"),
   /** The user's destination URL — the offer/checkout page. Used for CTA_URL + offer extraction. */
@@ -292,6 +292,14 @@ export const listicles = pgTable("listicles", {
   copyMarkdown: text("copy_markdown"),
   /** Free-form guidance the user provided alongside the copy generation request */
   guidance: text("guidance"),
+  /** Winning ad workflow: fal.storage URL of the uploaded ad (video .mp4/.mov or static .jpg/.png). Null for other sources. */
+  winningAdUrl: text("winning_ad_url"),
+  /** Winning ad workflow: "video" | "static" */
+  winningAdType: text("winning_ad_type"),
+  /** Winning ad workflow: full audio transcript from fal whisper. Null for static ads or other sources. */
+  winningAdTranscript: text("winning_ad_transcript"),
+  /** Winning ad workflow: structured angle JSON extracted by ad_extract_angle prompt. Shape: { primary_angle_name, hook, mechanism, target_pain, key_claims[], tone, creative_format, summary } */
+  winningAdAnalysis: jsonb("winning_ad_analysis"),
   /** The fully-rendered HTML page (output of listicle_lander_html prompt). Stored verbatim. */
   renderedHtml: text("rendered_html"),
   /** User feedback when regenerating the HTML render */

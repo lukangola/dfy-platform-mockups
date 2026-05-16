@@ -23,7 +23,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
 import { db, schema } from "../lib/db.js";
-import { generateImage } from "../lib/fal.js";
+import { generateImage, transcribeAudio, uploadToFalStorage } from "../lib/fal.js";
 import { buildEditorUrl, buildSlug, createLander, pickPrimaryDomain, publishLander, saveVariantHtml } from "../lib/landerlab.js";
 import { loadPrompt } from "../lib/prompts.js";
 
@@ -221,6 +221,9 @@ listiclesRouter.patch("/:id", async (req: Request, res: Response) => {
       "destinationUrl",
       "htmlFeedback",
       "language",
+      // Winning-ad workflow: the editable analysis preview lets the user
+      // tweak what Claude extracted before generating the listicle copy.
+      "winningAdAnalysis",
     ] as const;
     const patch: Record<string, unknown> = {};
     for (const k of allowed) {
@@ -234,6 +237,135 @@ listiclesRouter.patch("/:id", async (req: Request, res: Response) => {
     res.json({ listicle: updated });
   } catch (err) {
     console.error("[listicles] patch failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+// ── Winning-ad workflow: analyze uploaded ad ──────────────────────
+//
+// Used by the "Build from a winning ad" mode. Client uploads a video
+// (.mp4/.mov) or static (.jpg/.png) ad as a base64 dataUrl. We:
+//   1. Decode + upload the file to fal.storage so we have a stable URL
+//      to (a) feed to fal whisper (video) or Claude vision (static)
+//      and (b) replay back to the user.
+//   2. For video: run fal-ai/whisper on the audio track → transcript.
+//      For static: skip transcription; the image itself is the input.
+//   3. Run prompts/ad_extract_angle.md to pull the structured angle
+//      (primary_angle_name, hook, mechanism, target_pain, key_claims[],
+//      tone, creative_format, summary) so the listicle copy generator
+//      can later open the article with sections that mirror the ad.
+//   4. Persist winningAdUrl / winningAdType / winningAdTranscript /
+//      winningAdAnalysis on the listicle row. Return analysis to client
+//      so the user can review + tweak it in the UI before continuing.
+
+function decodeDataUrl(dataUrl: string): { buffer: Buffer; mime: string } | null {
+  const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!m) return null;
+  return { mime: m[1], buffer: Buffer.from(m[2], "base64") };
+}
+
+listiclesRouter.post("/:id/analyze-ad", async (req: Request, res: Response) => {
+  try {
+    const row = await loadListicle(req.params.id);
+    if (!row) return sendError(res, 404, "Listicle not found");
+
+    const body = req.body as {
+      dataUrl?: string;
+      filename?: string;
+    };
+    if (!body.dataUrl) return sendError(res, 400, "dataUrl is required");
+    const decoded = decodeDataUrl(body.dataUrl);
+    if (!decoded) return sendError(res, 400, "dataUrl is not a valid base64 data URL");
+    const { buffer, mime } = decoded;
+    const filename = body.filename ?? `ad-${Date.now()}`;
+
+    // Determine ad type from MIME. Anything video/* or audio/* uses the
+    // transcription path; image/* uses the Claude-vision path. We reject
+    // everything else.
+    const adType: "video" | "static" =
+      mime.startsWith("video/") || mime.startsWith("audio/")
+        ? "video"
+        : mime.startsWith("image/")
+          ? "static"
+          : (() => {
+              throw new Error(`Unsupported MIME for ad upload: ${mime}`);
+            })();
+
+    await touch(row.id, { status: "analyzing", error: null });
+
+    // 1) Upload to fal.storage for stable URL.
+    const adUrl = await uploadToFalStorage(buffer, mime, filename);
+
+    // 2) Transcribe if video, else pass image straight to the prompt.
+    let transcript: string | null = null;
+    if (adType === "video") {
+      try {
+        const t = await transcribeAudio({ audioUrl: adUrl });
+        transcript = t.text || null;
+      } catch (err) {
+        // If transcription fails we don't kill the whole flow — Claude
+        // can still try to read the static frames via vision. Log and
+        // continue with empty transcript.
+        console.warn(`[listicles] fal whisper failed for ${adUrl}:`, err);
+      }
+    }
+
+    // 3) Load brand + product context for the prompt.
+    const [product] = await db.select().from(schema.products).where(eq(schema.products.id, row.productId)).limit(1);
+    const [brand] = await db.select().from(schema.brands).where(eq(schema.brands.id, row.brandId)).limit(1);
+    const brandDescription = ((brand?.research ?? {}) as { description?: string }).description ?? "";
+
+    // 4) Extract angle via Claude. For static ads we attach the image
+    //    URL so Claude vision can read it. For video we just hand over
+    //    the transcript text.
+    const prompt = loadPrompt("ad_extract_angle", {
+      ad_type: adType,
+      product_name: product?.name ?? "",
+      product_category: product?.category ?? "",
+      brand_description: brandDescription,
+      ad_content: adType === "video"
+        ? (transcript?.trim() || "(no transcript available — transcription failed or audio had no speech)")
+        : "(see attached image)",
+    });
+
+    const result = await generateText({
+      systemPrompt: prompt.rendered,
+      userMessage: "Extract the marketing angle from the ad above. Return ONLY the JSON object.",
+      model: prompt.config.model,
+      maxTokens: prompt.config.maxTokens ?? 2000,
+      ...(adType === "static" ? { imageUrls: [adUrl] } : {}),
+    });
+
+    let analysis: Record<string, unknown> = {};
+    try {
+      const cleaned = result.text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+      analysis = JSON.parse(cleaned);
+    } catch {
+      const m = result.text.match(/\{[\s\S]*\}/);
+      if (m) analysis = JSON.parse(m[0]);
+    }
+
+    await touch(row.id, {
+      winningAdUrl: adUrl,
+      winningAdType: adType,
+      winningAdTranscript: transcript,
+      winningAdAnalysis: analysis,
+      // Mirror the primary angle name onto the canonical angleName field so
+      // downstream UI + render still shows a single source of truth.
+      angleName: (analysis.primary_angle_name as string) ?? row.angleName,
+      status: "drafting",
+      error: null,
+    });
+
+    res.json({
+      adUrl,
+      adType,
+      transcript,
+      analysis,
+    });
+  } catch (err) {
+    console.error("[listicles] analyze-ad failed:", err);
+    await touch(req.params.id, { status: "failed", error: err instanceof Error ? err.message : String(err) }).catch(() => {});
     sendError(res, 500, err instanceof Error ? err.message : String(err));
   }
 });
@@ -379,6 +511,49 @@ listiclesRouter.post("/:id/generate-copy", async (req: Request, res: Response) =
       (brand.research as { description?: string })?.description ? `Description: ${(brand.research as { description?: string }).description}` : null,
     ].filter(Boolean).join("\n");
 
+    // Winning-ad context (only when source === "winning_ad"). Build the
+    // structured block the prompt expects + a list of the brand's OTHER
+    // research angles to use as catch-all coverage in the later sections.
+    const isWinningAd = row.source === "winning_ad" && !!row.winningAdAnalysis;
+    const winningAdAnalysis = (row.winningAdAnalysis ?? {}) as {
+      primary_angle_name?: string;
+      hook?: string;
+      mechanism?: string;
+      target_pain?: string;
+      key_claims?: string[];
+      tone?: string;
+      creative_format?: string;
+      summary?: string;
+    };
+    const winningAdAngleBlock = isWinningAd
+      ? [
+          `Primary angle: ${winningAdAnalysis.primary_angle_name ?? "(missing)"}`,
+          `Hook (first 5 seconds / above-the-fold): ${winningAdAnalysis.hook ?? "(missing)"}`,
+          `Mechanism: ${winningAdAnalysis.mechanism ?? "(missing)"}`,
+          `Target pain: ${winningAdAnalysis.target_pain ?? "(missing)"}`,
+          `Key claims:\n${(winningAdAnalysis.key_claims ?? []).map((c) => `  - ${c}`).join("\n") || "  - (none extracted)"}`,
+          `Tone: ${winningAdAnalysis.tone ?? "(unspecified)"}`,
+          `Creative format: ${winningAdAnalysis.creative_format ?? "(unspecified)"}`,
+        ].join("\n")
+      : "(not applicable — this listicle isn't tied to a specific winning ad)";
+
+    // "Other angles" block — the brand's broader research angles that
+    // aren't the winning-ad angle. Used as catch-all material in
+    // sections #4-#10 of the winning-ad flow. We pull from
+    // product.research.angles (already populated by the DFY Research
+    // workflow) and exclude the one whose name matches the winning ad's
+    // primary angle (if any match).
+    const allAngles = ((product.research as { angles?: { name: string; block: string }[] })?.angles ?? []);
+    const winningAdAngleName = (winningAdAnalysis.primary_angle_name ?? "").toLowerCase();
+    const otherAngles = isWinningAd
+      ? allAngles.filter((a) => a.name.toLowerCase() !== winningAdAngleName)
+      : [];
+    const otherAnglesBlock = isWinningAd
+      ? otherAngles.length > 0
+        ? otherAngles.map((a) => `### ${a.name}\n${a.block}`).join("\n\n")
+        : "(no other research angles available — write the catch-all sections in the brand's voice without a pre-defined angle)"
+      : "(not applicable — only used in the winning-ad workflow)";
+
     const prompt = loadPrompt("listicle_copy", {
       product: product.name,
       angle: angleBlock,
@@ -393,6 +568,12 @@ listiclesRouter.post("/:id/generate-copy", async (req: Request, res: Response) =
       language: row.language,
       guidance: row.guidance?.trim() || "(no extra guidance)",
       feedback: "(no prior draft to revise)",
+      // Winning-ad variables — "no" when not in that flow so the prompt's
+      // conditional routing rules stay dormant.
+      winning_ad_present: isWinningAd ? "yes" : "no",
+      winning_ad_angle_block: winningAdAngleBlock,
+      winning_ad_summary: isWinningAd ? winningAdAnalysis.summary ?? "(no summary available)" : "(not applicable)",
+      other_angles_block: otherAnglesBlock,
     });
 
     const result = await generateText({

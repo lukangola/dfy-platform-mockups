@@ -962,7 +962,23 @@ export async function generateMessageTestingCopy(args: {
 // ---------- Listicle Builder ----------
 
 export type ListicleStatus =
-  | "drafting" | "images" | "rendering" | "ready" | "deployed" | "failed";
+  | "drafting" | "analyzing" | "images" | "rendering" | "ready" | "deployed" | "failed";
+
+/**
+ * Structured marketing-angle JSON extracted from an uploaded winning ad
+ * by the ad_extract_angle prompt. Used to prime the listicle copy
+ * generator so the first sections of the lander mirror the ad's pitch.
+ */
+export type WinningAdAnalysis = {
+  primary_angle_name?: string;
+  hook?: string;
+  mechanism?: string;
+  target_pain?: string;
+  key_claims?: string[];
+  tone?: string;
+  creative_format?: string;
+  summary?: string;
+};
 
 export type ListicleRow = {
   id: string;
@@ -970,7 +986,7 @@ export type ListicleRow = {
   updatedAt: string;
   brandId: string;
   productId: string;
-  source: "generate" | "paste";
+  source: "generate" | "paste" | "winning_ad";
   status: ListicleStatus;
   angleName: string | null;
   language: string;
@@ -987,6 +1003,12 @@ export type ListicleRow = {
   publishedUrl: string | null;
   previewUrl: string | null;
   editorUrl: string | null;
+  // Winning-ad workflow: populated after POST /:id/analyze-ad. null
+  // for source === "generate" | "paste".
+  winningAdUrl: string | null;
+  winningAdType: "video" | "static" | null;
+  winningAdTranscript: string | null;
+  winningAdAnalysis: WinningAdAnalysis | null;
   error: string | null;
 };
 
@@ -1007,7 +1029,7 @@ export type ListicleImageRow = {
 export function createListicle(args: {
   brandId: string;
   productId: string;
-  source: "generate" | "paste";
+  source: "generate" | "paste" | "winning_ad";
   language?: string;
   destinationUrl?: string;
   angleName?: string;
@@ -1023,7 +1045,13 @@ export function getListicle(id: string): Promise<{ listicle: ListicleRow; images
 
 export async function patchListicle(
   id: string,
-  patch: Partial<Pick<ListicleRow, "copyMarkdown" | "angleName" | "guidance" | "destinationUrl" | "htmlFeedback" | "language">>,
+  patch: Partial<Pick<ListicleRow, "copyMarkdown" | "angleName" | "guidance" | "destinationUrl" | "htmlFeedback" | "language">> & {
+    // Winning-ad analysis is the editable preview the user can tweak
+    // before generating the listicle copy. Server validates the shape;
+    // here we accept the partial type so the UI can patch individual
+    // fields one at a time.
+    winningAdAnalysis?: WinningAdAnalysis;
+  },
 ): Promise<{ listicle: ListicleRow }> {
   const res = await fetch(`/api/listicles/${id}`, {
     method: "PATCH",
@@ -1033,6 +1061,35 @@ export async function patchListicle(
   const payload = (await res.json().catch(() => ({}))) as { listicle: ListicleRow } | ApiError;
   if (!res.ok) throw new Error((payload as ApiError)?.error ?? `Request failed: ${res.status}`);
   return payload as { listicle: ListicleRow };
+}
+
+/**
+ * Upload a winning paid-social ad (video .mp4/.mov or static .jpg/.png)
+ * for analysis. Server:
+ *   1. Decodes the base64 dataUrl, uploads to fal.storage.
+ *   2. Video → fal whisper transcript → ad_extract_angle prompt with the
+ *      transcript.  Static → ad_extract_angle prompt with the image
+ *      attached via Claude vision.
+ *   3. Persists winningAdUrl / winningAdType / winningAdTranscript /
+ *      winningAdAnalysis on the listicle row.
+ * Returns the analysis + transcript so the UI can show an editable
+ * review before the user triggers copy generation.
+ */
+export function analyzeListicleAd(
+  id: string,
+  args: { dataUrl: string; filename: string },
+): Promise<{
+  adUrl: string;
+  adType: "video" | "static";
+  transcript: string | null;
+  analysis: WinningAdAnalysis;
+}> {
+  return post<{
+    adUrl: string;
+    adType: "video" | "static";
+    transcript: string | null;
+    analysis: WinningAdAnalysis;
+  }>(`/api/listicles/${id}/analyze-ad`, args);
 }
 
 export function extractListicleOffer(id: string): Promise<{ offer: Record<string, unknown> }> {

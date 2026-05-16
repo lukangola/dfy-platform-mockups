@@ -302,6 +302,14 @@ export default function CopyEngineAppPage() {
         // verbatim; the user can search-replace "#" later if they
         // want a real URL on the Copy Engine path.
         destination_url: "#",
+        // Winning-ad routing vars — the Copy Engine path NEVER uses the
+        // winning-ad workflow (that's Listicle Builder only), so always
+        // pass "no" to keep the conditional rules in listicle_copy
+        // dormant. The other slots get harmless placeholders.
+        winning_ad_present: "no",
+        winning_ad_angle_block: "(not applicable — Copy Engine doesn't use the winning-ad workflow)",
+        winning_ad_summary: "(not applicable)",
+        other_angles_block: "(not applicable)",
       };
       if (mode === "rewrite") {
         vars.source_copy = sourceCopy.trim();

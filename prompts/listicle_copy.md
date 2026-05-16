@@ -187,6 +187,36 @@ Output **only** the finished listicle, in clean Markdown. No preamble, no closin
 
 **DESTINATION URL — the exact URL every CTA link in the listicle must point to.** All the `👉 **[...]({{destination_url}})**` microcopy links on sections #3-#10 and the closing offer block's `**[GET X% OFF →]({{destination_url}})**` button must use this URL as their link target verbatim. If this value is `#` or a placeholder, use it as-is — the renderer fills it in correctly.
 
+---
+
+## WINNING-AD CONTEXT (only set when the user is building the listicle from a specific paid-ad they're scaling)
+
+**`winning_ad_present`:** {{winning_ad_present}}
+
+**Winning-ad angle, hook, mechanism, and key claims (verbatim from the ad):**
+
+{{winning_ad_angle_block}}
+
+**Winning-ad plain-English summary:**
+
+{{winning_ad_summary}}
+
+**OTHER STRATEGIC ANGLES** — the brand's broader angle research, used as the "catch-all" coverage in the later sections of the listicle:
+
+{{other_angles_block}}
+
+---
+
+## WHEN `winning_ad_present` IS `yes` (winning-ad workflow) — CRITICAL ROUTING RULES
+
+When the value of `winning_ad_present` above is `yes` (and ONLY then), the listicle's structure changes in these specific ways. When it's `no`, ignore this entire section and follow the default rules.
+
+- **Pre-headline + H1 + hook line + TLDR must echo the winning ad.** Mirror the ad's *hook* and *target_pain* in the language of the H1 and the italic pre-headline callout. The reader saw the ad three seconds ago — the lander must feel like the same conversation, not a topic switch. If the ad opens with "Stop relying on ibuprofen for your morning aches", the H1 might be "11 Reasons This Collagen Powder Is the #1 Joint Comeback for People Who Hate Ibuprofen" (or the German equivalent), and the hook line continues that exact frame.
+- **Sections #1, #2, and #3 are the "post-click continuation".** Each of these three sections must directly extend ONE of the winning ad's key claims, mechanism beats, or proof points. Use the ad's specific phrasing where you can — same numbers, same mechanism wording, same emotional register. The reader should feel "yes, this is the thing I just saw, only deeper". Do NOT introduce new angle territory in #1-#3.
+- **Sections #4 through #10 are the "catch-all".** Now expand outward. Pull from the `OTHER STRATEGIC ANGLES` block above and weave in 1-2 additional research angles to broaden the case — so visitors who came in for the ad's specific hook discover other reasons to buy. Each later section can lean into a different research angle. Keep them in the spine of the overall promise, but stop being a clone of the ad's narrow message.
+- **Tone matches the ad.** The `winning_ad_angle_block` includes a `tone` field — adopt it. If the ad is empathetic + science-led, the listicle is empathetic + science-led, even if the brand's general voice is more playful. We are servicing this specific ad's funnel.
+- **All other format rules still apply unchanged** — 10 numbered sections, second-person voice, no comparison table, etc. This is only about WHICH content fills each section, not about the page structure.
+
 ```
 {{destination_url}}
 ```
