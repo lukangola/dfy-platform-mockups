@@ -24,6 +24,7 @@ import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
 import { db, schema } from "../lib/db.js";
 import { generateImage, transcribeAudio, uploadToFalStorage } from "../lib/fal.js";
+import { extractJsonObject } from "../lib/jsonExtract.js";
 import { buildEditorUrl, buildSlug, createLander, pickPrimaryDomain, publishLander, saveVariantHtml } from "../lib/landerlab.js";
 import { loadPrompt } from "../lib/prompts.js";
 
@@ -338,11 +339,17 @@ listiclesRouter.post("/:id/analyze-ad", async (req: Request, res: Response) => {
 
     let analysis: Record<string, unknown> = {};
     try {
-      const cleaned = result.text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
-      analysis = JSON.parse(cleaned);
-    } catch {
-      const m = result.text.match(/\{[\s\S]*\}/);
-      if (m) analysis = JSON.parse(m[0]);
+      analysis = extractJsonObject<Record<string, unknown>>(result.text, {
+        stopReason: result.stopReason,
+        action: "ad_extract_angle",
+      });
+    } catch (err) {
+      console.error(
+        `[listicles] ad_extract_angle parse failed for listicle ${row.id}.\n` +
+        `stop_reason=${result.stopReason} tokensOut=${result.tokensOut}\n` +
+        `RAW OUTPUT:\n${result.text}`
+      );
+      throw err;
     }
 
     await touch(row.id, {
@@ -464,11 +471,18 @@ listiclesRouter.post("/:id/extract-offer", async (req: Request, res: Response) =
 
     let parsed: Record<string, unknown> = {};
     try {
-      const cleaned = result.text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
-      parsed = JSON.parse(cleaned);
-    } catch {
-      const m = result.text.match(/\{[\s\S]*\}/);
-      if (m) parsed = JSON.parse(m[0]);
+      parsed = extractJsonObject<Record<string, unknown>>(result.text, {
+        stopReason: result.stopReason,
+        action: "offer_extract",
+      });
+    } catch (err) {
+      console.error(
+        `[listicles] offer_extract parse failed.\n` +
+        `stop_reason=${result.stopReason} tokensOut=${result.tokensOut}\n` +
+        `RAW OUTPUT:\n${result.text}`
+      );
+      // Offer extract is non-fatal — listicle generation can continue
+      // with an empty offer object. Swallow + leave parsed = {}.
     }
 
     await touch(row.id, { offerExtract: parsed });

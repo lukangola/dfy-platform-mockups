@@ -16,6 +16,7 @@ import { desc, eq } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
 import { db, schema } from "../lib/db.js";
+import { extractJsonObject } from "../lib/jsonExtract.js";
 import { loadPrompt, PromptNotConfiguredError } from "../lib/prompts.js";
 import { fetchUrlMeta } from "../lib/urlMeta.js";
 import { runResearch as runProductResearch } from "./products.js";
@@ -248,13 +249,26 @@ async function runBrandResearch(brandId: string, brandUrl: string): Promise<void
       tools: prompt.config.tools,
     });
 
-    // brand_extract is expectsJson: true — model returns a single JSON object.
-    const cleaned = result.text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+    // brand_extract is expectsJson: true. Use the centralised extractor —
+    // it strips ```json fences, then if that fails grabs the first
+    // balanced { ... } substring (which survives trailing commentary).
+    // Logs stop_reason + length in the error for fast debugging when
+    // the upstream prompt truncates or goes off-format.
     let parsed: Record<string, unknown>;
     try {
-      parsed = JSON.parse(cleaned);
-    } catch {
-      throw new Error(`brand_extract returned non-JSON: ${cleaned.slice(0, 200)}…`);
+      parsed = extractJsonObject<Record<string, unknown>>(result.text, {
+        stopReason: result.stopReason,
+        action: BRAND_RESEARCH_ACTION,
+      });
+    } catch (err) {
+      // Log the full raw output so we can post-mortem prompt issues
+      // without redeploying. The error thrown is short + user-safe.
+      console.error(
+        `[brands] ${BRAND_RESEARCH_ACTION} parse failed for ${brandUrl}.\n` +
+        `stop_reason=${result.stopReason} tokensOut=${result.tokensOut}\n` +
+        `RAW OUTPUT:\n${result.text}`
+      );
+      throw err;
     }
 
     const logoUrl = typeof parsed.logoUrl === "string" ? parsed.logoUrl : null;

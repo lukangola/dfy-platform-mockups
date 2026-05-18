@@ -2,6 +2,7 @@ import { desc, eq } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
 import { db, schema } from "../lib/db.js";
+import { extractJsonObject } from "../lib/jsonExtract.js";
 import { loadPrompt, PromptNotConfiguredError } from "../lib/prompts.js";
 import { generateImage, uploadToFalStorage } from "../lib/fal.js";
 import { fetchUrlMeta } from "../lib/urlMeta.js";
@@ -895,12 +896,21 @@ async function extractMechanismSync(
     imageUrls,
   });
 
-  const cleaned = result.text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  // Use the centralised JSON extractor — handles truncation, balanced-brace
+  // recovery, and includes stop_reason in error messages for easier debug.
   let mechanism: unknown;
   try {
-    mechanism = JSON.parse(cleaned);
-  } catch {
-    throw new Error(`Mechanism extractor returned non-JSON: ${cleaned.slice(0, 200)}…`);
+    mechanism = extractJsonObject(result.text, {
+      stopReason: result.stopReason,
+      action: "Mechanism extractor",
+    });
+  } catch (err) {
+    console.error(
+      `[products] mechanism parse failed for product ${productId}.\n` +
+      `stop_reason=${result.stopReason} tokensOut=${result.tokensOut}\n` +
+      `RAW OUTPUT:\n${result.text}`
+    );
+    throw err;
   }
 
   const [row] = await db

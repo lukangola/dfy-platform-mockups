@@ -1,6 +1,6 @@
 ---
 tools: [web_search, web_fetch]
-maxTokens: 4096
+maxTokens: 16000
 expectsJson: true
 ---
 

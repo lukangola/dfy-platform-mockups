@@ -15,6 +15,7 @@ import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
 import { db, schema } from "../lib/db.js";
 import { uploadToFalStorage } from "../lib/fal.js";
+import { extractJsonObject } from "../lib/jsonExtract.js";
 import { loadPrompt, PromptNotConfiguredError } from "../lib/prompts.js";
 import { ingestStaticAdLibrary } from "../lib/staticAdIngest.js";
 
@@ -362,12 +363,17 @@ export async function runDeconstruction(id: string): Promise<void> {
     let deconstruction: unknown;
     if (prompt.config.expectsJson) {
       try {
-        deconstruction = JSON.parse(cleaned);
-      } catch {
-        // Fallback: try to extract the first {...} block.
-        const m = cleaned.match(/\{[\s\S]*\}/);
-        if (!m) throw new Error(`Deconstruction returned non-JSON: ${cleaned.slice(0, 200)}…`);
-        deconstruction = JSON.parse(m[0]);
+        deconstruction = extractJsonObject(result.text, {
+          stopReason: result.stopReason,
+          action: "Deconstruction",
+        });
+      } catch (err) {
+        console.error(
+          `[staticAdReferences] deconstruction parse failed for ref ${id}.\n` +
+          `stop_reason=${result.stopReason} tokensOut=${result.tokensOut}\n` +
+          `RAW OUTPUT:\n${result.text}`
+        );
+        throw err;
       }
     } else {
       // Prompt returns free-form text + optional JSON block — store the whole
@@ -471,12 +477,12 @@ export async function runNicheClassification(id: string): Promise<void> {
 
     let parsed: { niche?: unknown } = {};
     try {
-      parsed = JSON.parse(cleaned);
+      parsed = extractJsonObject<{ niche?: unknown }>(result.text, {
+        stopReason: result.stopReason,
+        action: "Niche classifier",
+      });
     } catch {
-      const m = cleaned.match(/\{[\s\S]*\}/);
-      if (m) {
-        try { parsed = JSON.parse(m[0]); } catch { parsed = {}; }
-      }
+      // Niche classification is best-effort — leave parsed = {} on failure.
     }
 
     const raw = typeof parsed.niche === "string" ? parsed.niche.trim().toLowerCase() : "";

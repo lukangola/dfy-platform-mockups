@@ -14,6 +14,7 @@ import path from "path";
 import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
 import { uploadToFalStorage } from "../lib/fal.js";
+import { extractJsonObject } from "../lib/jsonExtract.js";
 
 export const messageTestingRouter: Router = Router();
 
@@ -141,14 +142,21 @@ messageTestingRouter.get("/reference-style", async (_req: Request, res: Response
       maxTokens: 3000,
     });
 
-    const cleaned = result.text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
     let style: Record<string, unknown>;
     try {
-      style = JSON.parse(cleaned);
-    } catch {
+      style = extractJsonObject<Record<string, unknown>>(result.text, {
+        stopReason: result.stopReason,
+        action: "Reference style extractor",
+      });
+    } catch (err) {
+      console.error(
+        `[messageTesting] reference style parse failed.\n` +
+        `stop_reason=${result.stopReason} tokensOut=${result.tokensOut}\n` +
+        `RAW OUTPUT:\n${result.text}`
+      );
       return res.status(502).json({
-        error: "Reference style extractor returned non-JSON",
-        raw: cleaned.slice(0, 500),
+        error: err instanceof Error ? err.message : "Reference style extractor returned non-JSON",
+        raw: result.text.slice(0, 500),
       });
     }
 
