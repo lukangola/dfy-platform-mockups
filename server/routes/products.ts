@@ -674,19 +674,33 @@ productsRouter.delete("/:id/image-candidate", async (req: Request, res: Response
     const research = (row.research ?? {}) as Record<string, unknown>;
     const existing = readCandidates(research);
     const next = existing.filter((c) => c.url !== body.url);
-    if (next.length === existing.length) {
-      // Already gone — idempotent success.
+    const wasMain = row.productImageUrl === body.url;
+    const wasBack = row.productBackImageUrl === body.url;
+    const wasContent = row.contentImageUrl === body.url;
+    // Idempotent success only if the URL appears NOWHERE — not in the
+    // candidates array, not on any of the three canonical slots. (Before
+    // the back/content fold-in landed, the candidate-array check alone
+    // was enough — now we also have URLs that live only on dedicated
+    // columns.)
+    if (next.length === existing.length && !wasMain && !wasBack && !wasContent) {
       return res.json({ ok: true, imageCandidates: existing, productImageUrl: row.productImageUrl ?? null });
     }
 
-    const wasMain = row.productImageUrl === body.url;
     const nextMain = wasMain ? (next[0]?.url ?? null) : row.productImageUrl;
 
+    // Each of the three canonical image slots (productImageUrl,
+    // productBackImageUrl, contentImageUrl) can hold the URL being
+    // deleted — clear whichever match so the gallery doesn't re-render
+    // a phantom tile on next refresh. Front gets auto-promoted to the
+    // next candidate; back + content just become null (the user can
+    // re-upload via the Add-Reference flow if they need them back).
     await db
       .update(schema.products)
       .set({
         research: { ...research, imageCandidates: next },
         ...(wasMain ? { productImageUrl: nextMain } : {}),
+        ...(wasBack ? { productBackImageUrl: null } : {}),
+        ...(wasContent ? { contentImageUrl: null } : {}),
       })
       .where(eq(schema.products.id, row.id));
 
@@ -1044,8 +1058,23 @@ async function runReferenceSheetGeneration(
       .map((c) => c.url)
       .filter((u): u is string => typeof u === "string");
     const mainImage = row.productImageUrl ?? null;
+    // Reference-sheet generation should fuse EVERY product angle the user
+    // has on file — front + back + content + every scraped candidate. The
+    // back and content shots live on dedicated DB columns (set by the Add
+    // Product modal's image-upload flow) and were previously absent from
+    // this input set. Without them the model only saw the front, so the
+    // generated reference sheet couldn't reproduce back-of-pack ingredient
+    // panels or lifestyle / packaging detail. Dedupe across all sources
+    // since the URL may appear in both the candidates array and a column.
     const productImages = Array.from(
-      new Set([mainImage, ...candidates].filter((u): u is string => Boolean(u)))
+      new Set(
+        [
+          mainImage,
+          row.productBackImageUrl,
+          row.contentImageUrl,
+          ...candidates,
+        ].filter((u): u is string => Boolean(u))
+      )
     );
 
     if (productImages.length === 0) {

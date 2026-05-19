@@ -14,6 +14,12 @@ import {
   type Product,
 } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
+import {
+  ImageUploadSlot,
+  emptyImageSlot,
+  handleImageFile,
+  type ImageSlot,
+} from "@/components/ImageUploadSlot";
 
 type Status = Product["researchStatus"];
 
@@ -46,9 +52,18 @@ export default function ProductsPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Add-form state
+  // Add-form state — input is either a product URL or a pasted fact sheet
+  // (the same toggle pattern as CreateBrandDialog). Front + back product
+  // shots are optional; they upload to fal.storage as the user picks
+  // each file, and the resulting public URLs are submitted alongside
+  // the URL/fact-sheet payload. Category dropped — the brand-extract +
+  // product-research pipelines derive category automatically.
+  const [formMode, setFormMode] = useState<"url" | "factSheet">("url");
   const [formUrl, setFormUrl] = useState("");
-  const [formCategory, setFormCategory] = useState("");
+  const [formFactSheet, setFormFactSheet] = useState("");
+  const [formName, setFormName] = useState("");
+  const [front, setFront] = useState<ImageSlot>(emptyImageSlot());
+  const [back, setBack] = useState<ImageSlot>(emptyImageSlot());
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -82,19 +97,45 @@ export default function ProductsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [products]);
 
+  // Whether the user has provided one of the two valid product sources.
+  // Images are optional, so they don't gate submission.
+  const hasProductSource =
+    formMode === "url" ? !!formUrl.trim() : !!formFactSheet.trim();
+  const imagesUploading = front.uploading || back.uploading;
+  const canSubmit = !submitting && !imagesUploading && hasProductSource && !!activeBrandId;
+
+  function resetAddForm() {
+    setFormMode("url");
+    setFormUrl("");
+    setFormFactSheet("");
+    setFormName("");
+    setFront(emptyImageSlot());
+    setBack(emptyImageSlot());
+    setSubmitError(null);
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!formUrl.trim() || !activeBrandId) return;
+    if (!canSubmit) return;
     setSubmitting(true);
     setSubmitError(null);
     try {
       await createProduct({
-        brandId: activeBrandId,
-        productUrl: formUrl.trim(),
-        category: formCategory.trim() || undefined,
+        brandId: activeBrandId!,
+        // Exactly one of productUrl / factSheet is sent — the server
+        // requires one of the two and rejects requests with neither.
+        productUrl: formMode === "url" ? formUrl.trim() : undefined,
+        factSheet: formMode === "factSheet" ? formFactSheet.trim() : undefined,
+        // Optional user-supplied product name (overrides whatever the
+        // page-scraper / fact-sheet parser would otherwise extract).
+        name: formName.trim() || undefined,
+        // Optional clean product shots, already uploaded to fal.storage
+        // by the ImageUploadSlot helper. Only sent if the slot has a
+        // successfully-uploaded URL.
+        productImageUrl: front.uploadedUrl ?? undefined,
+        productBackImageUrl: back.uploadedUrl ?? undefined,
       });
-      setFormUrl("");
-      setFormCategory("");
+      resetAddForm();
       setShowAddForm(false);
       await refresh();
     } catch (err) {
@@ -275,7 +316,7 @@ export default function ProductsPage() {
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 flex items-center justify-center p-4"
             style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)" }}
-            onClick={() => !submitting && setShowAddForm(false)}
+            onClick={() => { if (!submitting) { resetAddForm(); setShowAddForm(false); } }}
           >
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
@@ -294,7 +335,7 @@ export default function ProductsPage() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => setShowAddForm(false)}
+                    onClick={() => { resetAddForm(); setShowAddForm(false); }}
                     disabled={submitting}
                     className="w-7 h-7 rounded-lg bg-white/[0.04] flex items-center justify-center text-white/30 hover:text-white/60 hover:bg-white/[0.08] transition-all disabled:opacity-50"
                   >
@@ -304,44 +345,111 @@ export default function ProductsPage() {
 
                 {/* Modal Body */}
                 <div className="p-5 space-y-4">
-                  {/* Product Link */}
+                  {/* Source toggle — Product URL vs. Fact Sheet ──────── */}
+                  <div className="space-y-2">
+                    <span className="text-[10px] font-mono text-white/40 uppercase tracking-widest block">
+                      Product source *
+                    </span>
+                    <div className="inline-flex rounded-lg border border-white/[0.08] p-0.5 bg-[#0A0C0F]">
+                      <button
+                        type="button"
+                        onClick={() => setFormMode("url")}
+                        className={`px-3 py-1.5 rounded-md text-xs font-mono transition ${
+                          formMode === "url"
+                            ? "bg-cyan-500/15 text-cyan-300"
+                            : "text-white/40 hover:text-white/70"
+                        }`}
+                      >
+                        Product URL
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setFormMode("factSheet")}
+                        className={`px-3 py-1.5 rounded-md text-xs font-mono transition ${
+                          formMode === "factSheet"
+                            ? "bg-cyan-500/15 text-cyan-300"
+                            : "text-white/40 hover:text-white/70"
+                        }`}
+                      >
+                        Fact sheet
+                      </button>
+                    </div>
+
+                    {formMode === "url" ? (
+                      <div className="flex items-center gap-2 bg-white/[0.03] border border-white/[0.08] rounded-lg px-3 py-2.5 focus-within:border-cyan-500/40 transition-colors">
+                        <Link2 size={14} className="text-white/30" />
+                        <input
+                          type="url"
+                          autoFocus
+                          value={formUrl}
+                          onChange={(e) => setFormUrl(e.target.value)}
+                          placeholder="https://your-store.com/product"
+                          className="bg-transparent text-sm text-white/80 placeholder:text-white/20 outline-none flex-1 font-mono text-xs"
+                        />
+                      </div>
+                    ) : (
+                      <textarea
+                        autoFocus
+                        value={formFactSheet}
+                        onChange={(e) => setFormFactSheet(e.target.value)}
+                        placeholder={"Paste product details here:\n• Name, category\n• Ingredients / contents\n• Claims, benefits, mechanism\n• Target customer, pricing"}
+                        rows={7}
+                        className="w-full bg-white/[0.03] border border-white/[0.08] rounded-lg px-3 py-2.5 text-xs text-white/85 placeholder:text-white/25 outline-none font-mono leading-relaxed resize-y focus:border-cyan-500/40 transition-colors"
+                      />
+                    )}
+                  </div>
+
+                  {/* Optional product name */}
                   <div>
                     <label className="text-[10px] font-mono text-white/40 uppercase tracking-widest block mb-2">
-                      Product Link *
+                      Product name <span className="text-white/20 normal-case">(optional — auto-detected otherwise)</span>
                     </label>
                     <div className="flex items-center gap-2 bg-white/[0.03] border border-white/[0.08] rounded-lg px-3 py-2.5 focus-within:border-cyan-500/40 transition-colors">
-                      <Link2 size={14} className="text-white/30" />
                       <input
-                        type="url"
-                        required
-                        autoFocus
-                        value={formUrl}
-                        onChange={(e) => setFormUrl(e.target.value)}
-                        placeholder="https://your-store.com/product"
+                        type="text"
+                        value={formName}
+                        onChange={(e) => setFormName(e.target.value)}
+                        placeholder="e.g. Golden Radiance Serum"
                         className="bg-transparent text-sm text-white/80 placeholder:text-white/20 outline-none flex-1 font-mono text-xs"
                       />
                     </div>
                   </div>
 
-                  {/* Category */}
-                  <div>
-                    <label className="text-[10px] font-mono text-white/40 uppercase tracking-widest block mb-2">
-                      Category <span className="text-white/20">(optional)</span>
-                    </label>
-                    <div className="flex items-center gap-2 bg-white/[0.03] border border-white/[0.08] rounded-lg px-3 py-2.5 focus-within:border-cyan-500/40 transition-colors">
-                      <input
-                        type="text"
-                        value={formCategory}
-                        onChange={(e) => setFormCategory(e.target.value)}
-                        placeholder="e.g. Serums, Haircare, Supplements"
-                        className="bg-transparent text-sm text-white/80 placeholder:text-white/20 outline-none flex-1 font-mono text-xs"
+                  {/* Optional product shots — front + back ─────────── */}
+                  <div className="space-y-2">
+                    <div className="flex items-baseline justify-between">
+                      <span className="text-[10px] font-mono text-white/40 uppercase tracking-widest">
+                        Clean product shots <span className="text-white/20 normal-case">(optional)</span>
+                      </span>
+                      <span className="text-[10px] font-mono text-white/30 normal-case">
+                        Upload front only, or front + back
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-white/30 font-mono leading-relaxed">
+                      Plain background, clean shots — these become the canonical references for every
+                      downstream image / video generator. Skip if you'd rather have the research
+                      pipeline scrape them from the URL.
+                    </p>
+                    <div className="grid grid-cols-2 gap-3 pt-1">
+                      <ImageUploadSlot
+                        label="Front"
+                        slot={front}
+                        onChange={(file) => void handleImageFile(file, setFront)}
+                        onClear={() => setFront(emptyImageSlot())}
+                      />
+                      <ImageUploadSlot
+                        label="Back"
+                        slot={back}
+                        onChange={(file) => void handleImageFile(file, setBack)}
+                        onClear={() => setBack(emptyImageSlot())}
+                        disabled={!front.dataUrl}
+                        disabledHint="Add front first"
                       />
                     </div>
                   </div>
 
                   <div className="text-[10px] font-mono text-white/30 leading-relaxed border border-white/[0.06] rounded-lg p-3 bg-white/[0.02]">
-                    The product name and image will be extracted from the page automatically.
-                    Strategic diagnosis + 5 elaborated angles will run in the background.
+                    Strategic diagnosis + 5 elaborated angles run automatically in the background after submit (~2–4 min).
                   </div>
 
                   {submitError && (
@@ -355,7 +463,7 @@ export default function ProductsPage() {
                 <div className="px-5 py-4 border-t border-white/[0.06] flex items-center justify-end gap-2">
                   <button
                     type="button"
-                    onClick={() => setShowAddForm(false)}
+                    onClick={() => { resetAddForm(); setShowAddForm(false); }}
                     disabled={submitting}
                     className="px-4 py-2 rounded-lg text-xs font-mono text-white/40 border border-white/[0.08] hover:bg-white/[0.03] transition-all disabled:opacity-50"
                   >
@@ -363,7 +471,12 @@ export default function ProductsPage() {
                   </button>
                   <button
                     type="submit"
-                    disabled={submitting || !formUrl.trim()}
+                    disabled={!canSubmit}
+                    title={
+                      imagesUploading ? "Wait for image upload to finish" :
+                      !hasProductSource ? (formMode === "url" ? "Paste a product URL" : "Paste a fact sheet") :
+                      undefined
+                    }
                     className="px-4 py-2 rounded-lg text-xs font-mono font-semibold uppercase tracking-wider transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                     style={{
                       background: "linear-gradient(135deg, #00D4FF 0%, #0099CC 100%)",

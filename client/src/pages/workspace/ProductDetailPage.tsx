@@ -214,15 +214,29 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
     };
   }, [product?.researchStatus, mechanismStatus, referenceSheetStatus, productId]);
 
+  // Build the gallery: start with whatever the URL-scraper / fact-sheet
+  // pipeline put in research.imageCandidates, then make sure the three
+  // canonical image slots (productImageUrl, productBackImageUrl,
+  // contentImageUrl) are also visible — those come from the user-uploaded
+  // path (Add Product modal, brand creation, manual upload) and live on
+  // dedicated DB columns, not in the candidates array. Without folding
+  // them in here, a product created via "URL + front + back" uploads
+  // would only show the front in this gallery and the back would be
+  // invisible despite being stored. We tag each with a distinct `source`
+  // label so the UI knows which is which.
   const candidates = useMemo<ProductImageCandidate[]>(() => {
-    const list = product?.research?.imageCandidates ?? [];
-    const mainUrl = product?.productImageUrl;
-    if (mainUrl && !list.some((c) => c.url === mainUrl)) {
-      return [
-        { url: mainUrl, width: null, height: null, source: "current-main", score: 10000 },
-        ...list,
-      ];
-    }
+    const list = [...(product?.research?.imageCandidates ?? [])];
+    const seen = new Set(list.map((c) => c.url));
+    const fold = (url: string | null | undefined, source: string, score: number) => {
+      if (!url || seen.has(url)) return;
+      list.unshift({ url, width: null, height: null, source, score });
+      seen.add(url);
+    };
+    // Prepend in reverse-display order so the final list reads:
+    // front main → back → content → (rest of scraped candidates).
+    fold(product?.contentImageUrl, "upload-content", 9000);
+    fold(product?.productBackImageUrl, "upload-back", 9500);
+    fold(product?.productImageUrl, "current-main", 10000);
     return list;
   }, [product]);
 
