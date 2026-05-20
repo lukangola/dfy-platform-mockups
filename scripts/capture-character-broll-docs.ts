@@ -402,25 +402,59 @@ async function run() {
     }
 
     // ── Step 4: Videos ──
+    // To stay cheap, we only generate TWO videos (≈ $5 total). The trick:
+    // generateAllVideos() only fires for shots whose imageApproval is
+    // "approved", so we click "APPROVE" on exactly 2 ready image tiles
+    // first, then click "Generate Videos" — the other 18 stay pending.
     if (STAGES.has(4)) {
-      console.log("\nStep 4 — Videos (generates 5s video per shot, ~$2.50 each)");
-      const res = await clickButtonByText(page, /generate all videos|generate videos/i, {
+      console.log("\nStep 4 — Videos (approving only 2 images → only 2 videos fire, ~$5 total)");
+
+      // First: approve exactly TWO images. Each tile has its own APPROVE
+      // button shown once an image is ready. We click 2 of them.
+      const approved = await page.evaluate(() => {
+        // Find all buttons literally labeled "APPROVE" (case-insensitive)
+        // that aren't the bulk "APPROVE ALL" button at the top.
+        const candidates = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+          .filter((b) => {
+            const t = (b.textContent ?? "").trim();
+            return /^approve$/i.test(t) && !b.disabled && b.offsetParent !== null;
+          });
+        const toClick = candidates.slice(0, 2);
+        toClick.forEach((b) => b.click());
+        return { found: candidates.length, clicked: toClick.length };
+      });
+      console.log("  approved 2-of-N image tiles:", approved);
+      await sleep(1500);
+
+      // Now click "Generate Videos" — header button. It only fires for the
+      // approved shots (so just our 2).
+      const res = await clickButtonByText(page, /^\s*generate videos\s*(\(\d+\))?\s*$/i, {
         mustNotBeDisabled: true,
       });
       console.log("  clicked generate-videos:", res);
       if (!res.ok) {
         console.log("  could not find generate-videos button — script needs an update");
       } else {
-        await page.waitForFunction(
-          () => {
+        // Poll for 2 video tiles to be ready. Each ready video renders
+        // an actual <video> element with src set (or a fal-media URL).
+        const startedAt = Date.now();
+        const MAX_WAIT_MS = 10 * 60 * 1000;
+        let lastReady = 0;
+        while (Date.now() - startedAt < MAX_WAIT_MS) {
+          const status = await page.evaluate(() => {
             const vids = Array.from(document.querySelectorAll<HTMLVideoElement>("video"));
-            return vids.length >= 2 && vids.slice(0, 2).every((v) => v.src);
-          },
-          { timeout: 600_000 /* 10 min */ },
-        ).catch(() => {
-          console.log("  (timed out waiting for videos — capturing what's on screen)");
-        });
-        await sleep(2000);
+            const ready = vids.filter((v) => v.src && /fal\.media|fal-cdn/.test(v.src));
+            return { total: vids.length, ready: ready.length };
+          });
+          if (status.ready !== lastReady) {
+            const sec = Math.round((Date.now() - startedAt) / 1000);
+            console.log(`  [+${sec}s] videos ready: ${status.ready}/${status.total}`);
+            lastReady = status.ready;
+          }
+          if (status.ready >= 2) break;
+          await sleep(15_000);
+        }
+        await sleep(1500);
         await page.evaluate(() => window.scrollTo(0, 0));
         await sleep(500);
         await captureStep(page, "04-videos.png");
