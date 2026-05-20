@@ -1,6 +1,8 @@
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
+import DocsIndexPage from "@/pages/docs/DocsIndexPage";
+import CharacterBrollDocsPage from "@/pages/docs/CharacterBrollDocsPage";
 import { Route, Switch, Redirect, useLocation } from "wouter";
 import { useEffect } from "react";
 import { Loader2 } from "lucide-react";
@@ -63,6 +65,11 @@ function Router() {
       <Route path="/login" component={LoginPage} />
       <Route path="/register" component={RegisterPage} />
       <Route path="/accept-invite" component={AcceptInvitePage} />
+
+      {/* Public docs — no auth, shareable to anyone. Hand-authored
+          per-app walkthroughs live under /docs/<app-slug>. */}
+      <Route path="/docs" component={DocsIndexPage} />
+      <Route path="/docs/character-broll" component={CharacterBrollDocsPage} />
 
       {/* Redirect root to workspace products */}
       <Route path="/">

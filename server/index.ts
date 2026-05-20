@@ -85,6 +85,32 @@ async function startServer() {
     res.json({ ok: true, env: env.NODE_ENV });
   });
 
+  // Dev-only screenshot save endpoint. Used by the docs walkthrough flow
+  // to capture step-by-step screenshots of the app via the Chrome MCP
+  // (which can't otherwise write files to disk). Disabled in production.
+  if (env.NODE_ENV !== "production") {
+    app.post("/api/__debug__/save-screenshot", async (req, res) => {
+      try {
+        const { dataUrl, filename } = (req.body ?? {}) as { dataUrl?: string; filename?: string };
+        if (!dataUrl || !filename) {
+          return res.status(400).json({ error: "dataUrl and filename are required" });
+        }
+        const m = dataUrl.match(/^data:[^;]+;base64,(.+)$/);
+        if (!m) return res.status(400).json({ error: "dataUrl is not a valid base64 data URL" });
+        const safe = filename.replace(/[^\w.-]/g, "_");
+        const { promises: fs } = await import("node:fs");
+        const path = await import("node:path");
+        const dir = path.resolve(process.cwd(), "client/public/docs-screenshots/character-broll");
+        await fs.mkdir(dir, { recursive: true });
+        const dest = path.join(dir, safe);
+        await fs.writeFile(dest, Buffer.from(m[1], "base64"));
+        res.json({ ok: true, path: dest, bytes: Buffer.byteLength(m[1], "base64") });
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+  }
+
   app.use("/api/auth", authRouter);
   app.use("/api/team", teamRouter);
   app.use("/api/generate", generateRouter);
