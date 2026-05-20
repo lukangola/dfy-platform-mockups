@@ -45,6 +45,52 @@ function buildServerTools(names: string[] | undefined): Anthropic.ToolUnion[] | 
   return tools.length ? tools : undefined;
 }
 
+// ---------------------------------------------------------------------------
+// Retry helper — retries on transient Anthropic errors (429 rate-limit and
+// 529 overloaded). Uses exponential backoff with jitter. This prevents
+// short-lived capacity issues from surfacing as fatal errors to the user.
+// ---------------------------------------------------------------------------
+const MAX_RETRIES = 3;
+const INITIAL_DELAY_MS = 2_000; // 2 seconds
+
+function isTransientError(err: unknown): boolean {
+  if (err && typeof err === "object") {
+    // Anthropic SDK wraps HTTP errors with a `status` property
+    const status = (err as { status?: number }).status;
+    if (status === 429 || status === 529) return true;
+    // Some errors carry the status in a nested `error` or message string
+    const msg = (err as { message?: string }).message ?? "";
+    if (/overloaded|rate.?limit|529|too many requests/i.test(msg)) return true;
+  }
+  return false;
+}
+
+async function retryOnTransient<T>(fn: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (!isTransientError(err)) throw err;
+      if (attempt === MAX_RETRIES) {
+        // All retries exhausted on a transient error — throw a user-friendly message
+        throw new Error(
+          "The AI service is temporarily overloaded. Please wait a minute and try again."
+        );
+      }
+      // Exponential backoff: 2s → 4s → 8s, plus up to 1s random jitter
+      const delay = INITIAL_DELAY_MS * Math.pow(2, attempt) + Math.random() * 1000;
+      console.warn(
+        `[anthropic] transient error (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${Math.round(delay)}ms:`,
+        err instanceof Error ? err.message : String(err)
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw lastError; // unreachable, but satisfies TS
+}
+
 /**
  * Non-streaming text generation.
  * - System prompt = master prompt (cached via cache_control: ephemeral)
@@ -111,9 +157,11 @@ export async function generateText(args: {
     stop_reason: string | null;
   };
 
-  const res = (betas.length > 0
-    ? await anthropic.beta.messages.create({ ...request, betas } as unknown as Parameters<typeof anthropic.beta.messages.create>[0])
-    : await anthropic.messages.create(request as unknown as Parameters<typeof anthropic.messages.create>[0])) as unknown as MessageLike;
+  const res = await retryOnTransient(async () =>
+    (betas.length > 0
+      ? await anthropic.beta.messages.create({ ...request, betas } as unknown as Parameters<typeof anthropic.beta.messages.create>[0])
+      : await anthropic.messages.create(request as unknown as Parameters<typeof anthropic.messages.create>[0])) as unknown as MessageLike
+  );
 
   const text = res.content
     .filter((b) => b.type === "text")
