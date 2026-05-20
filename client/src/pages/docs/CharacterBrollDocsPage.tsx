@@ -230,29 +230,95 @@ export default function CharacterBrollDocsPage() {
           caption="Step 4 — Videos. 5-second 9:16 vertical clips, Meta/TikTok-ready, download individually or batch."
         />
 
-        {/* What you end up with */}
+        {/* What you end up with — five real Kling-rendered shots
+            from an actual Alcami Elements run, one per category. The
+            full reel was 21 shots; these five are the narrative spine
+            (problem → failed solution → product → payoff → lifestyle).
+            Videos are served from fal.media (the same CDN our pipeline
+            uploads to); they're public so no auth required. preload
+            "metadata" keeps the page lightweight until the visitor
+            actually plays one. */}
         <section className="rounded-lg border border-emerald-500/25 bg-emerald-500/[0.04] p-5 mt-12">
-          <h3 className="text-[11px] font-mono text-emerald-400/80 uppercase tracking-widest mb-3">Sample output (10-shot sequence, ~10 min generation)</h3>
+          <h3 className="text-[11px] font-mono text-emerald-400/80 uppercase tracking-widest mb-3">
+            Sample output — 5 shots from a real Alcami Elements run
+          </h3>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             {[
-              { cat: "Hook", color: "#F472B6" },
-              { cat: "Problem", color: "#F87171" },
-              { cat: "Failed", color: "#FB923C" },
-              { cat: "Product", color: "#00D4FF" },
-              { cat: "Authority", color: "#A78BFA" },
-              { cat: "Payoff", color: "#34D399" },
-              { cat: "Lifestyle", color: "#FBBF24" },
+              {
+                cat: "Problem",
+                color: "#F87171",
+                title: "Edge-of-bed, hand on chest",
+                videoUrl:
+                  "https://v3b.fal.media/files/b/0a9868af/8sn1kG9szgkcULpqydt3a_output.mp4",
+                poster:
+                  "https://v3b.fal.media/files/b/0a98689b/FqUh5CTK6DFXcG0p6UnFg_S2HYhk9D.jpg",
+              },
+              {
+                cat: "Failed Solution",
+                color: "#FB923C",
+                title: "Pouring wine, staring flat",
+                videoUrl:
+                  "https://v3b.fal.media/files/b/0a9868b1/3HDVE6F-I_d35GLSqa3Th_output.mp4",
+                poster:
+                  "https://v3b.fal.media/files/b/0a98689b/MDZOOXlyiggCsPqwc_Mmt_DzyHLLSC.jpg",
+              },
+              {
+                cat: "Product",
+                color: "#00D4FF",
+                title: "Unboxing the pouch",
+                videoUrl:
+                  "https://v3b.fal.media/files/b/0a9868b0/BqLLk52Uu3xNi2WhXQz1c_output.mp4",
+                poster:
+                  "https://v3b.fal.media/files/b/0a98689b/TTuk49-gdk4ARFbvuJRfi_pDoSGI8S.jpg",
+              },
+              {
+                cat: "Payoff",
+                color: "#34D399",
+                title: "Curled on the couch, shoulders drop",
+                videoUrl:
+                  "https://v3b.fal.media/files/b/0a9868b0/A8MKOIlCPkMYfkzw4WmYH_output.mp4",
+                poster:
+                  "https://v3b.fal.media/files/b/0a98689b/Kh1tiTtImtRt2fhIhzEyI_bLd3iPIg.jpg",
+              },
+              {
+                cat: "Lifestyle",
+                color: "#FBBF24",
+                title: "Window bench, mug, morning sky",
+                videoUrl:
+                  "https://v3b.fal.media/files/b/0a986962/zDQGh9O14hpCS3KkJiXqh_output.mp4",
+                poster:
+                  "https://v3b.fal.media/files/b/0a986925/OyTVrxfuVuWgjosLXRqg2_84Iygwi0.jpg",
+              },
             ].map((c) => (
-              <div key={c.cat} className="rounded-md border border-white/[0.08] bg-white/[0.02] aspect-[9/16] flex flex-col items-center justify-center text-center px-2 relative overflow-hidden">
-                <Video size={16} className="text-white/30 mb-1.5" />
-                <div className="text-[9px] font-mono uppercase tracking-wider" style={{ color: c.color }}>{c.cat}</div>
-                <div className="text-[9px] font-mono text-white/30 mt-0.5">9:16 · 5s</div>
-              </div>
+              <figure key={c.cat} className="rounded-md border border-white/[0.08] bg-black overflow-hidden relative">
+                <video
+                  src={c.videoUrl}
+                  poster={c.poster}
+                  controls
+                  preload="metadata"
+                  playsInline
+                  muted
+                  className="w-full aspect-[9/16] object-cover block bg-black"
+                />
+                <div className="absolute top-1.5 left-1.5 pointer-events-none">
+                  <div
+                    className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded backdrop-blur-sm"
+                    style={{ color: c.color, background: "rgba(0,0,0,0.55)", border: `1px solid ${c.color}55` }}
+                  >
+                    {c.cat}
+                  </div>
+                </div>
+                <figcaption className="text-[10px] text-white/55 font-mono leading-snug px-2 py-2 border-t border-white/[0.06]">
+                  {c.title}
+                </figcaption>
+              </figure>
             ))}
           </div>
           <p className="text-[12px] text-white/55 leading-relaxed mt-4">
-            Replace the placeholder tiles above with a real export reel once you've shipped a
-            client's sequence.
+            All five videos came from a single Character B-Roll run on the Alcami Elements
+            brand — same character, same product, different shot categories. Press play
+            on any tile to watch the raw 9:16 5-second Kling output, exactly as it lands
+            in your Asset Library.
           </p>
         </section>
 
