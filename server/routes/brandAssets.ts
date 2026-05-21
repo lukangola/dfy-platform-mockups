@@ -8,10 +8,11 @@
  * Entries point at fal.ai CDN URLs which are already persistent — we store
  * pointers + metadata only, never re-host the bytes.
  */
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, isNull, sql } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { db, schema } from "../lib/db.js";
 import type { NewBrandAsset } from "../db/schema.js";
+import { requireAdmin } from "../lib/auth.js";
 
 export const brandAssetsRouter: Router = Router();
 
@@ -151,6 +152,68 @@ brandAssetsRouter.delete("/:id", async (req: Request, res: Response) => {
     res.json({ ok: true });
   } catch (err) {
     console.error("[brand-assets] delete failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
+ * GET /api/brand-assets/_admin/creator-status — diagnostic. Reports the
+ * total asset count, the orphan count (rows with NULL user_id that wouldn't
+ * show a creator chip), and the user list so we can decide attribution
+ * policy. Admin-only.
+ */
+brandAssetsRouter.get("/_admin/creator-status", requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const [{ n: total = 0 } = {}] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(schema.brandAssets);
+    const [{ n: orphans = 0 } = {}] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(schema.brandAssets)
+      .where(isNull(schema.brandAssets.userId));
+    const users = await db
+      .select({ id: schema.users.id, email: schema.users.email, name: schema.users.name })
+      .from(schema.users)
+      .orderBy(schema.users.createdAt);
+    res.json({ total, orphans, users });
+  } catch (err) {
+    console.error("[brand-assets] creator-status failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
+ * POST /api/brand-assets/_admin/backfill-creators — one-shot backfill.
+ * Body: { userId?: string }. If userId is omitted, attribute all orphans
+ * to the calling admin (req.auth.user.id). If userId is provided, attribute
+ * to that user (must exist). Admin-only.
+ */
+brandAssetsRouter.post("/_admin/backfill-creators", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { userId?: unknown };
+    const explicitUserId = typeof body.userId === "string" && body.userId.trim()
+      ? body.userId.trim()
+      : null;
+    const targetUserId = explicitUserId ?? req.auth!.user.id;
+
+    // Sanity-check the target user exists before mutating any rows.
+    const [targetUser] = await db
+      .select({ id: schema.users.id, email: schema.users.email })
+      .from(schema.users)
+      .where(eq(schema.users.id, targetUserId))
+      .limit(1);
+    if (!targetUser) return sendError(res, 404, `User ${targetUserId} not found`);
+
+    const updated = await db
+      .update(schema.brandAssets)
+      .set({ userId: targetUserId })
+      .where(isNull(schema.brandAssets.userId))
+      .returning({ id: schema.brandAssets.id });
+
+    console.log(`[brand-assets] admin backfill: ${updated.length} row(s) → ${targetUser.email}`);
+    res.json({ updated: updated.length, targetUser });
+  } catch (err) {
+    console.error("[brand-assets] backfill failed:", err);
     sendError(res, 500, err instanceof Error ? err.message : String(err));
   }
 });
