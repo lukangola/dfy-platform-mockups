@@ -419,6 +419,21 @@ export default function ListicleBuilderAppPage() {
       .forEach((i) => void setImageApproval(i.id, "approved"));
   }
 
+  // Bulk-fire generate for every section that's idle or failed, in parallel.
+  // This mirrors the B-roll page's Promise.all pattern — instead of waiting
+  // 15-25s × N sections sequentially, all section gens happen concurrently
+  // and the whole batch returns in ~25-30s regardless of section count.
+  // Already-ready images aren't regenerated; user can use per-card "Regen"
+  // for that.
+  async function generateAllPending() {
+    if (!listicle) return;
+    const pending = images.filter(
+      (i) => i.imageStatus !== "ready" && i.imageStatus !== "generating",
+    );
+    if (pending.length === 0) return;
+    await Promise.all(pending.map((i) => generateOneImage(i.id)));
+  }
+
   // ── Step 2 → Step 3 (Images → Deploy) ──
   // Same jump-then-work UX. The deploy step shows the "Rendering full
   // HTML page..." placeholder until renderListicleHtml resolves.
@@ -527,6 +542,10 @@ export default function ListicleBuilderAppPage() {
   // Derived counts for the images header
   const imagesReady = images.filter((i) => i.imageStatus === "ready").length;
   const imagesApproved = images.filter((i) => i.imageApproval === "approved").length;
+  const imagesPending = images.filter(
+    (i) => i.imageStatus !== "ready" && i.imageStatus !== "generating",
+  ).length;
+  const imagesGenerating = images.filter((i) => i.imageStatus === "generating").length;
 
   return (
     <div className="min-h-screen flex flex-col" style={{ color: "#E2E8F0" }}>
@@ -1054,6 +1073,16 @@ export default function ListicleBuilderAppPage() {
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => void generateAllPending()}
+                      disabled={imagesPending === 0 || imagesGenerating > 0}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded text-[10px] font-mono uppercase tracking-wider bg-orange-500/10 text-orange-300 border border-orange-500/20 hover:bg-orange-500/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {imagesGenerating > 0
+                        ? <Loader2 size={10} className="animate-spin" />
+                        : <Sparkles size={10} />}
+                      Generate All ({imagesPending})
+                    </button>
                     <button
                       onClick={approveAllReady}
                       disabled={imagesReady === 0 || imagesReady === imagesApproved}

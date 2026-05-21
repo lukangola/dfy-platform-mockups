@@ -38,7 +38,7 @@ const ENTRIES: Entry[] = [
   },
   {
     slug: "broll",
-    name: "B-Roll Generator",
+    name: "Product B-Roll Generator",
     blurb: "Product-only cinematic B-roll. Twelve curated shot types — unboxing, hero, texture, application, proof.",
     icon: Video,
     status: "soon",

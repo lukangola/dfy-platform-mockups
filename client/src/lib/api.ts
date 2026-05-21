@@ -263,6 +263,29 @@ export function retriggerResearch(id: string): Promise<{ ok: true }> {
   return post<{ ok: true }>(`/api/products/${id}/research`, {});
 }
 
+/**
+ * Rename a product (or, in the future, update other simple fields).
+ * Currently the PATCH endpoint only accepts `name`; the heavier fields
+ * (mechanism, reference sheet, research, images) each have their own
+ * dedicated routes because they trigger downstream regeneration.
+ */
+export async function patchProduct(
+  id: string,
+  updates: { name?: string },
+): Promise<{ product: Product }> {
+  const res = await fetch(`/api/products/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  const payload = (await res.json().catch(() => ({}))) as { product: Product } | ApiError;
+  if (!res.ok) {
+    const msg = (payload as ApiError)?.error ?? `Request failed: ${res.status}`;
+    throw new Error(msg);
+  }
+  return payload as { product: Product };
+}
+
 export async function deleteProduct(id: string): Promise<{ ok: true; id: string }> {
   const res = await fetch(`/api/products/${id}`, { method: "DELETE" });
   const payload = (await res.json().catch(() => ({}))) as { ok: true; id: string } | ApiError;
@@ -393,6 +416,12 @@ export type BrollShot = {
   action: string;
   location: string;
   visual_example: string;
+  // Optional: the LATEST rendered image prompt for this shot, including any
+  // feedback the user appended during image regen. Passed into the video
+  // prompt writer so the motion description matches the actual still — not
+  // the original generic shot metadata. Without this, image feedback like
+  // "make the lighting warmer" was lost when the video prompt was written.
+  image_prompt?: string;
 };
 
 export type BrollShotList = {
@@ -486,6 +515,10 @@ export type CharacterBrollShot = {
   location: string;
   visual_example: string;
   script_beat?: string;
+  // Optional: the LATEST rendered image prompt for this shot, including any
+  // feedback the user appended during image regen. Passed into the video
+  // prompt writer so motion description matches the actual still.
+  image_prompt?: string;
 };
 
 export type CharacterBrollShotList = {
@@ -737,6 +770,11 @@ export type BrandAsset = {
   sourceApp: string;
   productId: string | null;
   metadata: Record<string, unknown> | null;
+  userId: string | null;
+  // Display name (or email local-part) of the user who saved this asset.
+  // Server resolves this via a join + fallback so the client can render
+  // directly without an extra lookup. Null for legacy rows / anon saves.
+  creatorName: string | null;
 };
 
 export type NewBrandAssetInput = {

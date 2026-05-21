@@ -63,7 +63,12 @@ class Semaphore {
   }
 }
 
-const prepGate = new Semaphore(2);
+// Bumped from 2 → 6: at typical user load (one user × ~10 shots = ~10
+// concurrent fal calls) and the fal account ceiling of 20, the previous limit
+// of 2 was overly conservative — boot-time character backfill or a flurry of
+// new characters used only 2 of ~20 available slots. 6 lets background prep
+// fan out without starving user-facing generations.
+const prepGate = new Semaphore(6);
 
 async function setStatus(id: string, patch: {
   status?: "pending" | "running" | "complete" | "failed";

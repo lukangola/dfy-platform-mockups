@@ -19,7 +19,7 @@ import {
   getProduct, retriggerResearch, uploadProductImage,
   setProductMainImage, addProductImageCandidate, deleteProductImageCandidate,
   generateReferenceSheet, deleteProduct, addProductAngle,
-  updateProductMechanism,
+  updateProductMechanism, patchProduct,
   type Product, type ProductImageCandidate, type ProductMechanism,
 } from "@/lib/api";
 
@@ -159,6 +159,13 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Inline product rename: when the user clicks the pencil icon next to the
+  // title, swap the H1 for a text input. Save commits via PATCH, Cancel
+  // reverts. ESC also cancels, Enter commits.
+  const [nameEditing, setNameEditing] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [nameSaving, setNameSaving] = useState(false);
+  const [nameError, setNameError] = useState<string | null>(null);
   const [, setLocation] = useLocation();
   const progressStartRef = useRef<number | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -249,6 +256,43 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
       setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
       setRetriggering(false);
+    }
+  }
+
+  function startRenamingProduct() {
+    if (!product) return;
+    setNameDraft(product.name);
+    setNameError(null);
+    setNameEditing(true);
+  }
+
+  function cancelRenamingProduct() {
+    setNameEditing(false);
+    setNameError(null);
+  }
+
+  async function saveProductName() {
+    if (!product) return;
+    const trimmed = nameDraft.trim();
+    if (!trimmed) {
+      setNameError("Name cannot be empty");
+      return;
+    }
+    if (trimmed === product.name) {
+      // No change — just close the editor.
+      setNameEditing(false);
+      return;
+    }
+    setNameSaving(true);
+    setNameError(null);
+    try {
+      const { product: updated } = await patchProduct(productId, { name: trimmed });
+      setProduct(updated);
+      setNameEditing(false);
+    } catch (err) {
+      setNameError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setNameSaving(false);
     }
   }
 
@@ -513,9 +557,58 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
 
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-3 flex-wrap">
-              <h1 className="text-lg font-semibold text-white/90 truncate">{product.name}</h1>
+              {nameEditing ? (
+                <div className="flex items-center gap-2 flex-1 min-w-0 max-w-2xl">
+                  <input
+                    autoFocus
+                    type="text"
+                    value={nameDraft}
+                    onChange={(e) => { setNameDraft(e.target.value); if (nameError) setNameError(null); }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void saveProductName();
+                      else if (e.key === "Escape") cancelRenamingProduct();
+                    }}
+                    disabled={nameSaving}
+                    maxLength={200}
+                    className="flex-1 min-w-0 text-lg font-semibold text-white/90 bg-white/[0.04] border border-white/[0.15] rounded px-2.5 py-1 outline-none focus:border-cyan-400/60 disabled:opacity-50"
+                  />
+                  <button
+                    onClick={() => void saveProductName()}
+                    disabled={nameSaving || !nameDraft.trim()}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-mono uppercase tracking-wider bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {nameSaving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
+                    Save
+                  </button>
+                  <button
+                    onClick={cancelRenamingProduct}
+                    disabled={nameSaving}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-mono uppercase tracking-wider text-white/50 border border-white/[0.12] hover:text-white/80 hover:border-white/[0.25] transition-all disabled:opacity-40"
+                  >
+                    <X size={11} />
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <h1 className="text-lg font-semibold text-white/90 truncate">{product.name}</h1>
+                  <button
+                    onClick={startRenamingProduct}
+                    title="Rename product"
+                    className="p-1 rounded text-white/30 hover:text-white/80 hover:bg-white/[0.06] transition-all"
+                  >
+                    <Pencil size={12} />
+                  </button>
+                </>
+              )}
               <ResearchStatusBadge status={product.researchStatus} />
             </div>
+            {nameError && (
+              <div className="mt-1.5 text-[10px] font-mono text-rose-400 flex items-center gap-1.5">
+                <AlertTriangle size={10} />
+                {nameError}
+              </div>
+            )}
             <div className="flex items-center gap-4 mt-1.5 flex-wrap">
               <span className="text-[10px] font-mono text-white/30 px-1.5 py-0.5 rounded bg-white/[0.04] border border-white/[0.06]">
                 {product.category}

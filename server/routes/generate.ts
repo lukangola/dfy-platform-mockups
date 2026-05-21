@@ -1,7 +1,7 @@
 import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
 import { db, schema } from "../lib/db.js";
-import { generateImage, generateVideo } from "../lib/fal.js";
+import { FalContentSafetyError, generateImage, generateVideo } from "../lib/fal.js";
 import { loadPrompt, PromptNotConfiguredError } from "../lib/prompts.js";
 
 export const generateRouter: Router = Router();
@@ -81,6 +81,11 @@ generateRouter.post("/text/:action", async (req: Request, res: Response) => {
       durationMs: result.durationMs,
     });
 
+    // Per-call duration logging — useful for diagnosing why parallel prompt
+    // writing takes longer than expected. Each parallel call logs its own
+    // duration so you can see whether one straggler is dragging the batch.
+    console.log(`[generate/text/${action}] ${result.model} ${result.durationMs}ms in=${result.tokensIn} out=${result.tokensOut} $${result.costUsd.toFixed(4)}`);
+
     res.json({
       id,
       action,
@@ -145,6 +150,16 @@ generateRouter.post("/image/:action", async (req: Request, res: Response) => {
   } catch (err) {
     if (err instanceof PromptNotConfiguredError) {
       return sendError(res, 424, err.message, { action, kind: "image" });
+    }
+    // Content-safety rejection from Gemini-backed fal models. Surface as 422
+    // (not 500) so the client's auto-soften-and-retry flow triggers, and tag
+    // the error code so the UI can show a friendlier message if the retry
+    // also fails.
+    if (err instanceof FalContentSafetyError) {
+      console.warn(`[generate/image/${action}] content-safety rejection:`, err.message);
+      const msg = err.message;
+      await persist({ action, kind: "image", inputs: { vars }, output: null, model: body.model ?? "unknown", error: msg });
+      return sendError(res, 422, msg, { action, errorCode: "content_safety_rejected" });
     }
     console.error(`[generate/image/${action}]`, err);
     const msg = err instanceof Error ? err.message : String(err);

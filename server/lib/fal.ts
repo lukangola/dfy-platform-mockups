@@ -31,6 +31,20 @@ export type MediaGenResult = {
 };
 
 /**
+ * Custom error class for fal.ai content-safety rejections (HTTP 422).
+ * Lets callers / route handlers distinguish "Gemini said no" from generic
+ * fal.ai errors and bubble a specific status to the client so the UI can
+ * trigger its auto-soften-and-retry flow.
+ */
+export class FalContentSafetyError extends Error {
+  status = 422;
+  constructor(message: string) {
+    super(message);
+    this.name = "FalContentSafetyError";
+  }
+}
+
+/**
  * Generate image(s) via fal.ai. Model defaults to flux-pro.
  * `input` is the fal.ai model-specific payload.
  */
@@ -42,15 +56,31 @@ export async function generateImage(args: {
   const model = args.model ?? "fal-ai/flux-pro/v1.1";
   const started = Date.now();
 
-  const result = await fal.subscribe(model, {
-    input: args.input,
-    logs: false,
-  });
+  try {
+    const result = await fal.subscribe(model, {
+      input: args.input,
+      logs: false,
+      pollInterval: 500,
+    });
 
-  const data = result.data as { images?: Array<{ url: string }>; image?: { url: string } };
-  const urls = data.images?.map((i) => i.url) ?? (data.image ? [data.image.url] : []);
+    const data = result.data as { images?: Array<{ url: string }>; image?: { url: string } };
+    const urls = data.images?.map((i) => i.url) ?? (data.image ? [data.image.url] : []);
 
-  return { urls, raw: result.data, model, durationMs: Date.now() - started };
+    return { urls, raw: result.data, model, durationMs: Date.now() - started };
+  } catch (err) {
+    // Gemini's safety classifier rejects the prompt → fal returns 422 with
+    // the "did not generate the expected output" body. Re-throw as a typed
+    // error so the route handler can return 422 (instead of 500) and the
+    // client knows to trigger its sanitize-and-retry flow. Other errors
+    // (auth, network, missing input) propagate untouched.
+    const e = err as { status?: number; body?: { detail?: string }; message?: string };
+    const status = e?.status;
+    const msg = e?.body?.detail ?? e?.message ?? String(err);
+    if (status === 422 || /did not generate the expected output|unsafe content|content policy/i.test(msg)) {
+      throw new FalContentSafetyError(msg);
+    }
+    throw err;
+  }
 }
 
 /**
@@ -91,6 +121,7 @@ export async function transcribeAudio(args: {
       ...(args.language ? { language: args.language } : {}),
     } as unknown as Parameters<typeof fal.subscribe>[1]["input"],
     logs: false,
+    pollInterval: 500,
   });
   const data = result.data as { text?: string; chunks?: unknown; inferred_languages?: string[] };
   const text = (data.text ?? "").trim();
@@ -112,6 +143,7 @@ export async function generateVideo(args: {
   const result = await fal.subscribe(model, {
     input: args.input,
     logs: false,
+    pollInterval: 500,
   });
 
   const data = result.data as { video?: { url: string }; videos?: Array<{ url: string }> };

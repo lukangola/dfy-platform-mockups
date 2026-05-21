@@ -552,7 +552,7 @@ export function generateMockMessageAds(productId: string, templateId: string): M
 export const WORKSPACE_APPS: WorkspaceApp[] = [
   {
     id: "broll",
-    name: "B-Roll Generator",
+    name: "Product B-Roll Generator",
     description: "Generate cinematic B-roll shots and videos from product images. AI-powered shot list creation with feedback loop.",
     icon: "Video",
     status: "active",

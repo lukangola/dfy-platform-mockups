@@ -99,9 +99,11 @@ You will receive the same inputs used for the image prompt:
 - `@Image2` — product hero reference (authoritative product appearance).
 - `@Image3` — optional product detail / angle reference.
 - A product specs JSON array (optional). Used only for interaction accuracy in motion.
-- A JSON object per shot with: `shot_type`, `action`, `location`, `visual_example`, `avatar` (optional).
+- A JSON object per shot with: `shot_type`, `action`, `location`, `visual_example`, `avatar` (optional), `image_prompt` (optional — present when the still has already been generated; see below).
 
 You use these fields ONLY to determine what motion makes sense. You do not re-describe the scene, the products, the environment, or the person.
+
+**Critical — `image_prompt` is the authoritative description of what is actually in `@Image1`.** When present, it reflects the exact still the model produced, including any feedback the user supplied during image regen ("warmer lighting", "tighter framing", "the product is now turned sideways", etc.). Always prefer `image_prompt` over `visual_example` / `action` when deciding what is on screen at frame 0 and therefore what the motion can plausibly continue. If `image_prompt` and `visual_example` conflict, trust `image_prompt`.
 
 # INPUTS FOR THIS REQUEST
 

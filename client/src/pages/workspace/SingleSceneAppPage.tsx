@@ -8,9 +8,8 @@
  * approve / regen / regen-with-feedback UX on every card).
  *
  * Flow (3 steps):
- *   0. Setup — image model + character + optional product + scene lines
- *      (one line per scene, "+" to add more, "x" to remove). Generate
- *      advances to step 1.
+ *   0. Setup — character + optional product + scene lines (one line per
+ *      scene, "+" to add more, "x" to remove). Generate advances to step 1.
  *   1. Images — auto-generates one Nano-Banana-Pro image per scene line.
  *      Per-image: approve / regen / regen-with-feedback / reject.
  *      "Generate Videos" advances to step 2.
@@ -22,14 +21,15 @@ import { Link } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Sparkles, ChevronDown, Check, X, RefreshCw, MessageSquare,
-  Image as ImageIcon, Video, ArrowLeft, Package, Loader2,
+  Video, ArrowLeft, Package, Loader2,
   AlertTriangle, Plus, Trash2, Download, User, Upload, Wand2,
 } from "lucide-react";
 import {
   listProducts, getProductMechanism,
   listCharacters, createCharacter, deleteCharacter,
   generateSingleSceneImagePrompts, generateCharacterBrollVideoPrompts,
-  generateImage, generateVideo, saveBrandAssets,
+  generateImage, generateText, generateVideo, saveBrandAssets,
+  ApiCallError,
   type Product, type ProductMechanism, type CharacterRef,
 } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
@@ -92,11 +92,9 @@ function ApprovalBadge({ approval }: { approval: Approval }) {
   );
 }
 
-// Image model options. Single entry today; the dropdown shape leaves room to
-// add Flux / Imagen later without changing the call site.
-const IMAGE_MODELS = [
-  { id: "fal-ai/nano-banana-pro/edit", label: "Nano-Banana-Pro" },
-];
+// Image model — fixed to nano-banana-pro/edit. We used to have a dropdown
+// here but in practice there was only ever one option; removed for clarity.
+const IMAGE_MODEL_ID = "fal-ai/nano-banana-pro/edit";
 
 export default function SingleSceneAppPage() {
   const { activeBrandId } = useBrand();
@@ -104,9 +102,6 @@ export default function SingleSceneAppPage() {
   const [currentStep, setCurrentStep] = useState(0);
 
   // ── Setup state ──────────────────────────────────────────────────
-  const [imageModelId, setImageModelId] = useState(IMAGE_MODELS[0].id);
-  const [imageModelDropdownOpen, setImageModelDropdownOpen] = useState(false);
-  const selectedImageModel = IMAGE_MODELS.find((m) => m.id === imageModelId) ?? IMAGE_MODELS[0];
 
   // Products (optional — single-scene gen works without a product picked)
   const [products, setProducts] = useState<Product[]>([]);
@@ -136,6 +131,11 @@ export default function SingleSceneAppPage() {
   // Mechanism cache (used by both image + video prompt writers when product is in scope)
   const [mechanism, setMechanism] = useState<ProductMechanism[] | null>(null);
   const [mechanismLoading, setMechanismLoading] = useState(false);
+  // Two-phase progress tracking: prompts being written → media being generated.
+  const [imagePromptsLoading, setImagePromptsLoading] = useState(false);
+  const [videoPromptsLoading, setVideoPromptsLoading] = useState(false);
+  const [imagePromptsWritten, setImagePromptsWritten] = useState(0);
+  const [videoPromptsWritten, setVideoPromptsWritten] = useState(0);
 
   // Generation state
   const [generating, setGenerating] = useState(false);
@@ -325,18 +325,27 @@ export default function SingleSceneAppPage() {
   function promptReferencesProduct(prompt: string): boolean {
     if (!prompt) return false;
     const text = prompt.toLowerCase();
+
+    // Product-name tokens, word-boundary matched.
     const productName = (productLine || selectedProduct?.name || "").toLowerCase();
     const tokens = productName
       .split(/\s+/)
       .map((t) => t.replace(/[^a-z0-9]/g, ""))
       .filter((t) => t.length >= 4);
-    if (tokens.some((t) => text.includes(t))) return true;
+    if (tokens.some((t) => new RegExp(`\\b${t}\\b`, "i").test(text))) return true;
+
+    // Curated generic-noun list. Naive substring matching caught common
+    // English words ("can"→"she can see", "tin"→"waiting", "box"→"boxing",
+    // "cap"→"capture", "lid"→"valid", "tube"→"youtube") and force-fed
+    // product refs into shots that had nothing to do with the product.
+    // Single-syllable ambiguous nouns dropped; everything below is matched
+    // with word boundaries.
     const generic = [
-      "the product", "bottle", "jar", "pouch", "tube", "spray bottle", "spray", "sachet",
-      "can", "tin", "box", "container", "label", "cap", "lid", "pump", "dropper",
-      "nozzle", "trigger", "packaging", "package", "wrapper",
+      "the product", "bottle", "jar", "pouch", "sachet", "spray bottle",
+      "container", "dropper", "packaging", "package", "wrapper",
     ];
-    if (generic.some((g) => text.includes(g))) return true;
+    if (generic.some((g) => new RegExp(`\\b${g}\\b`, "i").test(text))) return true;
+
     if (/@element\d/i.test(prompt) || /@image[3-9]/i.test(prompt)) return true;
     return false;
   }
@@ -360,17 +369,49 @@ export default function SingleSceneAppPage() {
     return Array.from(new Set(refs));
   }
 
+  // Detect Gemini-classifier rejection from the server (route returns 422 +
+  // errorCode "content_safety_rejected"). Backstop on raw fal message in
+  // case the typed error is missing.
+  function isContentSafetyRejection(err: unknown): boolean {
+    if (err instanceof ApiCallError) {
+      if (err.status === 422) return true;
+      if (err.errorCode === "content_safety_rejected") return true;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return /did not generate the expected output|unsafe content|content policy/i.test(msg);
+  }
+
   async function callImageModel(scene: UiScene, prompt: string, extraRefs: string[] = []): Promise<string> {
     const baseRefs = collectImageRefs(scene, prompt);
     const imageUrls = Array.from(new Set([...extraRefs, ...baseRefs]));
-    const input: Record<string, unknown> = imageUrls.length > 0
-      ? { prompt, image_urls: imageUrls, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" }
-      : { prompt, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" };
-    const model = imageUrls.length > 0 ? imageModelId : "fal-ai/flux-pro/v1.1";
-    const res = await generateImage("single_scene_image", { input, model });
-    const url = res.urls[0];
-    if (!url) throw new Error("No image URL returned");
-    return url;
+    const model = imageUrls.length > 0 ? IMAGE_MODEL_ID : "fal-ai/flux-pro/v1.1";
+
+    const buildInput = (p: string): Record<string, unknown> =>
+      imageUrls.length > 0
+        ? { prompt: p, image_urls: imageUrls, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" }
+        : { prompt: p, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" };
+
+    try {
+      const res = await generateImage("single_scene_image", { input: buildInput(prompt), model });
+      const url = res.urls[0];
+      if (!url) throw new Error("No image URL returned");
+      return url;
+    } catch (err) {
+      if (!isContentSafetyRejection(err)) throw err;
+      // First attempt rejected by Gemini safety. Sanitize via the dedicated
+      // rewrite prompt (Haiku, ~5-8s) and retry once. Most body-image /
+      // clothing-fit prompts pass after softening "bra"→"fitted top",
+      // dropping body-anatomy + struggle combos, and reframing the emotional
+      // beat through face / posture instead of clothing-against-body.
+      console.warn("[single-scene] content-safety rejection — sanitizing and retrying once");
+      const rewrite = await generateText("image_prompt_safety_rewrite", { original_prompt: prompt });
+      const sanitized = rewrite.text.trim();
+      if (!sanitized) throw err;
+      const res = await generateImage("single_scene_image", { input: buildInput(sanitized), model });
+      const url = res.urls[0];
+      if (!url) throw new Error("No image URL returned (after safety rewrite)");
+      return url;
+    }
   }
 
   async function generateImageForScene(scene: UiScene, prompt: string) {
@@ -379,19 +420,37 @@ export default function SingleSceneAppPage() {
       const url = await callImageModel(scene, prompt);
       patchShot(scene.id, { imageStatus: "ready", imageUrl: url });
     } catch (err) {
-      patchShot(scene.id, { imageStatus: "failed", imageError: err instanceof Error ? err.message : String(err) });
+      const friendly = isContentSafetyRejection(err)
+        ? "The image model rejected this prompt as potentially unsafe even after auto-softening the language. Try regenerating with feedback — soften wardrobe terms (e.g. 'bra' → 'fitted top'), avoid describing body parts pressing against clothing, and keep the emotional beat on the face / posture rather than on clothing struggle."
+        : (err instanceof Error ? err.message : String(err));
+      patchShot(scene.id, { imageStatus: "failed", imageError: friendly });
     }
   }
 
+  // Parallel: one Claude call per scene. Was a single batched call where
+  // Claude wrote all prompts sequentially inside its response. Parallelizing
+  // cuts the wall-clock to roughly max(individual times).
   async function writeImagePrompts(targets: UiScene[]): Promise<string[]> {
     if (targets.length === 0) return [];
-    const m = await ensureMechanism().catch(() => [] as ProductMechanism[]);
-    const { prompts } = await generateSingleSceneImagePrompts({
-      product: productLine,
-      mechanism: m,
-      scenes: targets.map((t) => t.description),
-    });
-    return prompts;
+    setImagePromptsLoading(true);
+    setImagePromptsWritten(0);
+    try {
+      const m = await ensureMechanism().catch(() => [] as ProductMechanism[]);
+      const results = await Promise.all(
+        targets.map(async (t) => {
+          const { prompts } = await generateSingleSceneImagePrompts({
+            product: productLine,
+            mechanism: m,
+            scenes: [t.description],
+          });
+          setImagePromptsWritten((c) => c + 1);
+          return prompts[0] ?? "";
+        }),
+      );
+      return results;
+    } finally {
+      setImagePromptsLoading(false);
+    }
   }
 
   async function generateAllImages() {
@@ -471,20 +530,33 @@ export default function SingleSceneAppPage() {
    */
   async function writeVideoPrompts(targets: UiScene[]): Promise<string[]> {
     if (targets.length === 0) return [];
-    const m = await ensureMechanism().catch(() => [] as ProductMechanism[]);
-    const { prompts } = await generateCharacterBrollVideoPrompts({
-      product: productLine,
-      mechanism: m,
-      shots: targets.map((s) => ({
-        id: s.shot_id,
-        category: "Lifestyle / Context",
-        shot_type: "Environmental Mood",
-        action: s.description,
-        location: "(unspecified — infer from action)",
-        visual_example: s.description,
-      })),
-    });
-    return prompts;
+    setVideoPromptsLoading(true);
+    setVideoPromptsWritten(0);
+    try {
+      const m = await ensureMechanism().catch(() => [] as ProductMechanism[]);
+      const results = await Promise.all(
+        targets.map(async (s) => {
+          const { prompts } = await generateCharacterBrollVideoPrompts({
+            product: productLine,
+            mechanism: m,
+            shots: [{
+              id: s.shot_id,
+              category: "Lifestyle / Context",
+              shot_type: "Environmental Mood",
+              action: s.description,
+              location: "(unspecified — infer from action)",
+              visual_example: s.description,
+              ...(s.imagePrompt ? { image_prompt: s.imagePrompt } : {}),
+            }],
+          });
+          setVideoPromptsWritten((c) => c + 1);
+          return prompts[0] ?? "";
+        }),
+      );
+      return results;
+    } finally {
+      setVideoPromptsLoading(false);
+    }
   }
 
   async function callVideoModel(scene: UiScene, prompt: string, imageUrl: string): Promise<string> {
@@ -494,7 +566,9 @@ export default function SingleSceneAppPage() {
       prompt,
       start_image_url: imageUrl,
       duration: "5",
-      generate_audio: true,
+      // Audio off: we never use the generated audio. Drops Kling v3 cost from
+      // $0.126/s → $0.084/s (~33%) and shaves time off generation.
+      generate_audio: false,
     };
     if (wantsProduct) {
       input.elements = [
@@ -506,7 +580,10 @@ export default function SingleSceneAppPage() {
     }
     const res = await generateVideo("single_scene_video", {
       input,
-      model: "fal-ai/kling-video/v3/pro/image-to-video",
+      // Standard tier (~40% faster + ~33% cheaper than /pro). Combined with
+      // generate_audio:false above, this is the cost/speed sweet spot for
+      // first-draft review. Swap back to /pro for final-delivery quality.
+      model: "fal-ai/kling-video/v3/standard/image-to-video",
     });
     const url = res.urls[0];
     if (!url) throw new Error("No video URL returned");
@@ -723,6 +800,14 @@ export default function SingleSceneAppPage() {
     ? 0
     : Math.round(((imagesReady + imagesFailed) / uiShots.length) * 100);
 
+  // Two-phase progress (prompts → images). Each scene counts as 2 work units.
+  const twoPhaseImagesPct = uiShots.length === 0
+    ? 0
+    : Math.round(
+        ((Math.min(imagePromptsWritten, uiShots.length) + imagesReady + imagesFailed)
+          / (uiShots.length * 2)) * 100,
+      );
+
   const approvedImages = uiShots.filter((s) => s.imageApproval === "approved");
   const videosReady = approvedImages.filter((s) => s.videoStatus === "ready").length;
   const videosFailed = approvedImages.filter((s) => s.videoStatus === "failed").length;
@@ -731,6 +816,13 @@ export default function SingleSceneAppPage() {
   const videosProgressPct = approvedImages.length === 0
     ? 0
     : Math.round(((videosReady + videosFailed) / approvedImages.length) * 100);
+
+  const twoPhaseVideosPct = approvedImages.length === 0
+    ? 0
+    : Math.round(
+        ((Math.min(videoPromptsWritten, approvedImages.length) + videosReady + videosFailed)
+          / (approvedImages.length * 2)) * 100,
+      );
 
   return (
     <div className="min-h-screen flex flex-col" style={{ color: "#E2E8F0" }}>
@@ -793,44 +885,10 @@ export default function SingleSceneAppPage() {
                   </div>
                 )}
 
-                {/* 1 — Image model */}
-                <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-5">
-                  <label className="text-[10px] font-mono text-white/40 uppercase tracking-widest block mb-3">
-                    1 — Image Model
-                  </label>
-                  <div className="relative">
-                    <button
-                      onClick={() => setImageModelDropdownOpen((p) => !p)}
-                      className="w-full flex items-center gap-3 bg-white/[0.03] border border-white/[0.08] rounded-lg px-3 py-2.5 hover:border-white/[0.15] transition-all text-left"
-                    >
-                      <ImageIcon size={14} className="text-violet-400" />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm text-white/80">{selectedImageModel.label}</div>
-                        <div className="text-[10px] font-mono text-white/30">Used to render every scene as a still</div>
-                      </div>
-                      <ChevronDown size={14} className={`text-white/30 transition-transform ${imageModelDropdownOpen ? "rotate-180" : ""}`} />
-                    </button>
-                    {imageModelDropdownOpen && (
-                      <div className="absolute top-full mt-2 inset-x-0 z-10 bg-[#13151a] border border-white/[0.08] rounded-lg overflow-hidden shadow-xl">
-                        {IMAGE_MODELS.map((m) => (
-                          <button
-                            key={m.id}
-                            onClick={() => { setImageModelId(m.id); setImageModelDropdownOpen(false); }}
-                            className={`w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-white/[0.04] transition-colors ${imageModelId === m.id ? "text-violet-400" : "text-white/80"}`}
-                          >
-                            <div className="text-sm">{m.label}</div>
-                            {imageModelId === m.id && <Check size={12} className="ml-auto" />}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* 2 — Character */}
+                {/* 1 — Character */}
                 <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-5">
                   <div className="flex items-center justify-between mb-3">
-                    <label className="text-[10px] font-mono text-white/40 uppercase tracking-widest">2 — Character</label>
+                    <label className="text-[10px] font-mono text-white/40 uppercase tracking-widest">1 — Character</label>
                     <label className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-white/[0.12] bg-white/[0.03] hover:border-violet-500/30 hover:text-violet-400 transition-all cursor-pointer text-[10px] font-mono uppercase tracking-wider text-white/70">
                       {characterImageUploading ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />}
                       Upload new
@@ -918,10 +976,10 @@ export default function SingleSceneAppPage() {
                   </div>
                 </div>
 
-                {/* 3 — Product (optional) */}
+                {/* 2 — Product (optional) */}
                 <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-5">
                   <label className="text-[10px] font-mono text-white/40 uppercase tracking-widest block mb-3">
-                    3 — Product <span className="text-white/30 normal-case tracking-normal">(optional — used as context when scenes mention it)</span>
+                    2 — Product <span className="text-white/30 normal-case tracking-normal">(optional — used as context when scenes mention it)</span>
                   </label>
                   {productsError ? (
                     <div className="text-[11px] text-rose-400 font-mono flex items-center gap-2"><AlertTriangle size={11} /> {productsError}</div>
@@ -982,10 +1040,10 @@ export default function SingleSceneAppPage() {
                   )}
                 </div>
 
-                {/* 4 — Scene lines */}
+                {/* 3 — Scene lines */}
                 <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-5">
                   <label className="text-[10px] font-mono text-white/40 uppercase tracking-widest block mb-3">
-                    4 — Scenes <span className="text-rose-300/60 normal-case tracking-normal">required</span>
+                    3 — Scenes <span className="text-rose-300/60 normal-case tracking-normal">required</span>
                   </label>
                   <p className="text-[11px] text-white/40 font-mono leading-relaxed mb-3">
                     One line per scene. Describe what Character is doing in that single shot — Claude will turn each line into a polished image prompt.
@@ -1052,9 +1110,17 @@ export default function SingleSceneAppPage() {
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
-                      <div className="text-[10px] font-mono text-white/40">{imagesProgressPct}%</div>
+                      <div className="text-[10px] font-mono text-white/40 whitespace-nowrap">
+                        {imagePromptsWritten < uiShots.length && imagesReady === 0 && uiShots.length > 0
+                          ? `Prompts ${imagePromptsWritten}/${uiShots.length}`
+                          : `${twoPhaseImagesPct}%`}
+                      </div>
                       <div className="w-32 h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
-                        <div className="h-full bg-violet-500/60 transition-all" style={{ width: `${imagesProgressPct}%` }} />
+                        <motion.div
+                          className="h-full bg-violet-500/60"
+                          animate={{ width: `${twoPhaseImagesPct}%` }}
+                          transition={{ duration: 0.4 }}
+                        />
                       </div>
                       <button
                         onClick={approveAllReadyImages}
@@ -1208,9 +1274,17 @@ export default function SingleSceneAppPage() {
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
-                      <div className="text-[10px] font-mono text-white/40">{videosProgressPct}%</div>
+                      <div className="text-[10px] font-mono text-white/40 whitespace-nowrap">
+                        {videoPromptsWritten < approvedImages.length && videosReady === 0 && approvedImages.length > 0
+                          ? `Prompts ${videoPromptsWritten}/${approvedImages.length}`
+                          : `${twoPhaseVideosPct}%`}
+                      </div>
                       <div className="w-32 h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
-                        <div className="h-full bg-violet-500/60 transition-all" style={{ width: `${videosProgressPct}%` }} />
+                        <motion.div
+                          className="h-full bg-violet-500/60"
+                          animate={{ width: `${twoPhaseVideosPct}%` }}
+                          transition={{ duration: 0.4 }}
+                        />
                       </div>
                       <button
                         onClick={approveAllReadyVideos}

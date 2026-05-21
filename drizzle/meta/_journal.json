@@ -71,6 +71,13 @@
       "when": 1778949591500,
       "tag": "0009_lean_night_nurse",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1779294421259,
+      "tag": "0010_curly_demogoblin",
+      "breakpoints": true
     }
   ]
 }

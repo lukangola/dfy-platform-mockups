@@ -83,6 +83,10 @@ function uiShotToApi(s: UiShot): BrollShot {
     action: s.title,
     location: s.location,
     visual_example: s.description,
+    // Pass the latest image prompt (with any feedback baked in) so the video
+    // prompt writer can align motion with the actual still — not a stale
+    // generic description.
+    ...(s.imagePrompt ? { image_prompt: s.imagePrompt } : {}),
   };
 }
 
@@ -112,6 +116,49 @@ function toUiShots(list: BrollShotList): UiShot[] {
 
 function nextShotNumber(shots: UiShot[]): number {
   return shots.reduce((max, s) => Math.max(max, s.shot_id), 0) + 1;
+}
+
+/**
+ * Time-estimated progress bar for the shot-list architect step. Used when a
+ * single Claude call has no per-shot granularity to track — we estimate
+ * 25s typical duration and asymptote the bar toward 95% so it never claims
+ * to be finished before the call actually returns. Parent unmounts this
+ * when shots land, which is when the user sees the real list appear.
+ */
+function ShotListProgressBar() {
+  const [pct, setPct] = useState(0);
+  const startedAt = useRef(Date.now());
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const elapsed = Date.now() - startedAt.current;
+      // 1 - e^(-t/12s) → 0% at t=0, ~63% at t=12s, ~86% at t=24s, capped at 95%.
+      const next = Math.min(95, Math.round((1 - Math.exp(-elapsed / 12_000)) * 100));
+      setPct(next);
+    }, 250);
+    return () => clearInterval(interval);
+  }, []);
+  return (
+    <div className="mb-2">
+      <div className="flex items-center justify-between text-[10px] font-mono text-white/40 mb-1">
+        <span className="uppercase tracking-widest flex items-center gap-2">
+          <Loader2 size={11} className="animate-spin text-cyan-400" />
+          Writing the shot list…
+        </span>
+        <span>{pct}%</span>
+      </div>
+      <div className="h-1.5 rounded-full bg-white/[0.04] overflow-hidden">
+        <motion.div
+          className="h-full rounded-full"
+          style={{
+            background: "linear-gradient(90deg, #00D4FF, #0099CC)",
+            boxShadow: "0 0 8px rgba(0,212,255,0.3)",
+          }}
+          animate={{ width: `${pct}%` }}
+          transition={{ duration: 0.4 }}
+        />
+      </div>
+    </div>
+  );
 }
 
 function ApprovalBadge({ approval, kind }: { approval: Approval; kind: "image" | "video" }) {
@@ -161,6 +208,11 @@ export default function BrollAppPage() {
   const [mechanismLoading, setMechanismLoading] = useState(false);
   const [imagePromptsLoading, setImagePromptsLoading] = useState(false);
   const [videoPromptsLoading, setVideoPromptsLoading] = useState(false);
+  // Counters for the determinate two-phase progress bar (Phase 1: prompt
+  // writing; Phase 2: image / video generation). Incremented as each parallel
+  // Claude call finishes.
+  const [imagePromptsWritten, setImagePromptsWritten] = useState(0);
+  const [videoPromptsWritten, setVideoPromptsWritten] = useState(0);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
 
   // Review state
@@ -211,6 +263,15 @@ export default function BrollAppPage() {
     if (!selectedProduct) return;
     setGenerating(true);
     setGenerationError(null);
+    // Mirror the Listicle Builder's jump-then-work UX: move to step 1
+    // immediately so the user sees the loading state, then run the (10-30s)
+    // shot-list generation in the background. Clearing uiShots first means
+    // the step-1 view renders its skeleton/loader instead of a stale list.
+    setShotList(null);
+    setUiShots([]);
+    imagesAutoKickedRef.current = false;
+    videosAutoKickedRef.current = false;
+    setCurrentStep(1);
     try {
       const line = [
         selectedProduct.name,
@@ -225,10 +286,6 @@ export default function BrollAppPage() {
       });
       setShotList(shots);
       setUiShots(toUiShots(shots));
-      // Fresh list: reset autoplay kicks so step 2/3 re-fire for the new shots.
-      imagesAutoKickedRef.current = false;
-      videosAutoKickedRef.current = false;
-      setCurrentStep(1);
     } catch (err) {
       setGenerationError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -288,18 +345,31 @@ export default function BrollAppPage() {
     }
   }
 
-  // Writes one image prompt per target shot, in the same order we passed them.
+  // Writes one image prompt per target shot. Used to be a single Claude call
+  // with ALL shots batched in the request — which made Claude write them
+  // sequentially inside one response and took ~3-4s per shot. Now we fan out
+  // one Claude call PER shot in parallel: total time = max(individual times)
+  // ≈ 4-6s regardless of shot count. Our system prompt has ephemeral cache
+  // control, so the per-call cost barely changes (cache hits across the
+  // parallel calls within the 5-min TTL).
   async function writeImagePrompts(targets: UiShot[]): Promise<string[]> {
     if (targets.length === 0) return [];
     setImagePromptsLoading(true);
+    setImagePromptsWritten(0);
     try {
       const m = await ensureMechanism().catch(() => [] as ProductMechanism[]);
-      const { prompts } = await generateBrollImagePrompts({
-        product: productLine,
-        mechanism: m,
-        shots: targets.map(uiShotToApi),
-      });
-      return prompts;
+      const results = await Promise.all(
+        targets.map(async (t) => {
+          const { prompts } = await generateBrollImagePrompts({
+            product: productLine,
+            mechanism: m,
+            shots: [uiShotToApi(t)],
+          });
+          setImagePromptsWritten((c) => c + 1);
+          return prompts[0] ?? "";
+        }),
+      );
+      return results;
     } finally {
       setImagePromptsLoading(false);
     }
@@ -308,14 +378,21 @@ export default function BrollAppPage() {
   async function writeVideoPrompts(targets: UiShot[]): Promise<string[]> {
     if (targets.length === 0) return [];
     setVideoPromptsLoading(true);
+    setVideoPromptsWritten(0);
     try {
       const m = await ensureMechanism().catch(() => [] as ProductMechanism[]);
-      const { prompts } = await generateBrollVideoPrompts({
-        product: productLine,
-        mechanism: m,
-        shots: targets.map(uiShotToApi),
-      });
-      return prompts;
+      const results = await Promise.all(
+        targets.map(async (t) => {
+          const { prompts } = await generateBrollVideoPrompts({
+            product: productLine,
+            mechanism: m,
+            shots: [uiShotToApi(t)],
+          });
+          setVideoPromptsWritten((c) => c + 1);
+          return prompts[0] ?? "";
+        }),
+      );
+      return results;
     } finally {
       setVideoPromptsLoading(false);
     }
@@ -401,7 +478,16 @@ export default function BrollAppPage() {
       const finalPrompt = feedbackText
         ? `${basePrompt}\n\nAdditional direction from user: ${feedbackText}`
         : basePrompt;
-      patchShot(shotId, { imagePrompt: finalPrompt });
+      // Stash the updated image prompt AND invalidate any stale video prompt
+      // for this shot. If the user changed something about the still (e.g.
+      // "make the lighting warmer", "tighter framing"), the existing video
+      // prompt was written against the OLD still and will no longer match.
+      // Clearing videoPrompt forces writeVideoPrompts to regenerate it from
+      // the new image_prompt on the next video pass.
+      patchShot(shotId, {
+        imagePrompt: finalPrompt,
+        ...(feedbackText ? { videoPrompt: undefined } : {}),
+      });
       const url = await callImageModel(finalPrompt);
       patchShot(shotId, { imageStatus: "ready", imageUrl: url });
     } catch (err) {
@@ -430,7 +516,9 @@ export default function BrollAppPage() {
         duration: "4",
         aspect_ratio: "9:16",
         resolution: "720p",
-        generate_audio: true,
+        // Audio off: we never use the generated audio track, and disabling it
+        // shaves generation time + drops Seedance/Kling cost noticeably.
+        generate_audio: false,
       },
       model: "bytedance/seedance-2.0/reference-to-video",
     });
@@ -644,6 +732,17 @@ export default function BrollAppPage() {
     ? 0
     : Math.round(((imagesReadyCount + imagesFailedCount) / uiShots.length) * 100);
 
+  // Two-phase progress: each shot does 2 units of work (write prompt, then
+  // generate image). Total = 2N. We count each parallel prompt completion
+  // (capped at N) plus each image completion (capped at N). Result is a
+  // single 0-100% bar that moves continuously across both phases.
+  const twoPhaseImagesPct = uiShots.length === 0
+    ? 0
+    : Math.round(
+        ((Math.min(imagePromptsWritten, uiShots.length) + imagesReadyCount + imagesFailedCount)
+          / (uiShots.length * 2)) * 100,
+      );
+
   const approvedImageShots = uiShots.filter((s) => s.imageApproval === "approved");
   const videosReadyCount = approvedImageShots.filter((s) => s.videoStatus === "ready").length;
   const videosFailedCount = approvedImageShots.filter((s) => s.videoStatus === "failed").length;
@@ -652,6 +751,14 @@ export default function BrollAppPage() {
   const videosProgressPct = approvedImageShots.length === 0
     ? 0
     : Math.round(((videosReadyCount + videosFailedCount) / approvedImageShots.length) * 100);
+
+  // Same two-phase calculation for videos.
+  const twoPhaseVideosPct = approvedImageShots.length === 0
+    ? 0
+    : Math.round(
+        ((Math.min(videoPromptsWritten, approvedImageShots.length) + videosReadyCount + videosFailedCount)
+          / (approvedImageShots.length * 2)) * 100,
+      );
 
   return (
     <div className="min-h-screen flex flex-col" style={{ color: "#E2E8F0" }}>
@@ -951,6 +1058,31 @@ export default function BrollAppPage() {
                   </div>
                 )}
 
+                {/* Loading state — shown while handleGenerate() is running the
+                    shot-list architect prompt in the background. The progress
+                    bar is time-estimated since one Claude call has no
+                    sub-progress; it asymptotes toward 95% over ~25s and snaps
+                    to 100% when the call returns. */}
+                {generating && uiShots.length === 0 && (
+                  <div className="flex flex-col gap-3 mb-6">
+                    <ShotListProgressBar />
+                    {[0, 1, 2, 3, 4].map((i) => (
+                      <div
+                        key={i}
+                        className="rounded-lg border border-white/[0.06] p-4 animate-pulse"
+                        style={{ background: "#13161F", animationDelay: `${i * 0.1}s` }}
+                      >
+                        <div className="flex items-center gap-2 mb-3">
+                          <div className="h-4 w-6 rounded bg-white/[0.06]" />
+                          <div className="h-4 w-24 rounded bg-white/[0.06]" />
+                        </div>
+                        <div className="h-3 w-3/4 rounded bg-white/[0.04] mb-2" />
+                        <div className="h-3 w-1/2 rounded bg-white/[0.04]" />
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 <div className="flex flex-col gap-3">
                   {uiShots.map((shot, idx) => (
                     <div
@@ -1068,18 +1200,24 @@ export default function BrollAppPage() {
                   </div>
                 </div>
 
-                {/* Progress bar */}
+                {/* Two-phase determinate progress bar.
+                    Phase 1 (0→50%): prompt writing — counts parallel Claude
+                      calls as they land (imagePromptsWritten / total).
+                    Phase 2 (50→100%): image generation — counts fal jobs as
+                      they finish (imagesReadyCount + imagesFailedCount).
+                    The bar moves continuously across both phases so there's
+                    always visible progress. */}
                 <div className="mb-4">
                   <div className="flex items-center justify-between text-[10px] font-mono text-white/40 mb-1">
                     <span className="uppercase tracking-widest">
-                      {imagesGeneratingCount > 0 || imagePromptsLoading || mechanismLoading
-                        ? "Generating images..."
-                        : imagesReadyCount + imagesFailedCount >= uiShots.length && uiShots.length > 0
+                      {imagesReadyCount + imagesFailedCount >= uiShots.length && uiShots.length > 0
                         ? "All images ready"
-                        : "Progress"}
+                        : imagePromptsWritten < uiShots.length && imagesReadyCount === 0
+                        ? `Writing prompts… (${imagePromptsWritten}/${uiShots.length})`
+                        : `Generating images… (${imagesReadyCount + imagesFailedCount}/${uiShots.length})`}
                     </span>
                     <span>
-                      {imagesReadyCount + imagesFailedCount} / {uiShots.length}
+                      {Math.round(twoPhaseImagesPct)}%
                       {imagesFailedCount > 0 && (
                         <span className="text-rose-400/80 ml-2">({imagesFailedCount} failed)</span>
                       )}
@@ -1090,15 +1228,15 @@ export default function BrollAppPage() {
                       className="h-full rounded-full"
                       style={{
                         background:
-                          imagesProgressPct >= 100
+                          twoPhaseImagesPct >= 100
                             ? "linear-gradient(90deg, #10B981, #34D399)"
                             : "linear-gradient(90deg, #00D4FF, #0099CC)",
                         boxShadow:
-                          imagesProgressPct >= 100
+                          twoPhaseImagesPct >= 100
                             ? "0 0 8px rgba(16,185,129,0.3)"
                             : "0 0 8px rgba(0,212,255,0.3)",
                       }}
-                      animate={{ width: `${imagesProgressPct}%` }}
+                      animate={{ width: `${twoPhaseImagesPct}%` }}
                       transition={{ duration: 0.4 }}
                     />
                   </div>
@@ -1267,18 +1405,18 @@ export default function BrollAppPage() {
                         </div>
                       </div>
 
-                      {/* Progress bar */}
+                      {/* Two-phase determinate progress bar (prompts → videos). */}
                       <div className="mb-4">
                         <div className="flex items-center justify-between text-[10px] font-mono text-white/40 mb-1">
                           <span className="uppercase tracking-widest">
-                            {videosGeneratingCount > 0 || videoPromptsLoading || mechanismLoading
-                              ? "Generating videos..."
-                              : videosReadyCount + videosFailedCount >= approved.length && approved.length > 0
+                            {videosReadyCount + videosFailedCount >= approved.length && approved.length > 0
                               ? "All videos ready"
-                              : "Progress"}
+                              : videoPromptsWritten < approved.length && videosReadyCount === 0
+                              ? `Writing prompts… (${videoPromptsWritten}/${approved.length})`
+                              : `Generating videos… (${videosReadyCount + videosFailedCount}/${approved.length})`}
                           </span>
                           <span>
-                            {videosReadyCount + videosFailedCount} / {approved.length}
+                            {Math.round(twoPhaseVideosPct)}%
                             {videosFailedCount > 0 && (
                               <span className="text-rose-400/80 ml-2">({videosFailedCount} failed)</span>
                             )}
@@ -1289,15 +1427,15 @@ export default function BrollAppPage() {
                             className="h-full rounded-full"
                             style={{
                               background:
-                                videosProgressPct >= 100
+                                twoPhaseVideosPct >= 100
                                   ? "linear-gradient(90deg, #10B981, #34D399)"
                                   : "linear-gradient(90deg, #00D4FF, #0099CC)",
                               boxShadow:
-                                videosProgressPct >= 100
+                                twoPhaseVideosPct >= 100
                                   ? "0 0 8px rgba(16,185,129,0.3)"
                                   : "0 0 8px rgba(0,212,255,0.3)",
                             }}
-                            animate={{ width: `${videosProgressPct}%` }}
+                            animate={{ width: `${twoPhaseVideosPct}%` }}
                             transition={{ duration: 0.4 }}
                           />
                         </div>

@@ -15,6 +15,20 @@ import type { NewBrandAsset } from "../db/schema.js";
 
 export const brandAssetsRouter: Router = Router();
 
+// Small helper: pick the friendliest display string for the creator chip.
+// Prefer `name`; fall back to the email local-part (before the @) so legacy
+// users who registered without setting a display name still show something
+// human-readable instead of a UUID.
+function displayNameFor(user: { name?: string | null; email?: string | null } | null | undefined): string | null {
+  if (!user) return null;
+  const name = (user.name ?? "").trim();
+  if (name) return name;
+  const email = (user.email ?? "").trim();
+  if (!email) return null;
+  const at = email.indexOf("@");
+  return at > 0 ? email.slice(0, at) : email;
+}
+
 type IncomingAsset = {
   brandId: string;
   kind: "image" | "video" | "document";
@@ -58,12 +72,24 @@ brandAssetsRouter.get("/", async (req: Request, res: Response) => {
   try {
     const brandId = typeof req.query.brandId === "string" ? req.query.brandId : "";
     if (!brandId) return sendError(res, 400, "brandId query param is required");
+    // Left-join users so the client gets a ready-to-render creator label
+    // without a second round-trip. Left-join (not inner) so legacy rows with
+    // null user_id still come back.
     const rows = await db
-      .select()
+      .select({
+        asset: schema.brandAssets,
+        userName: schema.users.name,
+        userEmail: schema.users.email,
+      })
       .from(schema.brandAssets)
+      .leftJoin(schema.users, eq(schema.brandAssets.userId, schema.users.id))
       .where(eq(schema.brandAssets.brandId, brandId))
       .orderBy(desc(schema.brandAssets.createdAt));
-    res.json({ assets: rows });
+    const assets = rows.map((r) => ({
+      ...r.asset,
+      creatorName: displayNameFor({ name: r.userName, email: r.userEmail }),
+    }));
+    res.json({ assets });
   } catch (err) {
     console.error("[brand-assets] list failed:", err);
     sendError(res, 500, err instanceof Error ? err.message : String(err));
@@ -81,6 +107,11 @@ brandAssetsRouter.post("/", async (req: Request, res: Response) => {
         : [body];
     if (incoming.length === 0) return sendError(res, 400, "No assets provided");
 
+    // Auto-capture the authed user as creator. attachAuth middleware mounts
+    // req.auth globally; null is fine here (anonymous saves keep userId NULL
+    // and the asset just won't show a creator chip).
+    const userId = req.auth?.user?.id ?? null;
+
     const validated: NewBrandAsset[] = [];
     for (const a of incoming) {
       const v = validateAsset(a, topLevelBrandId);
@@ -94,11 +125,16 @@ brandAssetsRouter.post("/", async (req: Request, res: Response) => {
         thumbnailUrl: v.thumbnailUrl ?? undefined,
         productId: v.productId ?? undefined,
         metadata: v.metadata ?? undefined,
+        userId: userId ?? undefined,
       });
     }
 
     const inserted = await db.insert(schema.brandAssets).values(validated).returning();
-    res.json({ assets: inserted });
+    // Tag each inserted row with the current user's display name so the client
+    // can show the "created by" chip on freshly-saved rows without re-fetching.
+    const creatorName = displayNameFor(req.auth?.user ?? null);
+    const enriched = inserted.map((row) => ({ ...row, creatorName }));
+    res.json({ assets: enriched });
   } catch (err) {
     console.error("[brand-assets] insert failed:", err);
     sendError(res, 500, err instanceof Error ? err.message : String(err));

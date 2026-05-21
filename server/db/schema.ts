@@ -79,6 +79,9 @@ export const brandAssets = pgTable("brand_assets", {
   sourceApp: text("source_app").notNull(), // "broll" | "message_testing" | "static_ads" | ...
   productId: uuid("product_id"), // soft reference to products.id
   metadata: jsonb("metadata"),
+  // Author / creator. Auto-captured from req.auth on insert. Nullable so legacy
+  // rows (and any future system-generated assets) don't need backfilling.
+  userId: uuid("user_id"),
 });
 
 /**

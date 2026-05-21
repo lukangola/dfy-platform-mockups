@@ -75,6 +75,39 @@ productsRouter.get("/:id", async (req: Request, res: Response) => {
 });
 
 /**
+ * PATCH /api/products/:id — partial update. Currently exposes `name` only;
+ * other fields are managed by their dedicated endpoints (mechanism,
+ * reference-sheet, research, images, etc.) which run side effects. Name
+ * editing is the simple "user mistyped the product name and wants to rename"
+ * path; no downstream regeneration needed.
+ */
+productsRouter.patch("/:id", async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { name?: unknown };
+    const updates: Partial<typeof schema.products.$inferInsert> = {};
+    if (typeof body.name === "string") {
+      const trimmed = body.name.trim();
+      if (!trimmed) return sendError(res, 400, "name must not be empty");
+      if (trimmed.length > 200) return sendError(res, 400, "name must be 200 characters or fewer");
+      updates.name = trimmed;
+    }
+    if (Object.keys(updates).length === 0) {
+      return sendError(res, 400, "No supported fields provided. Patch only accepts: name");
+    }
+    const [row] = await db
+      .update(schema.products)
+      .set(updates)
+      .where(eq(schema.products.id, req.params.id))
+      .returning();
+    if (!row) return sendError(res, 404, "Product not found");
+    res.json({ product: row });
+  } catch (err) {
+    console.error("[products] patch failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
  * DELETE /api/products/:id — hard-delete a product. Brand assets that were
  * tagged with this productId keep their soft reference; they're still valid
  * assets, just no longer filterable by the deleted product. No FK cascade.

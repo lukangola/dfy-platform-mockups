@@ -1,0 +1,1 @@
+ALTER TABLE "brand_assets" ADD COLUMN "user_id" uuid;

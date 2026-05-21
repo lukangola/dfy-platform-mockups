@@ -10,7 +10,7 @@ import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   FolderOpen, Image as ImageIcon, Video, Download, Search, FileText,
-  Package, Calendar, ExternalLink, ChevronDown, Trash2, Loader2, AlertTriangle,
+  Package, Calendar, ExternalLink, ChevronDown, Trash2, Loader2, AlertTriangle, User,
 } from "lucide-react";
 import {
   listBrandAssets, deleteBrandAsset, listProducts,
@@ -493,10 +493,18 @@ export default function AssetsPage() {
                       {productName ?? "—"}
                     </span>
                   </div>
-                  <div className="flex items-center gap-2 mt-1.5">
+                  <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                     <span className="text-[9px] font-mono text-white/20 flex items-center gap-1">
                       <Calendar size={8} /> {formatRelativeDate(asset.createdAt)}
                     </span>
+                    {asset.creatorName && (
+                      <span
+                        className="text-[9px] font-mono text-white/30 flex items-center gap-1 px-1.5 py-0.5 rounded bg-white/5 border border-white/10"
+                        title={`Created by ${asset.creatorName}`}
+                      >
+                        <User size={8} /> {asset.creatorName}
+                      </span>
+                    )}
                   </div>
                 </div>
               </motion.div>

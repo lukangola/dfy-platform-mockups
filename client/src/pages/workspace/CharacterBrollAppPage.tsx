@@ -23,7 +23,8 @@ import {
   listProducts, getProductMechanism, getProductAngles,
   listCharacters, createCharacter, deleteCharacter, prepareCharacterForSeedance,
   generateCharacterBrollShots, generateCharacterBrollImagePrompts,
-  generateCharacterBrollVideoPrompts, generateImage, generateVideo, saveBrandAssets,
+  generateCharacterBrollVideoPrompts, generateImage, generateText, generateVideo, saveBrandAssets,
+  ApiCallError,
   type Product, type CharacterBrollShot, type CharacterBrollShotList,
   type CharacterBrollCategory, type ProductMechanism, type ProductAngle,
   type CharacterRef,
@@ -97,6 +98,9 @@ function uiShotToApi(s: UiShot): CharacterBrollShot {
     location: s.location,
     visual_example: s.description,
     ...(s.scriptBeat ? { script_beat: s.scriptBeat } : {}),
+    // Pass the latest image prompt (with any feedback baked in) so the video
+    // prompt writer aligns motion with the actual still.
+    ...(s.imagePrompt ? { image_prompt: s.imagePrompt } : {}),
   };
 }
 
@@ -128,6 +132,45 @@ function toUiShots(list: CharacterBrollShotList): UiShot[] {
 
 function nextShotNumber(shots: UiShot[]): number {
   return shots.reduce((max, s) => Math.max(max, s.shot_id), 0) + 1;
+}
+
+/**
+ * Time-estimated progress bar for the shot-list architect step. Asymptotes
+ * toward 95% over ~25s; parent unmounts when shots land.
+ */
+function ShotListProgressBar() {
+  const [pct, setPct] = useState(0);
+  const startedAt = useRef(Date.now());
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const elapsed = Date.now() - startedAt.current;
+      const next = Math.min(95, Math.round((1 - Math.exp(-elapsed / 12_000)) * 100));
+      setPct(next);
+    }, 250);
+    return () => clearInterval(interval);
+  }, []);
+  return (
+    <div className="mb-2">
+      <div className="flex items-center justify-between text-[10px] font-mono text-white/40 mb-1">
+        <span className="uppercase tracking-widest flex items-center gap-2">
+          <Loader2 size={11} className="animate-spin text-cyan-400" />
+          Writing the shot list…
+        </span>
+        <span>{pct}%</span>
+      </div>
+      <div className="h-1.5 rounded-full bg-white/[0.04] overflow-hidden">
+        <motion.div
+          className="h-full rounded-full"
+          style={{
+            background: "linear-gradient(90deg, #00D4FF, #0099CC)",
+            boxShadow: "0 0 8px rgba(0,212,255,0.3)",
+          }}
+          animate={{ width: `${pct}%` }}
+          transition={{ duration: 0.4 }}
+        />
+      </div>
+    </div>
+  );
 }
 
 function ApprovalBadge({ approval, kind }: { approval: Approval; kind: "image" | "video" }) {
@@ -236,6 +279,10 @@ export default function CharacterBrollAppPage() {
   const [mechanismLoading, setMechanismLoading] = useState(false);
   const [imagePromptsLoading, setImagePromptsLoading] = useState(false);
   const [videoPromptsLoading, setVideoPromptsLoading] = useState(false);
+  // Counters for the determinate two-phase progress bar (prompt writing →
+  // image/video generation). Incremented as each parallel Claude call lands.
+  const [imagePromptsWritten, setImagePromptsWritten] = useState(0);
+  const [videoPromptsWritten, setVideoPromptsWritten] = useState(0);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
 
   // Review state
@@ -512,6 +559,14 @@ export default function CharacterBrollAppPage() {
     if (!selectedProduct || !characterImageUrl) return;
     setGenerating(true);
     setGenerationError(null);
+    // Jump-then-work: move to step 1 immediately so the user sees a loading
+    // skeleton instead of waiting on an unresponsive button. Shot-list gen
+    // takes 15-30s on the architect prompt.
+    setShotList(null);
+    setUiShots([]);
+    imagesAutoKickedRef.current = false;
+    videosAutoKickedRef.current = false;
+    setCurrentStep(1);
     try {
       const line = [
         selectedProduct.name,
@@ -528,9 +583,6 @@ export default function CharacterBrollAppPage() {
       });
       setShotList(shots);
       setUiShots(toUiShots(shots));
-      imagesAutoKickedRef.current = false;
-      videosAutoKickedRef.current = false;
-      setCurrentStep(1);
     } catch (err) {
       setGenerationError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -591,17 +643,29 @@ export default function CharacterBrollAppPage() {
     }
   }
 
+  // Parallel prompt writing — one Claude call per shot, all in flight at once.
+  // Previously a single batched call had Claude write all prompts sequentially
+  // inside its response (~25s for 10 shots). Now total time ≈ max(individual
+  // times), typically 5-7s. Master prompt is cached (ephemeral), so cost
+  // barely changes on repeat parallel calls.
   async function writeImagePrompts(targets: UiShot[]): Promise<string[]> {
     if (targets.length === 0) return [];
     setImagePromptsLoading(true);
+    setImagePromptsWritten(0);
     try {
       const m = await ensureMechanism().catch(() => [] as ProductMechanism[]);
-      const { prompts } = await generateCharacterBrollImagePrompts({
-        product: productLine,
-        mechanism: m,
-        shots: targets.map(uiShotToApi),
-      });
-      return prompts;
+      const results = await Promise.all(
+        targets.map(async (t) => {
+          const { prompts } = await generateCharacterBrollImagePrompts({
+            product: productLine,
+            mechanism: m,
+            shots: [uiShotToApi(t)],
+          });
+          setImagePromptsWritten((c) => c + 1);
+          return prompts[0] ?? "";
+        }),
+      );
+      return results;
     } finally {
       setImagePromptsLoading(false);
     }
@@ -610,14 +674,21 @@ export default function CharacterBrollAppPage() {
   async function writeVideoPrompts(targets: UiShot[]): Promise<string[]> {
     if (targets.length === 0) return [];
     setVideoPromptsLoading(true);
+    setVideoPromptsWritten(0);
     try {
       const m = await ensureMechanism().catch(() => [] as ProductMechanism[]);
-      const { prompts } = await generateCharacterBrollVideoPrompts({
-        product: productLine,
-        mechanism: m,
-        shots: targets.map(uiShotToApi),
-      });
-      return prompts;
+      const results = await Promise.all(
+        targets.map(async (t) => {
+          const { prompts } = await generateCharacterBrollVideoPrompts({
+            product: productLine,
+            mechanism: m,
+            shots: [uiShotToApi(t)],
+          });
+          setVideoPromptsWritten((c) => c + 1);
+          return prompts[0] ?? "";
+        }),
+      );
+      return results;
     } finally {
       setVideoPromptsLoading(false);
     }
@@ -674,18 +745,33 @@ export default function CharacterBrollAppPage() {
   function promptReferencesProduct(prompt: string): boolean {
     if (!prompt) return false;
     const text = prompt.toLowerCase();
+
+    // Product-name tokens — the strongest, most specific signal.
+    // Word-boundary match so "alcami" doesn't match "alcamiform" etc.
     const productName = (productLine || selectedProduct?.name || "").toLowerCase();
     const nameTokens = productName
       .split(/\s+/)
       .map((t) => t.replace(/[^a-z0-9]/g, ""))
       .filter((t) => t.length >= 4); // skip "the", "and", short words
-    if (nameTokens.some((t) => text.includes(t))) return true;
+    if (nameTokens.some((t) => new RegExp(`\\b${t}\\b`, "i").test(text))) return true;
+
+    // Generic packaging nouns. Curated to avoid substring collisions with
+    // common English words — historic bugs from naive substring matching
+    // forced product refs into Lifestyle/Hook shots whenever prompts
+    // contained words like "can" ("she can see"), "tin" ("waiting"),
+    // "cap"/"capture", "lid"/"valid", "box"/"boxing", "tube"/"youtube".
+    // Every entry below is matched with word boundaries so the false
+    // positives don't recur. Ambiguous single-syllable nouns (can, tin,
+    // cap, lid, box, tube, trigger, pump) are intentionally dropped — if a
+    // shot legitimately needs them, the Category-D hard gate or the
+    // @Element/@Image marker fallback will still catch it.
     const generic = [
-      "the product", "bottle", "jar", "pouch", "tube", "spray bottle", "spray", "sachet",
-      "can", "tin", "box", "container", "label", "cap", "lid", "pump", "dropper",
-      "nozzle", "trigger", "packaging", "package", "wrapper",
+      "the product", "bottle", "jar", "pouch", "sachet", "spray bottle",
+      "container", "dropper", "packaging", "package", "wrapper",
     ];
-    if (generic.some((g) => text.includes(g))) return true;
+    if (generic.some((g) => new RegExp(`\\b${g}\\b`, "i").test(text))) return true;
+
+    // Marker tokens we use in master prompts (least ambiguous fallback).
     if (/@element\d/i.test(prompt) || /@image[3-9]/i.test(prompt)) return true;
     return false;
   }
@@ -718,6 +804,22 @@ export default function CharacterBrollAppPage() {
     return Array.from(new Set(refs));
   }
 
+  /**
+   * Detect a Gemini-classifier rejection bubbled up from the server.
+   * The route handler converts fal.ai 422s into ApiCallError{status:422,
+   * errorCode:"content_safety_rejected"}. Backstop: also match the raw
+   * "did not generate the expected output" message in case the error code
+   * is missing (older clients, dev/prod skew, etc.).
+   */
+  function isContentSafetyRejection(err: unknown): boolean {
+    if (err instanceof ApiCallError) {
+      if (err.status === 422) return true;
+      if (err.errorCode === "content_safety_rejected") return true;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return /did not generate the expected output|unsafe content|content policy/i.test(msg);
+  }
+
   async function callImageModel(
     shot: UiShot,
     prompt: string,
@@ -729,14 +831,34 @@ export default function CharacterBrollAppPage() {
     // instead of regenerating from scratch.
     const baseRefs = collectImageRefsForShot(shot, prompt);
     const imageUrls = Array.from(new Set([...extraRefs, ...baseRefs]));
-    const input: Record<string, unknown> = imageUrls.length > 0
-      ? { prompt, image_urls: imageUrls, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" }
-      : { prompt, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" };
     const model = imageUrls.length > 0 ? "fal-ai/nano-banana-pro/edit" : "fal-ai/flux-pro/v1.1";
-    const res = await generateImage("character_broll_image", { input, model });
-    const url = res.urls[0];
-    if (!url) throw new Error("No image URL returned");
-    return url;
+
+    const buildInput = (p: string): Record<string, unknown> =>
+      imageUrls.length > 0
+        ? { prompt: p, image_urls: imageUrls, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" }
+        : { prompt: p, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" };
+
+    try {
+      const res = await generateImage("character_broll_image", { input: buildInput(prompt), model });
+      const url = res.urls[0];
+      if (!url) throw new Error("No image URL returned");
+      return url;
+    } catch (err) {
+      if (!isContentSafetyRejection(err)) throw err;
+      // First attempt was rejected by Gemini's safety classifier. Rewrite the
+      // prompt via the image_prompt_safety_rewrite master prompt and retry
+      // once. Adds ~5-8s on the retry path (Haiku) but turns a hard failure
+      // into a successful generation in the majority of body-image / clothing
+      // scenes that trip the classifier.
+      console.warn("[character-broll] content-safety rejection — sanitizing and retrying once");
+      const rewrite = await generateText("image_prompt_safety_rewrite", { original_prompt: prompt });
+      const sanitized = rewrite.text.trim();
+      if (!sanitized) throw err; // sanitizer returned empty → bubble the original error
+      const res = await generateImage("character_broll_image", { input: buildInput(sanitized), model });
+      const url = res.urls[0];
+      if (!url) throw new Error("No image URL returned (after safety rewrite)");
+      return url;
+    }
   }
 
   async function generateImageForShot(shot: UiShot, prompt: string) {
@@ -745,10 +867,12 @@ export default function CharacterBrollAppPage() {
       const url = await callImageModel(shot, prompt);
       patchShot(shot.id, { imageStatus: "ready", imageUrl: url });
     } catch (err) {
-      patchShot(shot.id, {
-        imageStatus: "failed",
-        imageError: err instanceof Error ? err.message : String(err),
-      });
+      // If the auto-soften-and-retry pass also failed, swap the raw fal.ai
+      // message for something the user can actually act on.
+      const friendly = isContentSafetyRejection(err)
+        ? "The image model rejected this prompt as potentially unsafe even after auto-softening the language. Try regenerating with feedback — soften wardrobe terms (e.g. 'bra' → 'fitted top'), avoid describing body parts pressing against clothing, and keep the emotional beat on the face / posture rather than on clothing struggle."
+        : (err instanceof Error ? err.message : String(err));
+      patchShot(shot.id, { imageStatus: "failed", imageError: friendly });
     }
   }
 
@@ -826,7 +950,20 @@ export default function CharacterBrollAppPage() {
         });
         const newUrl = res.urls[0];
         if (!newUrl) throw new Error("No image URL returned");
-        patchShot(shotId, { imageStatus: "ready", imageUrl: newUrl });
+        // Append the feedback to imagePrompt AND clear any stale videoPrompt.
+        // Reason: the video prompt writer reads `image_prompt` to align motion
+        // with the actual still. If we leave imagePrompt unchanged after a
+        // feedback rework, the video prompt will describe motion for the OLD
+        // still. Clearing videoPrompt forces a rewrite on the next video pass.
+        const updatedPrompt = target.imagePrompt
+          ? `${target.imagePrompt}\n\nAdditional direction from user: ${feedbackText}`
+          : feedbackText;
+        patchShot(shotId, {
+          imageStatus: "ready",
+          imageUrl: newUrl,
+          imagePrompt: updatedPrompt,
+          videoPrompt: undefined,
+        });
         return;
       }
 
@@ -838,7 +975,12 @@ export default function CharacterBrollAppPage() {
         const [written] = await writeImagePrompts([target]);
         basePrompt = written ?? "";
       }
-      patchShot(shotId, { imagePrompt: basePrompt });
+      // If user gave feedback (but there was no prior image to edit), also
+      // invalidate any stale video prompt.
+      patchShot(shotId, {
+        imagePrompt: basePrompt,
+        ...(feedbackText ? { videoPrompt: undefined } : {}),
+      });
       const url = await callImageModel(target, basePrompt, []);
       patchShot(shotId, { imageStatus: "ready", imageUrl: url });
     } catch (err) {
@@ -885,7 +1027,10 @@ export default function CharacterBrollAppPage() {
       prompt,
       start_image_url: imageUrl,
       duration: "5",
-      generate_audio: true,
+      // Audio off: we never use the generated audio track. On Kling v3 this
+      // also drops the cost from $0.126/s → $0.084/s (~33%) and shaves a few
+      // seconds off generation time.
+      generate_audio: false,
     };
 
     if (wantsProduct) {
@@ -903,7 +1048,10 @@ export default function CharacterBrollAppPage() {
 
     const res = await generateVideo("character_broll_video", {
       input,
-      model: "fal-ai/kling-video/v3/pro/image-to-video",
+      // Standard tier (~40% faster + ~33% cheaper than /pro). Combined with
+      // generate_audio:false above, this is the cost/speed sweet spot for
+      // first-draft review. Swap back to /pro for final-delivery quality.
+      model: "fal-ai/kling-video/v3/standard/image-to-video",
     });
     const url = res.urls[0];
     if (!url) throw new Error("No video URL returned");
@@ -1114,6 +1262,15 @@ export default function CharacterBrollAppPage() {
     ? 0
     : Math.round(((imagesReadyCount + imagesFailedCount) / uiShots.length) * 100);
 
+  // Two-phase determinate progress for the image step: count both "prompt
+  // written" and "image generated" as 1 unit each. 2N total work units.
+  const twoPhaseImagesPct = uiShots.length === 0
+    ? 0
+    : Math.round(
+        ((Math.min(imagePromptsWritten, uiShots.length) + imagesReadyCount + imagesFailedCount)
+          / (uiShots.length * 2)) * 100,
+      );
+
   const approvedImageShots = uiShots.filter((s) => s.imageApproval === "approved");
   const videosReadyCount = approvedImageShots.filter((s) => s.videoStatus === "ready").length;
   const videosFailedCount = approvedImageShots.filter((s) => s.videoStatus === "failed").length;
@@ -1122,6 +1279,13 @@ export default function CharacterBrollAppPage() {
   const videosProgressPct = approvedImageShots.length === 0
     ? 0
     : Math.round(((videosReadyCount + videosFailedCount) / approvedImageShots.length) * 100);
+
+  const twoPhaseVideosPct = approvedImageShots.length === 0
+    ? 0
+    : Math.round(
+        ((Math.min(videoPromptsWritten, approvedImageShots.length) + videosReadyCount + videosFailedCount)
+          / (approvedImageShots.length * 2)) * 100,
+      );
 
   // Categories that actually appear in the current shot list, in canonical order,
   // with any unexpected categories appended so filters cover every shot.
@@ -1662,6 +1826,28 @@ export default function CharacterBrollAppPage() {
                   </div>
                 )}
 
+                {/* Time-estimated progress bar + skeleton rows while the
+                    shot-list architect runs after step 0's Generate click. */}
+                {generating && uiShots.length === 0 && (
+                  <div className="flex flex-col gap-3 mb-6">
+                    <ShotListProgressBar />
+                    {[0, 1, 2, 3, 4].map((i) => (
+                      <div
+                        key={i}
+                        className="rounded-lg border border-white/[0.06] p-4 animate-pulse"
+                        style={{ background: "#13161F", animationDelay: `${i * 0.1}s` }}
+                      >
+                        <div className="flex items-center gap-2 mb-3">
+                          <div className="h-4 w-6 rounded bg-white/[0.06]" />
+                          <div className="h-4 w-24 rounded bg-white/[0.06]" />
+                        </div>
+                        <div className="h-3 w-3/4 rounded bg-white/[0.04] mb-2" />
+                        <div className="h-3 w-1/2 rounded bg-white/[0.04]" />
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 <div className="flex flex-col gap-3">
                   {uiShots.map((shot, idx) => {
                     const m = metaFor(shot.category);
@@ -1801,17 +1987,18 @@ export default function CharacterBrollAppPage() {
                 </div>
 
                 {/* Progress bar */}
+                {/* Two-phase determinate progress bar (prompts → images). */}
                 <div className="mb-4">
                   <div className="flex items-center justify-between text-[10px] font-mono text-white/40 mb-1">
                     <span className="uppercase tracking-widest">
-                      {imagesGeneratingCount > 0 || imagePromptsLoading || mechanismLoading
-                        ? "Generating images..."
-                        : imagesReadyCount + imagesFailedCount >= uiShots.length && uiShots.length > 0
+                      {imagesReadyCount + imagesFailedCount >= uiShots.length && uiShots.length > 0
                         ? "All images ready"
-                        : "Progress"}
+                        : imagePromptsWritten < uiShots.length && imagesReadyCount === 0
+                        ? `Writing prompts… (${imagePromptsWritten}/${uiShots.length})`
+                        : `Generating images… (${imagesReadyCount + imagesFailedCount}/${uiShots.length})`}
                     </span>
                     <span>
-                      {imagesReadyCount + imagesFailedCount} / {uiShots.length}
+                      {Math.round(twoPhaseImagesPct)}%
                       {imagesFailedCount > 0 && (
                         <span className="text-rose-400/80 ml-2">({imagesFailedCount} failed)</span>
                       )}
@@ -1822,15 +2009,15 @@ export default function CharacterBrollAppPage() {
                       className="h-full rounded-full"
                       style={{
                         background:
-                          imagesProgressPct >= 100
+                          twoPhaseImagesPct >= 100
                             ? "linear-gradient(90deg, #10B981, #34D399)"
                             : "linear-gradient(90deg, #00D4FF, #0099CC)",
                         boxShadow:
-                          imagesProgressPct >= 100
+                          twoPhaseImagesPct >= 100
                             ? "0 0 8px rgba(16,185,129,0.3)"
                             : "0 0 8px rgba(0,212,255,0.3)",
                       }}
-                      animate={{ width: `${imagesProgressPct}%` }}
+                      animate={{ width: `${twoPhaseImagesPct}%` }}
                       transition={{ duration: 0.4 }}
                     />
                   </div>
@@ -2051,18 +2238,18 @@ export default function CharacterBrollAppPage() {
                         </div>
                       </div>
 
-                      {/* Progress bar */}
+                      {/* Two-phase determinate progress bar (prompts → videos). */}
                       <div className="mb-4">
                         <div className="flex items-center justify-between text-[10px] font-mono text-white/40 mb-1">
                           <span className="uppercase tracking-widest">
-                            {videosGeneratingCount > 0 || videoPromptsLoading || mechanismLoading
-                              ? "Generating videos..."
-                              : videosReadyCount + videosFailedCount >= approved.length && approved.length > 0
+                            {videosReadyCount + videosFailedCount >= approved.length && approved.length > 0
                               ? "All videos ready"
-                              : "Progress"}
+                              : videoPromptsWritten < approved.length && videosReadyCount === 0
+                              ? `Writing prompts… (${videoPromptsWritten}/${approved.length})`
+                              : `Generating videos… (${videosReadyCount + videosFailedCount}/${approved.length})`}
                           </span>
                           <span>
-                            {videosReadyCount + videosFailedCount} / {approved.length}
+                            {Math.round(twoPhaseVideosPct)}%
                             {videosFailedCount > 0 && (
                               <span className="text-rose-400/80 ml-2">({videosFailedCount} failed)</span>
                             )}
@@ -2073,15 +2260,15 @@ export default function CharacterBrollAppPage() {
                             className="h-full rounded-full"
                             style={{
                               background:
-                                videosProgressPct >= 100
+                                twoPhaseVideosPct >= 100
                                   ? "linear-gradient(90deg, #10B981, #34D399)"
                                   : "linear-gradient(90deg, #00D4FF, #0099CC)",
                               boxShadow:
-                                videosProgressPct >= 100
+                                twoPhaseVideosPct >= 100
                                   ? "0 0 8px rgba(16,185,129,0.3)"
                                   : "0 0 8px rgba(0,212,255,0.3)",
                             }}
-                            animate={{ width: `${videosProgressPct}%` }}
+                            animate={{ width: `${twoPhaseVideosPct}%` }}
                             transition={{ duration: 0.4 }}
                           />
                         </div>

@@ -118,9 +118,11 @@ The starting frame already shows the pain face. The motion only needs subtle amb
 You will receive:
 
 - A product specs JSON array (optional). Used only for interaction accuracy in motion.
-- A JSON object per shot with: `category`, `shot_type`, `action`, `location`, `visual_example`, and optionally `script_beat`.
+- A JSON object per shot with: `category`, `shot_type`, `action`, `location`, `visual_example`, optionally `script_beat`, and optionally `image_prompt` (present when the still has already been generated; see below).
 
 You use these fields ONLY to determine what motion makes sense. You do not re-describe the scene, the products, the environment, or the person.
+
+**Critical — `image_prompt` is the authoritative description of what is actually in the starting frame.** When present, it reflects the exact still the model produced, including any feedback the user supplied during image regen ("warmer lighting", "she's now holding the cup with her left hand", "tighter framing on the face", etc.). Always prefer `image_prompt` over `visual_example` / `action` when deciding what is on screen at frame 0 and therefore what the motion can plausibly continue. If `image_prompt` and `visual_example` conflict, trust `image_prompt`.
 
 # INPUTS FOR THIS REQUEST
 
