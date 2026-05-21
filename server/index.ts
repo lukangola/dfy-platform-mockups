@@ -204,6 +204,43 @@ async function startServer() {
     }
   })();
 
+  // Backfill user_id on legacy brand_assets. Migration 0010 added the column
+  // but didn't (couldn't) attribute existing rows — they pre-date the column.
+  // Single-user attribution rule: if there's exactly one user in the DB, all
+  // orphan rows belong to that user. If there are multiple users, we skip
+  // and log — admin can run scripts/backfill-creator.ts manually after
+  // deciding the attribution policy. Idempotent: skips on every subsequent
+  // boot once the orphans are filled.
+  void (async () => {
+    try {
+      const orphans = await db
+        .select({ id: schema.brandAssets.id })
+        .from(schema.brandAssets)
+        .where(isNull(schema.brandAssets.userId));
+      if (orphans.length === 0) return;
+      const users = await db
+        .select({ id: schema.users.id, email: schema.users.email })
+        .from(schema.users)
+        .limit(2);
+      if (users.length === 0) {
+        console.log(`[brand-assets] ${orphans.length} orphan row(s) but no users to attribute to — skipping`);
+        return;
+      }
+      if (users.length > 1) {
+        console.log(`[brand-assets] ${orphans.length} orphan row(s), multiple users — skipping auto-backfill (run scripts/backfill-creator.ts to choose)`);
+        return;
+      }
+      const targetUser = users[0]!;
+      await db
+        .update(schema.brandAssets)
+        .set({ userId: targetUser.id })
+        .where(isNull(schema.brandAssets.userId));
+      console.log(`[brand-assets] backfilled ${orphans.length} orphan row(s) onto ${targetUser.email}`);
+    } catch (err) {
+      console.error("[brand-assets] creator backfill failed:", err);
+    }
+  })();
+
   // Scan the character library folder once on boot. New / changed files become
   // default-library rows (brandId NULL) shared across every brand. After the
   // ingest, queue every character missing the Seedance-safe portrait through
