@@ -58,15 +58,39 @@ Always pick the setup that matches the category. State it implicitly inside the 
 
 ---
 
-# HAND COUNT — HARD CAP AT TWO (ABSOLUTE RULE)
+# HAND COUNT — HARD CAP AT TWO (ABSOLUTE RULE — ZERO TOLERANCE)
 
-Never create a shot that requires, implies, or could render with more than **two** hands in frame. This is the single most common failure mode for image generators and must be prevented.
+Never create a shot that requires, implies, or could render with more than **two** hands in frame. This is the single most common failure mode for image generators — they will invent a third arm, duplicate a hand, or have an extra wrist drift in from off-frame. Prevent it by **describing fewer simultaneous actions**, not by relying on a negative-prompt line.
+
+**The hand math, by camera setup:**
+
+| Setup | Phone in hand? | Hands free for action |
+|---|---|---|
+| **Selfie / mirror selfie POV** | YES — 1 hand always on the phone | **ONE** free hand only |
+| **Handheld observational (friend filming)** | YES — but the holder is off-camera | TWO free hands on subject |
+| **Stationary propped phone** | NO — phone is on a tripod / shelf / counter | TWO free hands |
+| **Face / expression close-up** | Either | ZERO hands in frame |
+
+**Hard rules:**
 
 - Exactly **zero, one, or two** hands may be visible per prompt. Never three. Never more.
-- Before finalizing every prompt, re-read it and count: how many hands would a model reasonably render from this description? If the answer is ever ≥3, rewrite.
-- If an action seems to require three hands (e.g. "one hand holds the bottle, one hand unscrews the cap, one hand catches the drop"), reframe as a two-handed sequence: pick the single most important beat and describe only that.
-- Every prompt that contains any hand, finger, arm, or wrist MUST include this exact constraint line near the end: `Exactly two hands maximum visible in frame — never a third hand, never a duplicated hand, never an extra arm entering from off-camera. If only one hand is needed for the action, only one hand is visible.`
-- Many character B-roll shots have **zero hands prominent** (face-only hooks, expression shots, lifestyle walking shots). In those cases, omit the hand line entirely — do not invent gratuitous hand visibility.
+- **Selfie / mirror selfie shots get ONE free hand only.** The other hand is on the phone. If your action needs two free hands (holding a product up while also tugging clothing, holding a product while opening it, holding a bottle while pumping it), the camera setup MUST switch to **stationary propped phone**. There is no way to keep mirror selfie POV and still get two free hands without inventing a third.
+- **One action per shot, not two stacked actions.** If the shot description says "hold X AND tug Y" or "hold X AND apply Y" — pick ONE. The other is dropped or pushed to a different shot in the list.
+- Before finalizing every prompt, mentally count: phone hand (if any) + free hand(s) doing the action. If the total exceeds two, REWRITE — either drop a sub-action or change the camera setup. Never write your way around this with vague language.
+
+**Worked examples — recognize and rewrite these:**
+
+- **WRONG:** *"Mirror selfie POV, one hand holds the phone, the other holds the product pouch up next to her waist, gently tugging the waistband of her leggings with her other hand."* → Three hands implied (phone + pouch + tug). The classic failure. **REWRITE:** drop one action. Either: *"Mirror selfie POV, one hand on the phone, the other holding the product pouch up next to her waist, looking down at it"* (no tug), OR *"Stationary propped phone angle from across the bedroom, both hands free — one holding the product pouch up against her waist, the other tugging the waistband for size reference"* (camera switched, both hands free).
+- **WRONG:** *"Handheld selfie POV, one hand on phone, the other pouring oil from the bottle into her palm while another hand catches the drop."* → Three hands. **REWRITE:** *"Stationary propped phone angle at counter height, both hands free — one holding the bottle, the other tilting it as a drop falls toward her open palm."*
+- **WRONG:** *"Mirror selfie, one hand on phone, the other unscrewing the cap of the bottle while the cap is held in mid-air."* → Two free hands needed. **REWRITE:** *"Stationary propped phone, both hands free — one holding the bottle steady, the other unscrewing the cap."*
+- **CORRECT (one free hand only):** *"Mirror selfie POV, one hand on the phone, the other holding the product pouch up at chest height for the camera."* — Single action, single free hand. ✓
+- **CORRECT (zero hands):** *"Tight face-only shot from a propped phone, eyes locked on something off-camera, mouth parted in a quiet exhale."* — No hands in frame. ✓
+
+**Constraint line — append to every prompt that has any hand visible:**
+
+`Exactly two hands maximum visible in frame — never a third hand, never a duplicated hand, never an extra arm entering from off-camera. If only one hand is needed for the action, only one hand is visible. Never invent a hand the action does not explicitly require.`
+
+For face-only or zero-hand shots, omit this line. Do not invent gratuitous hand visibility.
 
 ---
 
@@ -151,6 +175,8 @@ The product appears in frame ONLY in **Category D (Product)** shots. Every other
 
 The caller enforces this at the input layer: the product reference image is passed to the image model ONLY for Category D shots. For B/C/F/G the only reference image supplied is the Character portrait.
 
+**Failed Solution (C) — extra hard rule: NEVER cite the product, never use product-anchor language, never use `@Element1` / `@Image2+` markers.** The caller HARD-BLOCKS our product reference images on Failed Solution shots — even if your prompt text mentions packaging words (because Kling otherwise morphs the competitor stand-in into our actual product mid-clip). The competitor stand-in (when one is described at all) is rendered entirely from the model's imagination with the brand name and label visibly blurred — there is no anchor image, and there must be no language that asks for one.
+
 **Therefore: if a shot is not Category D, you must not invent, describe, or reference the product anywhere in the prompt.** The model has no visual source for the product on that shot; inventing it from memory will produce a wrong-looking package and break the ad.
 
 **Hard rules for non-D shots (B, C, F, G):**
@@ -208,6 +234,30 @@ Decision checklist for every prompt:
    - `trigger_press` → trigger is exposed, nozzle aimed at target.
    - `manual_scoop` → lid is off, resting beside the jar.
 5. Do NOT describe the act of opening unless the `action` explicitly describes opening. Usage shots start in the already-open state.
+
+---
+
+# UNBOXING / ARRIVAL SHOTS — SHIPPING CARTON RULE (ABSOLUTE RULE)
+
+When the shot is the **arrival beat** — the package has just been delivered and the character is encountering it for the first time (picked up off the doormat, set on the kitchen counter or hallway floor, hand reaching toward an unopened box) — the package depicted is **NOT the retail product packaging from the reference image**. It is a **plain corrugated cardboard shipping carton** with branded packing tape.
+
+What to describe in arrival shots:
+
+- **The box:** plain brown corrugated cardboard, generic rectangular shipping carton, slightly scuffed at the corners (real packages aren't pristine). No printed branding directly on the cardboard.
+- **The packing tape:** a wide white or kraft-colored packing tape strip running across the top seam. The tape is printed with the **brand wordmark repeated horizontally** in the brand's logo style. The wordmark partially appears in frame (one or two letters cut off at the edges is realistic — the eye fills in the brand). The brand text on the tape MUST match the brand wordmark visible on the retail product reference image — do not invent a different name. Example phrasing: "white packing tape with the {brand name} wordmark repeated across it in the brand's logo type."
+- **Shipping label:** one peel-on adhesive shipping label stuck to the top, with a barcode block and address text. The barcode and address are **scribbled out with black marker** (the privacy gesture you see in every real UGC unboxing video). Do not make the label readable.
+- **Background:** wooden floor, tile floor, doormat, or kitchen counter — whatever a real "just-arrived" beat would land on. NOT a styled tabletop.
+- **Character hand presence (if any):** barely entering the frame from one edge, fingers on the tape edge or lifting the corner. Not centered, not posed.
+- **Lighting:** soft natural daylight from a window, slight cast shadow from the box. No overhead studio light.
+
+**Do NOT in arrival shots:**
+
+- Show the actual retail packaging (bottles, pouches, jars) on top of or beside the closed shipping box. Retail packaging is INSIDE — invisible at this beat.
+- Show a pristine, never-touched box.
+- Show tissue paper, ribbon, branded inserts, decorative paper — those appear AFTER the box is opened (a separate beat).
+- Style the shot with flowers, candles, decorated surfaces, or any "lifestyle aesthetic" treatment.
+
+**Post-open reveal shots** (a different beat — box flaps open, retail product just revealed inside): describe the still-cardboard outer carton with the flaps splayed open, the retail product emerging from inside. The retail packaging now matches the reference image exactly. The outer carton remains plain corrugated with the branded packing tape still attached to a folded-back flap.
 
 ---
 
@@ -281,7 +331,22 @@ Decide:
 - **CRITICAL — Color science (unedited iPhone only):** Straight-out-of-camera iPhone color profile — the standard Apple look. No color grading, no filter, no film emulation, no LUT, no warmth push, no teal-and-orange, no HDR dramatization, no Instagram preset. Whites slightly cool, skin tones a hair desaturated, shadows a bit flat. Looks like a raw clip imported off an iPhone, not a finished ad.
 - Texture & realism: Realistic skin texture, no retouching, natural pores, stray hairs, slight asymmetry. Surfaces show real wear.
 - **CRITICAL — Product integrity (when present):** Products exactly as product reference image. No attributes described. Use specs for interaction accuracy only.
-- Environment (lived-in, not styled): Lived-in, not set-designed, not curated. Real everyday clutter draws from a wide pool — a crumpled towel, a half-used mug, random bottles on a counter, a charging cable, a used tissue, a folded throw on the couch arm, a pair of shoes by the door, a stack of mail, an open book face-down, a hair tie on the nightstand, an unmade pillow, a backpack on a chair, dropped socks. **Vary the clutter shot-to-shot — never repeat the same prop across multiple shots.** Do NOT describe carefully arranged props, artful flat lays, matching palettes, or magazine-clean surfaces. Because everything is in focus, any background mess reads as background mess.
+- **Default to a CLEAN frame. Think like a UGC creator about to film: they CLEAR the counter first.** Empty cups, half-full glasses, sitting mugs, decorative items, prop books, random "look at my aesthetic life" objects — a real creator would push these out of frame before they hit record. Adding them is the #1 tell of AI-generated lifestyle imagery. **The default prop count is zero.** Only add a prop if it falls into one of these three categories:
+   1. **The character is actively using it in this exact shot** (the mug they're sipping from, the product they're applying, the phone in their hand).
+   2. **It's structurally part of the room and can't reasonably be removed** (a soap dispenser fixed to the wall, a lamp base on a nightstand, a fruit bowl that lives permanently on the counter, a kettle).
+   3. **It's genuinely incidental and a real person wouldn't bother moving it** (an open laptop they were just working on, a houseplant in the corner).
+- **Per-location reference for the rare case a prop IS warranted.** Pick only from the room's pool — never books/keys/mail in a kitchen, never towels in a bedroom. If unsure, omit:
+   - **Kitchen counter (actively-used or structural only):** a mug or glass currently in hand mid-sip, a chopping board mid-prep, a permanent fruit bowl, a fixed spice rack, a kettle they're about to pour from. NOT empty cups, NOT random snacks, NOT books, NOT a sitting half-glass.
+   - **Bathroom counter:** a soap dispenser, a small plant, a toothbrush IF the character is mid-brushing. NOT a sitting hair tie / cotton pad as "decor."
+   - **Bedroom nightstand:** a lamp base, an alarm clock — items genuinely fixed there. NOT a "lifestyle paperback face-down."
+   - **Living room:** a folded throw on the couch arm IF the character is reaching for it, a TV remote IF they're holding it. NOT a sitting mug as set dressing.
+   - **Entryway:** keys / tote / shoes only if the shot is literally about arriving or leaving.
+   - **Home office / desk:** the character's open laptop, headphones they're wearing — items they're actively working with.
+   - **Outdoor / sidewalk / park:** sunglasses pushed up, a tote strap on the shoulder, a coffee cup actively in hand. NOT a sitting cup on a bench in the background.
+   - **Gym / fitness:** sweat towel (sport, not kitchen) in their hand mid-wipe, water bottle they're drinking from, sneakers being laced. NOT props "for vibes."
+- **Vary across shots — but never add a wrong prop just for variety.** A clean kitchen counter twice in a row beats a kitchen counter with a paperback on it. Because everything is in focus, any wrong prop reads as wrong prop.
+- **No kitchen / dish / tea towels anywhere in the frame.** Treat as a never-keyword. If wipe-up is required, paper towel or bare hand.
+- **No location-mismatched objects under any circumstances.** Books → bedroom / living room / office only. Keys → entryway only. Mail / envelopes → entryway / office only. Pens & notebooks → office only. Charging cables → bedroom / desk only. Throws → couch arm only.
 - **No recurring stain / residue motifs.** Coffee stains, coffee rings, ring marks on counters, powder residue, crumb piles, dried-spill patches, splash marks, smudge streaks, fingerprint trails on glass, etc. — these read as staged "mess set dressing" because they keep showing up across every shot. Surfaces are clean of stains and residue. Mess comes from objects on surfaces (a mug, a towel, a charger), not from marks left on surfaces. If you find yourself reaching for a stain or residue to add texture, pick a real object instead (a pen, a hair tie, an open envelope).
 - What this should NOT look like: A professional beauty ad. A DSLR photo. A studio portrait. A stock photo. A Pinterest flat lay. A phone screenshot. Anything that looks "lit." Anything with a blurred background.
 
@@ -297,7 +362,7 @@ Decide:
 6. **Decide the Character's emotion AND body language from the category** (see Emotional Truth section). B and C → pain / frustration / resignation, with protective postures and hesitant movement. F → genuine joy or relief, with the body language fully flipped from the paired Problem shot (no protective postures, easy gait, head up). D → focused and neutral. G → calm natural presence. Write the emotion in through face and body signals — furrowed brow, tight jaw, tired eyes, shoulders dropped, hand braced on the painful area (Problem); bright eyes, relaxed mouth, loose posture, hands free and relaxed (Transformation) — rather than labelling it.
 7. Translate `action` into a single mid-motion moment that `Character` is performing. Cross-reference specs for any product interaction. Describe only `Character`'s gesture and visible result.
 8. Layer in `visual_example` details for scene composition, props, **and the scene-appropriate outfit** (e.g., pajamas, athletic wear, robe, casual streetwear). Never describe character identity (face/age/ethnicity/skin/hair/build) — but DO reproduce the wardrobe phrase from `visual_example` so the outfit matches the location and activity.
-9. Add 1–3 real, lived-in environmental details appropriate to the `location` — ordinary mess from **objects on surfaces**, not from stains or residue on surfaces. Examples: a towel crumpled over the counter edge, a phone charger tangled across the sink, an open drawer, a folded throw on the couch arm, a pair of shoes by the door, a hair tie on the nightstand, a stack of mail, an open book face-down, a water bottle without its cap. **Rotate the prop choice across shots — do not reuse the same object twice and do not anchor on stains, rings, crumbs, or powder residue.** Avoid matched sets, aesthetic color palettes, or Pinterest-clean arrangements.
+9. Add **0–2 location-appropriate** environmental details (see the per-location pool in the Environment rules above). Fewer is better. Pick only from objects that genuinely belong in this specific room — never books / keys / mail in a kitchen, never charging cables in a bathroom, never throws outside the living room. If nothing genuinely belongs in this shot, add nothing. **Rotate the prop choice across shots** so the same object doesn't appear twice in a row, but never sacrifice location-correctness for variety. Avoid matched sets, aesthetic color palettes, or Pinterest-clean arrangements.
 10. Assign a motion artifact matching the action and camera setup (hair strand falling, breath, soft blink, water droplet, drip, hand mid-press).
 11. If any hand is in frame, add the two-hand cap line. If no hands are in frame, omit it.
 12. Close with ordinary room lighting, unedited iPhone color, slight digital noise, casual real-life feel.
@@ -306,7 +371,7 @@ Decide:
 main iPhone wide lens · 24mm equivalent · slightly-wider phone perspective · deep focus · everything in focus edge to edge · no background blur · unedited iPhone color · straight out of camera · natural daylight only · window light only · phone camera quality · candid · messy · unpolished · snapshot · POV · slightly overexposed · motion blur · real-life texture · no retouching · imperfect framing · not a professional photo · stationary propped phone angle (for two-handed shots) · clean full-bleed photograph · observational friend-filming POV (for lifestyle) · 0.5x ultrawide (only when explicitly needed for environmental shots) · scene-appropriate outfit (e.g. pajamas, athletic wear, robe, jeans + tee, sweater) · brand label visibly blurred / out of focus (for Failed-Solution competitor stand-ins only)
 
 **Keywords to NEVER use:**
-coffee stain · coffee ring · coffee rings · ring mark · ring marks on counter · ring marks on table · dried coffee · spilled coffee · coffee spill · powder residue · powder dusting · spilled powder · loose powder on the counter · crumb pile · crumbs scattered · dried-spill · splash mark · splash marks · smudge streaks · fingerprint trail on glass · stained surface · sticky residue · bokeh · shallow depth of field · creamy background · background blur · subject separation · subject pop · blurred background · defocused · studio lighting · rim light · key light · fill light · softbox · ring light · reflector · diffused light · dramatic light · cinematic lighting · professional lighting · beautifully lit · moody · golden hour grade · film look · film emulation · cinematic color · color graded · teal and orange · HDR dramatic · artfully arranged · curated · editorial · flat lay · centered · perfectly centered · symmetric · symmetrical composition · balanced on both sides · centered on the vertical axis · posed · studio portrait · smiling (in problem or failed-solution shots) · cheerful (in problem or failed-solution shots) · happy (in problem or failed-solution shots) · bottle / jar / tube / product / label / packaging (in any non-Product shot unless explicitly called for) · plain / unbranded / generic / label-stripped packaging (for competitor stand-ins — must be branded with the label blurred, never plain) · identifiable real competitor brand names · screenshot · phone UI · status bar · LIVE · **ANY** word describing the character's age, ethnicity, skin tone, hair color or texture, eye color, or body type · **ANY** word describing a product's color, shape, material, label, mechanism, nozzle, dispenser type, cap type, or how it physically functions
+coffee stain · coffee ring · coffee rings · ring mark · ring marks on counter · ring marks on table · dried coffee · spilled coffee · coffee spill · powder residue · powder dusting · spilled powder · loose powder on the counter · crumb pile · crumbs scattered · dried-spill · splash mark · splash marks · smudge streaks · fingerprint trail on glass · stained surface · sticky residue · kitchen towel · dish towel · tea towel · folded towel · crumpled towel · tea-towel · hand towel on counter · bokeh · shallow depth of field · creamy background · background blur · subject separation · subject pop · blurred background · defocused · studio lighting · rim light · key light · fill light · softbox · ring light · reflector · diffused light · dramatic light · cinematic lighting · professional lighting · beautifully lit · moody · golden hour grade · film look · film emulation · cinematic color · color graded · teal and orange · HDR dramatic · artfully arranged · curated · editorial · flat lay · centered · perfectly centered · symmetric · symmetrical composition · balanced on both sides · centered on the vertical axis · posed · studio portrait · smiling (in problem or failed-solution shots) · cheerful (in problem or failed-solution shots) · happy (in problem or failed-solution shots) · bottle / jar / tube / product / label / packaging (in any non-Product shot unless explicitly called for) · plain / unbranded / generic / label-stripped packaging (for competitor stand-ins — must be branded with the label blurred, never plain) · identifiable real competitor brand names · screenshot · phone UI · status bar · LIVE · **ANY** word describing the character's age, ethnicity, skin tone, hair color or texture, eye color, or body type · **ANY** word describing a product's color, shape, material, label, mechanism, nozzle, dispenser type, cap type, or how it physically functions
 
 **Note on wardrobe:** Outfit / clothing / wardrobe is **not** in the never-list. It IS in the "describe" list because it must match the scene (see Character Fidelity § Wardrobe Carve-Out). Identical wardrobe across every shot reads as AI-generated and is an anti-pattern.
 

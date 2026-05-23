@@ -184,7 +184,10 @@ function ApprovalBadge({ approval, kind }: { approval: Approval; kind: "image" |
 }
 
 export default function BrollAppPage() {
-  const { activeBrandId } = useBrand();
+  // Also pull the full activeBrand object — we need its logoUrl for the
+  // unboxing shot's packing-tape branding (the brand's standalone wordmark,
+  // not the version on the product label which is often curved or partial).
+  const { activeBrandId, activeBrand } = useBrand();
   const [currentStep, setCurrentStep] = useState(0);
 
   // Input state
@@ -416,8 +419,29 @@ export default function BrollAppPage() {
     return Array.from(new Set(urls));
   }
 
-  async function callImageModel(prompt: string): Promise<string> {
-    const imageUrls = collectProductImageUrls();
+  /**
+   * Build the reference-image list for a single shot. For unboxing shots we
+   * prepend the brand's standalone logo (from brand_extract / brands.logoUrl)
+   * — this is what the model uses to render the brand wordmark on the
+   * shipping carton's packing tape. The product label's version of the
+   * logo can be curved, partial, or stylized in ways that don't translate
+   * to a flat tape strip; the standalone brand logo is the cleaner source.
+   * For non-unboxing shots, the brand logo is omitted to avoid confusing
+   * the model with an extra unused reference.
+   */
+  function collectReferenceImagesForShot(shot: UiShot): string[] {
+    const productRefs = collectProductImageUrls();
+    if (shot.type === "unboxing" && activeBrand?.logoUrl) {
+      // Brand logo first: nano-banana-pro/edit weights earlier images more
+      // heavily as the "anchor." The product refs follow so the model still
+      // knows what's inside the box for post-open reveals.
+      return [activeBrand.logoUrl, ...productRefs];
+    }
+    return productRefs;
+  }
+
+  async function callImageModel(shot: UiShot, prompt: string): Promise<string> {
+    const imageUrls = collectReferenceImagesForShot(shot);
     const hasImages = imageUrls.length > 0;
     const input: Record<string, unknown> = hasImages
       ? { prompt, image_urls: imageUrls, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" }
@@ -432,7 +456,7 @@ export default function BrollAppPage() {
   async function generateImageForShot(shot: UiShot, prompt: string) {
     patchShot(shot.id, { imageStatus: "generating", imageError: undefined, imagePrompt: prompt });
     try {
-      const url = await callImageModel(prompt);
+      const url = await callImageModel(shot, prompt);
       patchShot(shot.id, { imageStatus: "ready", imageUrl: url });
     } catch (err) {
       patchShot(shot.id, {
@@ -488,7 +512,7 @@ export default function BrollAppPage() {
         imagePrompt: finalPrompt,
         ...(feedbackText ? { videoPrompt: undefined } : {}),
       });
-      const url = await callImageModel(finalPrompt);
+      const url = await callImageModel(target, finalPrompt);
       patchShot(shotId, { imageStatus: "ready", imageUrl: url });
     } catch (err) {
       patchShot(shotId, {
@@ -513,14 +537,23 @@ export default function BrollAppPage() {
       input: {
         prompt,
         image_urls: imageUrls,
-        duration: "4",
+        // 5 seconds (was 4): Seedance 2.0 supports 4-15. 5s gives the model
+        // a touch more room for product motion (rotation reveal, pour beat,
+        // unboxing slide) without a noticeable cost or latency hit.
+        duration: "5",
         aspect_ratio: "9:16",
         resolution: "720p",
         // Audio off: we never use the generated audio track, and disabling it
         // shaves generation time + drops Seedance/Kling cost noticeably.
         generate_audio: false,
       },
-      model: "bytedance/seedance-2.0/reference-to-video",
+      // [DEV TRIAL] Using the FAST variant on dev to compare label fidelity
+      // and motion quality against the regular tier. To roll back:
+      //   model: "bytedance/seedance-2.0/reference-to-video"
+      // Fast tier: ~2-3× faster, ~30-50% cheaper, accepts the same 9 reference
+      // images and 4-15s duration. Watch for: softer motion, label/text drift
+      // on packaging, color/lighting deviation from the starting frame.
+      model: "bytedance/seedance-2.0/fast/reference-to-video",
     });
     const url = res.urls[0];
     if (!url) throw new Error("No video URL returned");
@@ -1260,7 +1293,7 @@ export default function BrollAppPage() {
                         <span className="text-[10px] font-mono text-white/20">({shots.length})</span>
                         <div className="flex-1 h-px bg-white/[0.06]" />
                       </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                         {shots.map((shot) => (
                           <motion.div
                             key={shot.id}
@@ -1447,7 +1480,7 @@ export default function BrollAppPage() {
                           <p className="text-[11px] text-rose-300 font-mono break-words">{pipelineError}</p>
                         </div>
                       )}
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                         {approved.map((shot) => (
                           <div
                             key={shot.id}

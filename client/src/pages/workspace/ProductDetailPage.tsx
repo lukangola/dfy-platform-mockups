@@ -174,6 +174,7 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
   const [imgBusy, setImgBusy] = useState(false);
   const [imgBusyNote, setImgBusyNote] = useState<string | null>(null);
   const [imgError, setImgError] = useState<string | null>(null);
+  const [uploadDragOver, setUploadDragOver] = useState(false);
   const [imgUrlInput, setImgUrlInput] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -325,9 +326,10 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
     }
   }
 
-  async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file || !product) return;
+  // Core upload routine, factored so both the <input> change handler and the
+  // drag-and-drop handler can share it.
+  async function uploadProductImageFile(file: File) {
+    if (!product) return;
     if (!file.type.startsWith("image/")) {
       setImgError("Only image files are supported.");
       return;
@@ -346,6 +348,11 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
       setImgBusyNote(null);
       if (fileRef.current) fileRef.current.value = "";
     }
+  }
+
+  async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) await uploadProductImageFile(file);
   }
 
   async function handleAddUrl() {
@@ -684,12 +691,28 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
           {/* Upload + URL actions */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
             <label
-              className={`flex items-center justify-center gap-2 border border-dashed border-white/[0.1] rounded-lg px-4 py-3 cursor-pointer hover:border-cyan-500/40 transition-all ${
-                imgBusy ? "opacity-50 pointer-events-none" : ""
+              onDragEnter={(e) => { e.preventDefault(); if (!imgBusy) setUploadDragOver(true); }}
+              onDragOver={(e) => { e.preventDefault(); if (!imgBusy) e.dataTransfer.dropEffect = "copy"; }}
+              onDragLeave={() => setUploadDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setUploadDragOver(false);
+                if (imgBusy) return;
+                const file = e.dataTransfer.files?.[0];
+                if (file) void uploadProductImageFile(file);
+              }}
+              className={`flex items-center justify-center gap-2 border border-dashed rounded-lg px-4 py-3 cursor-pointer transition-all ${
+                imgBusy
+                  ? "border-white/[0.1] opacity-50 pointer-events-none"
+                  : uploadDragOver
+                  ? "border-cyan-400 bg-cyan-500/[0.06] cursor-copy"
+                  : "border-white/[0.1] hover:border-cyan-500/40"
               }`}
             >
               <Upload size={13} className="text-cyan-400" />
-              <span className="text-xs font-mono text-white/70">Upload a product shot</span>
+              <span className="text-xs font-mono text-white/70">
+                {uploadDragOver ? "Drop to upload" : "Click or drag to upload a product shot"}
+              </span>
               <input
                 ref={fileRef}
                 type="file"

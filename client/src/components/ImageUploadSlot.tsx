@@ -14,7 +14,7 @@
  * read + upload roundtrip; parent owns the slot state via React state
  * and passes both the slot + an updater.
  */
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { Image as ImageIcon, Loader2, Upload } from "lucide-react";
 import { uploadProductImageRaw } from "@/lib/api";
 
@@ -90,6 +90,26 @@ export function ImageUploadSlot({
   disabledHint?: string;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Track whether the user is hovering with a file mid-drag, so we can flash
+  // the dashed border cyan while they're over the drop zone.
+  const [dragOver, setDragOver] = useState(false);
+
+  function handleDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    if (disabled) return;
+    const file = e.dataTransfer.files?.[0] ?? null;
+    if (file) onChange(file);
+  }
+
+  function handleDragOver(e: React.DragEvent<HTMLDivElement>) {
+    // Must preventDefault for drop to fire. Also signal "copy" so the
+    // browser cursor is the right one (not a no-entry sign).
+    e.preventDefault();
+    if (!disabled) e.dataTransfer.dropEffect = "copy";
+  }
+
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
@@ -106,10 +126,16 @@ export function ImageUploadSlot({
       </div>
       <div
         onClick={() => { if (!disabled) fileInputRef.current?.click(); }}
-        className={`aspect-square rounded-lg border border-dashed border-white/[0.12] bg-[#0A0C0F] flex items-center justify-center overflow-hidden relative transition ${
+        onDragEnter={(e) => { e.preventDefault(); if (!disabled) setDragOver(true); }}
+        onDragOver={handleDragOver}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={handleDrop}
+        className={`aspect-square rounded-lg border border-dashed bg-[#0A0C0F] flex items-center justify-center overflow-hidden relative transition ${
           disabled
-            ? "opacity-40 cursor-not-allowed"
-            : "hover:border-cyan-500/40 cursor-pointer"
+            ? "border-white/[0.12] opacity-40 cursor-not-allowed"
+            : dragOver
+            ? "border-cyan-400 bg-cyan-500/[0.04] cursor-copy"
+            : "border-white/[0.12] hover:border-cyan-500/40 cursor-pointer"
         }`}
         title={disabled ? disabledHint : undefined}
       >
@@ -126,13 +152,18 @@ export function ImageUploadSlot({
                 Uploaded
               </div>
             )}
+            {dragOver && (
+              <div className="absolute inset-0 bg-cyan-500/10 border-2 border-dashed border-cyan-400 rounded-lg flex items-center justify-center pointer-events-none">
+                <div className="text-[10px] font-mono text-cyan-300">Drop to replace</div>
+              </div>
+            )}
           </>
         ) : (
           <div className="flex flex-col items-center gap-1.5 text-white/25 px-3 text-center">
             <ImageIcon size={20} />
             <div className="flex items-center gap-1 text-[10px] font-mono">
               <Upload size={10} />
-              {disabled ? disabledHint ?? "Disabled" : "Click to upload"}
+              {disabled ? disabledHint ?? "Disabled" : dragOver ? "Drop here" : "Click or drag to upload"}
             </div>
           </div>
         )}

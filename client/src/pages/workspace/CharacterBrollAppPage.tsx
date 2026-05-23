@@ -785,6 +785,25 @@ export default function CharacterBrollAppPage() {
   }
 
   /**
+   * Hard-blacklist categories that MUST NEVER receive our product reference
+   * images, even if the rendered prompt happens to mention product-y words
+   * (the prompt-text fallback in `promptReferencesProduct` would otherwise
+   * trigger and leak refs in).
+   *
+   * Failed Solution: the shot is supposed to depict an OLD / COMPETITOR
+   * routine — a different product that didn't work. The master prompt allows
+   * a generic branded-but-blurred competitor stand-in to be described, but
+   * if we ALSO pass our actual product reference images alongside, Kling
+   * (and to a lesser extent Nano-Banana) glitches and morphs the competitor
+   * stand-in into OUR product mid-clip. Hard exclude — even if the prompt
+   * says "the bottle" or "the jar," those refer to the competitor and the
+   * model should invent it from scratch, never anchor to our refs.
+   */
+  function categoryBlocksProductRefs(category: string): boolean {
+    return category === "Failed Solution";
+  }
+
+  /**
    * Build the reference-image list to pass to nano-banana-pro/edit for one
    * shot. Always includes the character portrait. Includes product
    * references when EITHER:
@@ -796,8 +815,11 @@ export default function CharacterBrollAppPage() {
   function collectImageRefsForShot(shot: UiShot, prompt: string): string[] {
     const refs: string[] = [];
     if (characterImageUrl) refs.push(characterImageUrl);
+    // Hard blacklist (Failed Solution) overrides both the category check AND
+    // the prompt-text fallback. See `categoryBlocksProductRefs` for why.
     const wantsProduct =
-      shouldIncludeProductRefs(shot.category) || promptReferencesProduct(prompt);
+      !categoryBlocksProductRefs(shot.category) &&
+      (shouldIncludeProductRefs(shot.category) || promptReferencesProduct(prompt));
     if (wantsProduct) {
       refs.push(...collectProductImageUrls());
     }
@@ -1019,14 +1041,24 @@ export default function CharacterBrollAppPage() {
   // reference images always" — and is available if we ever switch back.
   async function callVideoModel(shot: UiShot, prompt: string, imageUrl: string): Promise<string> {
     const productUrls = collectProductImageUrls();
+    // Same hard blacklist as the image step (Failed Solution never gets refs)
+    // PLUS the existing category+prompt OR check. Without the blacklist, Kling
+    // morphs the competitor stand-in described in the prompt into OUR product
+    // by frame 60+ — the user reports this consistently on Failed Solution
+    // shots.
     const wantsProduct =
       productUrls.length > 0 &&
+      !categoryBlocksProductRefs(shot.category) &&
       (shouldIncludeProductRefs(shot.category) || promptReferencesProduct(prompt));
 
     const input: Record<string, unknown> = {
       prompt,
       start_image_url: imageUrl,
-      duration: "5",
+      // 8 seconds (was 5): the standard tier accepts any integer from 3 to 15;
+      // 8s is the sweet spot for character B-roll — long enough to land a
+      // gesture or expression beat that 5s tends to clip, still much cheaper
+      // than 10s+. Cost scales linearly per-second.
+      duration: "8",
       // Audio off: we never use the generated audio track. On Kling v3 this
       // also drops the cost from $0.126/s → $0.084/s (~33%) and shaves a few
       // seconds off generation time.
@@ -2042,7 +2074,7 @@ export default function CharacterBrollAppPage() {
                         <span className="text-[10px] font-mono text-white/20">({shots.length})</span>
                         <div className="flex-1 h-px bg-white/[0.06]" />
                       </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                         {shots.map((shot) => (
                           <motion.div
                             key={shot.id}
@@ -2280,7 +2312,7 @@ export default function CharacterBrollAppPage() {
                           <p className="text-[11px] text-rose-300 font-mono break-words">{pipelineError}</p>
                         </div>
                       )}
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                         {approved.map((shot) => (
                           <div
                             key={shot.id}

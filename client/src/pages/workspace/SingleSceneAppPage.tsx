@@ -565,7 +565,10 @@ export default function SingleSceneAppPage() {
     const input: Record<string, unknown> = {
       prompt,
       start_image_url: imageUrl,
-      duration: "5",
+      // 8 seconds (was 5): standard tier accepts 3-15. 8s is enough room for
+      // a real scene beat — a stretch, a sip, a turn — without paying for
+      // 10s+. Cost scales linearly per-second.
+      duration: "8",
       // Audio off: we never use the generated audio. Drops Kling v3 cost from
       // $0.126/s → $0.084/s (~33%) and shaves time off generation.
       generate_audio: false,

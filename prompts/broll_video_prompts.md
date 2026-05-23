@@ -91,6 +91,12 @@ Every video clip must play at real-time speed. No slow motion. No speed ramping.
 - Real iPhone B-roll is recorded and played back at normal speed. That is the standard. There are no exceptions.
 - When describing viscosity behavior, describe how the product ACTUALLY moves at real-time speed. Thick products naturally move slowly in real life — describe that natural slowness, not a slow-motion effect applied to a fast-moving liquid.
 
+**Mandatory constraint line — APPEND THIS EXACT TEXT to the end of every video prompt you generate. No exceptions, no paraphrasing:**
+
+`Footage plays at exactly 1x real-time speed throughout the entire clip. No slow motion, no slo-mo, no speed ramping, no temporal stretching, no time-slowed effects, no frame-by-frame stepping, no dramatic slow-down at any beat. Every frame is at normal playback speed.`
+
+Even though the rule lives in this system prompt, the model honors the explicit per-prompt boilerplate more reliably. Treat the line above as mandatory at the end of every video prompt.
+
 # INPUT FORMAT
 
 You will receive the same inputs used for the image prompt:

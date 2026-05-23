@@ -98,6 +98,12 @@ Every video clip must play at real-time speed. No slow motion. No speed ramping.
 - When describing movement speed, "slow" refers to the ACTUAL PACE of the action (e.g., `Character` moves slowly in real life) — NOT to playback speed manipulation. A person can move slowly at normal playback speed. That is fine. But the footage itself must never be temporally slowed down.
 - Real iPhone B-roll is recorded and played back at normal speed. No exceptions.
 
+**Mandatory constraint line — APPEND THIS EXACT TEXT to the end of every video prompt you generate. No exceptions, no paraphrasing:**
+
+`Footage plays at exactly 1x real-time speed throughout the entire clip. No slow motion, no slo-mo, no speed ramping, no temporal stretching, no time-slowed effects, no frame-by-frame stepping, no dramatic slow-down at any beat. Every frame is at normal playback speed.`
+
+This explicit constraint stays in the prompt even when the rule itself is in the system prompt — Kling has been observed honoring the explicit per-prompt line more reliably than the system-level rule. Treat it as mandatory boilerplate at the end of every video prompt.
+
 ---
 
 # DISTRESS SOFTENING — KLING IS LOOSER THAN SEEDANCE BUT STILL
@@ -165,10 +171,12 @@ Map each `category` and `shot_type` to the most appropriate motion. Choose ONE p
 - Character pauses mid-movement, eyes close briefly
 - Character's hand drops from face with a small exhale
 
-**Failed Solution (C) — giving-up motions:**
+**Failed Solution (C) — giving-up motions (NEVER reference @Element1):**
 - Character sets the competitor stand-in down on the counter
 - Character's hand lowers the old product with a slight head shake
 - Character drops their arm and lets the product rest
+
+**Hard rule for Failed Solution:** never emit `@Element1` / `@Image2+` markers and never anchor any motion to "the product" in a way that implies our actual product. The caller HARD-BLOCKS our product reference images on Failed Solution shots (because Kling otherwise morphs the competitor stand-in into our product by frame 60+). Describe the motion abstractly — "the competitor stand-in," "the old bottle," "the previous product" — with no anchor to our refs.
 
 **Product (D) — usage motions (match specs; reference product as `@Element1`):**
 - Character's fingers gently squeeze @Element1; dispensing result appears per specs
