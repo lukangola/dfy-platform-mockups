@@ -30,8 +30,8 @@ comparison table — we explicitly remove it from our adaptation.
    describe the product by its CATEGORY / TYPE and position it inside the
    angle's audience-facing category.
 
-   Pattern (mirrors the Javvy reference):
-   `# 11 Reasons Why This [Product Type] is the #1 [Angle-Derived Category] for [Year]`
+   Pattern:
+   `# 10 Reasons Why This [Product Type] is the #1 [Angle-Derived Category] for [Year]`
 
    Where:
    - `[Product Type]` = a short generic descriptor for what the product
@@ -47,16 +47,14 @@ comparison table — we explicitly remove it from our adaptation.
 
    Examples:
    - Angle "Aching Joints / Mobility Panic" + product "wellbe Beauty Kollagen" →
-     `# 11 Reasons Why This Collagen Supplement is the #1 Joint-Pain Remedy for 2026`
+     `# 10 Reasons Why This Collagen Supplement is the #1 Joint-Pain Remedy for 2026`
    - Angle "Cortisol-driven belly fat" + product "Ryze Mushroom Coffee" →
-     `# 11 Reasons Why This Mushroom Coffee is the #1 Cortisol-Reduction Drink for 2026`
-   - Javvy reference (canonical) — angle "high-protein, low-sugar coffee" + product "Javvy" →
-     `# 11 Reasons Why This High-Protein Iced Coffee is the #1 Trending Drink for Spring 2026`
+     `# 10 Reasons Why This Mushroom Coffee is the #1 Cortisol-Reduction Drink for 2026`
 
-   **The number is exactly 11.** Matches the canonical reference's H1
-   verbatim. The H1 says "11 Reasons" — even though only 10 numbered
-   sections appear in the body; the offer block functions as the
-   implied 11th reason. This is the established convention.
+   **The number is exactly 10.** It must match the count of numbered
+   sections in the body (also exactly 10). Earlier drafts of this template
+   used "11 Reasons" on the H1 (with the offer block as an implied 11th) —
+   that mismatch read as a bug and we've aligned both to 10.
 
    The product NAME (the brand-branded full name) goes in the **body
    sections** and the **offer block**, not in the H1. The H1 stays
@@ -69,11 +67,12 @@ comparison table — we explicitly remove it from our adaptation.
    *Jade M. · February 4, 2026 · 4 min read*
 
 4. **TLDR line** — exactly one sentence, ending in `👇`. Pattern:
-   `**TLDR:** Using [Product Name] has 11+ life-changing benefits 👇`
+   `**TLDR:** Using [Product Name] has 10 life-changing benefits 👇`
 
 5. **The 10 numbered sections.** The body has exactly 10 numbered
-   sections (NOT 11 — the offer block at the end is the implied 11th
-   reason). Each section follows this exact micro-structure:
+   sections. This matches the count in the H1 ("10 Reasons") and in the
+   TLDR ("10 life-changing benefits"). Each section follows this exact
+   micro-structure:
 
    ### [n]. [Bold benefit headline — short, punchy, opinionated]
    *[Optional one-line italic flavor / quoted reaction. Use this on roughly 60–70% of sections, not all.]*
@@ -156,7 +155,7 @@ comparison table — we explicitly remove it from our adaptation.
 - ❌ Quoting yourself as if you're an authority. The voice is a real customer / friend, not an editor or expert.
 - ❌ Using the words *unleash*, *revolutionary*, *game-changer*, *next-level*, *cutting-edge*, *synergy*. Banned.
 - ❌ Repeating the same CTA microcopy twice. Every 👉 CTA line is unique.
-- ❌ **Wrong section count.** The body contains EXACTLY 10 numbered sections (matching the canonical reference at https://try.javvycoffee.com/ps/). The H1 reads "11 Reasons" (the offer block at the end is the implied 11th). The TLDR reads "11+". Count the numbered sections in the body before you finish — must be exactly 10.
+- ❌ **Wrong section count.** The body contains EXACTLY 10 numbered sections. The H1 reads "10 Reasons" and the TLDR reads "10 life-changing benefits" — all three counts must agree. Count the numbered sections in the body before you finish — must be exactly 10.
 - ❌ **Including a comparison table** at the top of the listicle, between the byline and the numbered sections. The canonical reference has one; we explicitly REMOVE it from our adaptation. The first numbered section starts immediately after the byline / TLDR. No table, no chart, no row of icons comparing the product to alternatives.
 
 ---

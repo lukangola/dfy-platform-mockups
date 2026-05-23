@@ -48,24 +48,85 @@ function sendError(res: Response, status: number, message: string) {
  * descriptions for non-product sections; without the input pixels
  * there's nothing for NBP to leak.
  */
+/**
+ * Tokens that look like product-name parts but are too common in English /
+ * supplement / beauty copy to be a reliable signal. If the brand is "Beauty
+ * Kollagen Wildberry", "beauty" and "wildberry" alone aren't enough — we need
+ * the more specific "kollagen" token. Filtering these out prevents the gate
+ * from firing on every section of a beauty-supplement listicle.
+ */
+const COMMON_PRODUCT_NAME_STOPWORDS = new Set([
+  "beauty", "natural", "pure", "essence", "wellness", "nature", "natures",
+  "premium", "organic", "formula", "system", "complex", "elements", "vitality",
+  "active", "advanced", "ultra", "max", "plus", "skin", "hair", "body", "boost",
+  "support", "daily", "morning", "night", "berry", "wildberry", "vanilla",
+  "chocolate", "original", "classic", "powder", "drink",
+]);
+
+/**
+ * Strip known boilerplate phrases that the listicle image-prompt master
+ * appends to product-in-scene prompts. Without this, the gate's substring
+ * scan would see "the product", "the packaging", "the brand name" inside
+ * the boilerplate and trigger for every prompt — even prompts that legitimately
+ * appended it for unrelated reasons or where the master prompt accidentally
+ * leaked the phrasing.
+ */
+function stripBoilerplate(text: string): string {
+  return text
+    .replace(/If the product appears in the scene[^.]*\./gi, "")
+    .replace(/preserve the original logo, brand name, and all label text[^.]*\./gi, "")
+    .replace(/do not invent, alter, translate, or remove any text on the packaging\.?/gi, "")
+    .replace(/Do not add any ad copy, captions, headlines, or text overlays to the image\.?/gi, "")
+    .replace(/If there is no product image needed[^.]*\./gi, "");
+}
+
 function imagePromptMentionsProduct(text: string, productName: string | null | undefined): boolean {
   if (!text) return false;
-  const lc = text.toLowerCase();
-  const nameTokens = (productName ?? "")
-    .toLowerCase()
+
+  // Strip boilerplate first so we only check the substantive scene
+  // description for product mentions. The master prompt appends fixed
+  // packaging-preservation language to product-in-scene prompts, and that
+  // boilerplate must not contaminate the gate signal.
+  const scanText = stripBoilerplate(text);
+
+  // Product-name tokens — strongest signal. Word-boundary regex so "alcami"
+  // doesn't match "alcamiform"; common stopwords filtered so single overlap
+  // with words like "beauty" or "wellness" doesn't trigger the gate.
+  const productNameLower = (productName ?? "").toLowerCase();
+  const allTokens = productNameLower
     .split(/\s+/)
     .map((t) => t.replace(/[^a-z0-9]/g, ""))
     .filter((t) => t.length >= 4);
-  if (nameTokens.some((t) => lc.includes(t))) return true;
+  const specificTokens = allTokens.filter((t) => !COMMON_PRODUCT_NAME_STOPWORDS.has(t));
+
+  // Match on a specific (non-stopword) token. If the brand name is entirely
+  // common words (e.g. "Pure Elements"), specificTokens will be empty and we
+  // fall through to the full-phrase check below.
+  if (specificTokens.some((t) => new RegExp(`\\b${t}\\b`, "i").test(scanText))) return true;
+
+  // Full product-name phrase match (case-insensitive, whitespace-tolerant).
+  // Catches the case where the prompt says "Pure Elements" as a deliberate
+  // phrase even though neither word alone is specific.
+  if (productNameLower.length >= 4) {
+    const phrasePattern = productNameLower
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/\s+/g, "\\s+");
+    if (new RegExp(`\\b${phrasePattern}\\b`, "i").test(scanText)) return true;
+  }
+
+  // Generic packaging nouns, word-boundary matched. Curated to avoid false
+  // positives from common English words.
   const generic = [
-    "the product", "this product", "the packaging", "the pouch", "the bag",
-    "the bottle", "the jar", "the tube", "the spray", "the sachet",
-    "the can", "the tin", "the box", "the container", "the label",
-    "the cap", "the lid", "the pump", "the dropper", "the nozzle",
-    "the trigger", "the wrapper", "product packaging", "supplement bag",
-    "powder bag", "powder pouch",
+    "the product", "this product", "the packaging", "product packaging",
+    "the pouch", "the bag", "the bottle", "the jar", "the sachet",
+    "the container", "the label", "the dropper", "the nozzle", "the wrapper",
+    "supplement bag", "powder bag", "powder pouch",
   ];
-  return generic.some((g) => lc.includes(g));
+  if (generic.some((g) => new RegExp(`\\b${g}\\b`, "i").test(scanText))) return true;
+
+  // Marker tokens used in master prompts (least-ambiguous fallback).
+  if (/@element\d/i.test(scanText) || /@image[3-9]/i.test(scanText)) return true;
+  return false;
 }
 
 /**
