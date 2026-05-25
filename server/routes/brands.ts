@@ -203,6 +203,85 @@ brandsRouter.post("/", async (req: Request, res: Response) => {
 });
 
 /**
+ * DELETE /api/brands/:id — remove a brand.
+ *
+ * By default this REFUSES if anything still references the brand
+ * (products, lp_builds, brand_assets). The response includes counts so
+ * the caller knows what's blocking. Pass `?cascade=true` to also delete
+ * those dependent rows in the same transaction.
+ *
+ * Intentionally minimal — added for one-shot cleanup of a duplicate
+ * brand row. Production safety net: counts are surfaced in the
+ * non-cascade response so an operator can see exactly what would be
+ * removed before flipping the flag.
+ */
+brandsRouter.delete("/:id", async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id;
+    const cascade = String(req.query.cascade ?? "").toLowerCase() === "true";
+
+    const [row] = await db
+      .select()
+      .from(schema.brands)
+      .where(eq(schema.brands.id, id))
+      .limit(1);
+    if (!row) return sendError(res, 404, "Brand not found");
+
+    // Reference counts across every table that points at brand_id.
+    const [products, lpBuildsRows, brandAssetsRows] = await Promise.all([
+      db.select({ id: schema.products.id }).from(schema.products).where(eq(schema.products.brandId, id)),
+      db.select({ id: schema.lpBuilds.id }).from(schema.lpBuilds).where(eq(schema.lpBuilds.brandId, id)),
+      db.select({ id: schema.brandAssets.id }).from(schema.brandAssets).where(eq(schema.brandAssets.brandId, id)),
+    ]);
+    const refs = {
+      products: products.length,
+      lpBuilds: lpBuildsRows.length,
+      brandAssets: brandAssetsRows.length,
+    };
+    const totalRefs = refs.products + refs.lpBuilds + refs.brandAssets;
+
+    if (totalRefs > 0 && !cascade) {
+      return res.status(409).json({
+        error: "Brand has dependent rows. Re-call with ?cascade=true to delete them too.",
+        brand: { id: row.id, name: row.name },
+        references: refs,
+      });
+    }
+
+    if (cascade && totalRefs > 0) {
+      // Delete the dependents first so the brand delete doesn't leave
+      // orphans. No FK cascade is configured in the schema; we do it
+      // manually here.
+      await Promise.all([
+        refs.lpBuilds > 0
+          ? db.delete(schema.lpBuilds).where(eq(schema.lpBuilds.brandId, id))
+          : Promise.resolve(),
+        refs.brandAssets > 0
+          ? db.delete(schema.brandAssets).where(eq(schema.brandAssets.brandId, id))
+          : Promise.resolve(),
+        refs.products > 0
+          ? db.delete(schema.products).where(eq(schema.products.brandId, id))
+          : Promise.resolve(),
+      ]);
+      console.log(
+        `[brands] cascade-delete for ${id}: products=${refs.products}, lpBuilds=${refs.lpBuilds}, brandAssets=${refs.brandAssets}`,
+      );
+    }
+
+    await db.delete(schema.brands).where(eq(schema.brands.id, id));
+    console.log(`[brands] deleted ${id} (name=${JSON.stringify(row.name)})`);
+    res.json({
+      ok: true,
+      deleted: { id: row.id, name: row.name },
+      cascadeRemoved: cascade ? refs : null,
+    });
+  } catch (err) {
+    console.error("[brands] delete failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
  * POST /api/brands/:id/research — manually re-run brand_extract for a brand.
  */
 brandsRouter.post("/:id/research", async (req: Request, res: Response) => {
