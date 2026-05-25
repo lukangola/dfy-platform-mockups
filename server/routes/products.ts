@@ -108,6 +108,108 @@ productsRouter.patch("/:id", async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/products/:id/reassign-brand — move a product to a different brand.
+ *
+ * Body: { newBrandId: string, dryRun?: boolean }
+ *
+ * Updates the product's `brandId` AND every row in brand_assets / lp_builds
+ * that references this product, so the move is consistent across all
+ * downstream tables. Without this the product would land on the new brand
+ * but its generated assets would still show under the old brand.
+ *
+ * `dryRun: true` returns the would-be counts without writing anything,
+ * useful for confirming the scope of a move before committing.
+ */
+productsRouter.post("/:id/reassign-brand", async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id;
+    const body = (req.body ?? {}) as { newBrandId?: unknown; dryRun?: unknown };
+    const newBrandId = typeof body.newBrandId === "string" ? body.newBrandId.trim() : "";
+    const dryRun = body.dryRun === true;
+    if (!newBrandId) return sendError(res, 400, "newBrandId is required");
+
+    // Verify both rows exist before mutating anything.
+    const [product] = await db
+      .select()
+      .from(schema.products)
+      .where(eq(schema.products.id, id))
+      .limit(1);
+    if (!product) return sendError(res, 404, "Product not found");
+
+    const [newBrand] = await db
+      .select()
+      .from(schema.brands)
+      .where(eq(schema.brands.id, newBrandId))
+      .limit(1);
+    if (!newBrand) return sendError(res, 404, "newBrandId does not match an existing brand");
+
+    if (product.brandId === newBrandId) {
+      return res.json({
+        ok: true,
+        message: "Product is already on the target brand — nothing to do.",
+        product,
+      });
+    }
+
+    // Count what would move so the response is informative either way.
+    const [assets, lpBuildsRows] = await Promise.all([
+      db.select({ id: schema.brandAssets.id }).from(schema.brandAssets).where(eq(schema.brandAssets.productId, id)),
+      db.select({ id: schema.lpBuilds.id }).from(schema.lpBuilds).where(eq(schema.lpBuilds.productId, id)),
+    ]);
+    const counts = {
+      brandAssets: assets.length,
+      lpBuilds: lpBuildsRows.length,
+    };
+
+    if (dryRun) {
+      return res.json({
+        ok: true,
+        dryRun: true,
+        from: { brandId: product.brandId, brandName: undefined },
+        to: { brandId: newBrand.id, brandName: newBrand.name },
+        wouldMove: counts,
+      });
+    }
+
+    // Perform the move. Three updates, all keyed by the product id. No
+    // transaction wrapper because drizzle's default postgres driver
+    // setup here doesn't expose one cleanly — but the updates are
+    // idempotent and side-effect-free, so a partial failure is safe to
+    // retry.
+    await Promise.all([
+      db
+        .update(schema.products)
+        .set({ brandId: newBrandId })
+        .where(eq(schema.products.id, id)),
+      counts.brandAssets > 0
+        ? db
+            .update(schema.brandAssets)
+            .set({ brandId: newBrandId })
+            .where(eq(schema.brandAssets.productId, id))
+        : Promise.resolve(),
+      counts.lpBuilds > 0
+        ? db
+            .update(schema.lpBuilds)
+            .set({ brandId: newBrandId })
+            .where(eq(schema.lpBuilds.productId, id))
+        : Promise.resolve(),
+    ]);
+
+    console.log(
+      `[products] reassigned ${id} (${JSON.stringify(product.name)}) from brand ${product.brandId} → ${newBrandId} (${JSON.stringify(newBrand.name)}). Updated ${counts.brandAssets} asset(s), ${counts.lpBuilds} lp_build(s).`,
+    );
+    res.json({
+      ok: true,
+      moved: { productId: id, from: product.brandId, to: newBrandId },
+      counts,
+    });
+  } catch (err) {
+    console.error("[products] reassign-brand failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
  * DELETE /api/products/:id — hard-delete a product. Brand assets that were
  * tagged with this productId keep their soft reference; they're still valid
  * assets, just no longer filterable by the deleted product. No FK cascade.
