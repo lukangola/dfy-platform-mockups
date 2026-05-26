@@ -1,11 +1,13 @@
 /**
  * Brands — the top-level data scoping unit.
  *
- *   GET  /api/brands         — list all brands, newest first
- *   GET  /api/brands/:id     — fetch one (used for polling research status)
- *   POST /api/brands         — create a brand AND its first product;
- *                              fires brand_extract + product_research in parallel
- *   POST /api/brands/:id/research — manually re-trigger brand research
+ *   GET    /api/brands           — list all brands, newest first
+ *   GET    /api/brands/:id       — fetch one (used for polling research status)
+ *   POST   /api/brands           — create a brand AND its first product;
+ *                                  fires brand_extract + product_research in parallel
+ *   PATCH  /api/brands/:id       — edit brand fields (name, brandUrl, research)
+ *   DELETE /api/brands/:id       — remove a brand (?cascade=true to also drop refs)
+ *   POST   /api/brands/:id/research — manually re-trigger brand research
  *
  * The create flow is the important one: it accepts the brand's URL (for the
  * brand_extract pipeline), the first product's details (URL or fact sheet +
