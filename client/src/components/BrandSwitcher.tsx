@@ -10,11 +10,13 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Check, ChevronDown, Loader2, Plus, Sparkles } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
 import { useBrand } from "@/contexts/BrandContext";
 import CreateBrandDialog from "./CreateBrandDialog";
 
 export default function BrandSwitcher({ collapsed }: { collapsed: boolean }) {
   const { brands, activeBrand, activeBrandId, setActiveBrandId, loading, refreshBrand } = useBrand();
+  const { role } = useAuth();
   const [open, setOpen] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [logoBroken, setLogoBroken] = useState(false);
@@ -124,7 +126,21 @@ export default function BrandSwitcher({ collapsed }: { collapsed: boolean }) {
               </div>
               <div className="max-h-60 overflow-y-auto">
                 {brands.length === 0 && !loading ? (
-                  <div className="px-3 py-4 text-xs text-white/30 italic">No brands yet.</div>
+                  // Two reasons the list can be empty: (a) the team genuinely
+                  // has no brands yet, or (b) the caller is a non-admin
+                  // member with zero brand_members grants. Admins always see
+                  // every brand on their team, so an empty list for an admin
+                  // is case (a); for a member, it's most likely case (b).
+                  // Different copy makes the next action obvious for each.
+                  role === "admin" ? (
+                    <div className="px-3 py-4 text-xs text-white/30 italic">No brands yet.</div>
+                  ) : (
+                    <div className="px-3 py-4 text-xs text-white/50 leading-relaxed">
+                      No workspaces assigned to your account yet.
+                      <br />
+                      <span className="text-white/30 italic">Ask your admin to grant access.</span>
+                    </div>
+                  )
                 ) : (
                   brands.map((b) => {
                     const isActive = b.id === activeBrandId;
@@ -173,18 +189,20 @@ export default function BrandSwitcher({ collapsed }: { collapsed: boolean }) {
                   })
                 )}
               </div>
-              <div className="border-t border-white/[0.06]">
-                <button
-                  onClick={() => {
-                    setShowCreate(true);
-                    setOpen(false);
-                  }}
-                  className="w-full flex items-center gap-2 px-3 py-2.5 text-left text-xs font-mono text-cyan-300 hover:bg-cyan-500/10 transition"
-                >
-                  <Plus size={12} />
-                  Add new brand
-                </button>
-              </div>
+              {role === "admin" && (
+                <div className="border-t border-white/[0.06]">
+                  <button
+                    onClick={() => {
+                      setShowCreate(true);
+                      setOpen(false);
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2.5 text-left text-xs font-mono text-cyan-300 hover:bg-cyan-500/10 transition"
+                  >
+                    <Plus size={12} />
+                    Add new brand
+                  </button>
+                </div>
+              )}
             </motion.div>
           )}
         </AnimatePresence>

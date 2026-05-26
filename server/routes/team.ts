@@ -25,6 +25,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { db, schema } from "../lib/db.js";
 import { generateInviteToken, requireAdmin, requireAuth } from "../lib/auth.js";
+import { grantBrandsToUser, revokeBrandsFromUser } from "../lib/brandAccess.js";
 import type { Role } from "../db/schema.js";
 
 export const teamRouter: Router = Router();
@@ -232,6 +233,123 @@ teamRouter.patch("/members/:userId", requireAdmin, async (req: Request, res: Res
   }
 });
 
+// ── GET /api/team/members/:userId/brands ────────────────────────────
+//
+// Admin-only. Returns every brand on the team paired with a boolean
+// `hasAccess` flag for this user. Admin target users get `hasAccess:
+// true` on every row plus `isAdmin: true` on the response so the UI
+// can show the "Admin — full access" state instead of checkboxes.
+teamRouter.get("/members/:userId/brands", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { team } = req.auth!;
+    const targetUserId = req.params.userId;
+
+    // Confirm the target is actually a member of THIS team.
+    const [target] = await db
+      .select()
+      .from(schema.teamMembers)
+      .where(
+        and(eq(schema.teamMembers.userId, targetUserId), eq(schema.teamMembers.teamId, team.id)),
+      )
+      .limit(1);
+    if (!target) return sendError(res, 404, "Member not found on this team");
+    const targetIsAdmin = target.role === "admin";
+
+    const teamBrands = await db
+      .select({ id: schema.brands.id, name: schema.brands.name, logoUrl: schema.brands.logoUrl })
+      .from(schema.brands)
+      .where(eq(schema.brands.teamId, team.id))
+      .orderBy(desc(schema.brands.createdAt));
+
+    const grants = await db
+      .select({ brandId: schema.brandMembers.brandId })
+      .from(schema.brandMembers)
+      .where(eq(schema.brandMembers.userId, targetUserId));
+    const granted = new Set(grants.map((g) => g.brandId));
+
+    const brands = teamBrands.map((b) => ({
+      id: b.id,
+      name: b.name,
+      logoUrl: b.logoUrl,
+      hasAccess: targetIsAdmin || granted.has(b.id),
+    }));
+
+    res.json({ isAdmin: targetIsAdmin, brands });
+  } catch (err) {
+    console.error("[team] list member brands failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+// ── PUT /api/team/members/:userId/brands ────────────────────────────
+//
+// Admin-only. Body: `{ brandIds: string[] }` — the FULL set of brands
+// the target user should have access to. Computes the diff against the
+// current grants:
+//   - brands in the new set but not in current → INSERT (granted)
+//   - brands in current but not in the new set → DELETE (revoked)
+//
+// Always validates that every brandId in the request belongs to the
+// admin's team (so an admin can't accidentally — or maliciously —
+// grant a user access to some other team's brand). No-ops on admin
+// targets (returns ok: true, message: "user is admin").
+teamRouter.put("/members/:userId/brands", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { team, user: adminUser } = req.auth!;
+    const targetUserId = req.params.userId;
+    const body = (req.body ?? {}) as { brandIds?: unknown };
+    if (!Array.isArray(body.brandIds) || !body.brandIds.every((v) => typeof v === "string")) {
+      return sendError(res, 400, "brandIds must be an array of strings");
+    }
+    const requestedBrandIds: string[] = Array.from(new Set(body.brandIds as string[]));
+
+    const [target] = await db
+      .select()
+      .from(schema.teamMembers)
+      .where(
+        and(eq(schema.teamMembers.userId, targetUserId), eq(schema.teamMembers.teamId, team.id)),
+      )
+      .limit(1);
+    if (!target) return sendError(res, 404, "Member not found on this team");
+    if (target.role === "admin") {
+      return res.json({ ok: true, message: "User is an admin and already has full access" });
+    }
+
+    // Filter out any brand id that isn't on this admin's team — defense
+    // against payload tampering. Reject the request entirely if any are
+    // foreign, so the admin gets a clear error rather than a silent drop.
+    const teamBrands = await db
+      .select({ id: schema.brands.id })
+      .from(schema.brands)
+      .where(eq(schema.brands.teamId, team.id));
+    const teamBrandIds = new Set(teamBrands.map((b) => b.id));
+    const foreign = requestedBrandIds.filter((id) => !teamBrandIds.has(id));
+    if (foreign.length > 0) {
+      return sendError(res, 400, `Some brandIds don't belong to your team: ${foreign.join(", ")}`);
+    }
+
+    // Current grants for the user.
+    const currentRows = await db
+      .select({ brandId: schema.brandMembers.brandId })
+      .from(schema.brandMembers)
+      .where(eq(schema.brandMembers.userId, targetUserId));
+    const current = new Set(currentRows.map((r) => r.brandId));
+    const requested = new Set(requestedBrandIds);
+
+    const toAdd = requestedBrandIds.filter((id) => !current.has(id));
+    const toRemove = Array.from(current).filter((id) => !requested.has(id));
+
+    const [granted, revoked] = await Promise.all([
+      grantBrandsToUser({ userId: targetUserId, brandIds: toAdd, createdBy: adminUser.id }),
+      revokeBrandsFromUser({ userId: targetUserId, brandIds: toRemove }),
+    ]);
+    res.json({ ok: true, granted, revoked, totalGrants: requestedBrandIds.length });
+  } catch (err) {
+    console.error("[team] put member brands failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
 // ── DELETE /api/team/members/:userId ───────────────────────────────
 //
 // Either an admin removing someone, OR a non-admin self-removing (leave
@@ -260,6 +378,16 @@ teamRouter.delete("/members/:userId", requireAuth, async (req: Request, res: Res
     }
 
     await db.delete(schema.teamMembers).where(eq(schema.teamMembers.id, target.id));
+    // Also revoke every brand grant they held on this team. Without this
+    // a re-invited user would silently inherit their previous access set
+    // — surprising and a potential security leak.
+    try {
+      await db
+        .delete(schema.brandMembers)
+        .where(eq(schema.brandMembers.userId, targetUserId));
+    } catch (e) {
+      console.warn("[team] brand_members cleanup on remove failed:", (e as Error).message);
+    }
     // Sessions for the removed user become orphaned (their team_members
     // row is gone, so loadAuthContext will return null on next request
     // and force a re-login). We don't delete them eagerly — lazy

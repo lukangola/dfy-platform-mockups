@@ -1,5 +1,6 @@
 import { fal } from "@fal-ai/client";
 import { env } from "./env.js";
+import { formatError } from "./formatError.js";
 
 let configured = false;
 
@@ -72,14 +73,27 @@ export async function generateImage(args: {
     // the "did not generate the expected output" body. Re-throw as a typed
     // error so the route handler can return 422 (instead of 500) and the
     // client knows to trigger its sanitize-and-retry flow. Other errors
-    // (auth, network, missing input) propagate untouched.
+    // (auth, network, missing input) propagate as REAL Error instances
+    // with a useful message — `@fal-ai/client` rejects with plain
+    // objects, and the previous `throw err` flowed those plain objects
+    // up to the route handler, where `err instanceof Error` was false
+    // and `String(err)` produced the literal "[object Object]" that
+    // landed in the user's UI. formatError() unwraps the SDK's nested
+    // shapes (body.detail / message / errors[0].msg / etc.) so we never
+    // lose the actual failure reason again.
     const e = err as { status?: number; body?: { detail?: string }; message?: string };
     const status = e?.status;
-    const msg = e?.body?.detail ?? e?.message ?? String(err);
+    const msg = formatError(err);
     if (status === 422 || /did not generate the expected output|unsafe content|content policy/i.test(msg)) {
       throw new FalContentSafetyError(msg);
     }
-    throw err;
+    if (err instanceof Error) throw err;
+    // Plain-object rejection from the fal SDK — re-throw as a real Error
+    // so every catch site downstream gets a meaningful .message and a
+    // stack trace anchored at this throw.
+    const wrapped = new Error(`fal.ai (${model}) failed: ${msg}`);
+    if (status !== undefined) (wrapped as Error & { status?: number }).status = status;
+    throw wrapped;
   }
 }
 
@@ -140,14 +154,26 @@ export async function generateVideo(args: {
   const model = args.model ?? "fal-ai/veo3/fast";
   const started = Date.now();
 
-  const result = await fal.subscribe(model, {
-    input: args.input,
-    logs: false,
-    pollInterval: 500,
-  });
+  try {
+    const result = await fal.subscribe(model, {
+      input: args.input,
+      logs: false,
+      pollInterval: 500,
+    });
 
-  const data = result.data as { video?: { url: string }; videos?: Array<{ url: string }> };
-  const urls = data.video ? [data.video.url] : data.videos?.map((v) => v.url) ?? [];
+    const data = result.data as { video?: { url: string }; videos?: Array<{ url: string }> };
+    const urls = data.video ? [data.video.url] : data.videos?.map((v) => v.url) ?? [];
 
-  return { urls, raw: result.data, model, durationMs: Date.now() - started };
+    return { urls, raw: result.data, model, durationMs: Date.now() - started };
+  } catch (err) {
+    // Same plain-object-rejection problem as generateImage — wrap the
+    // SDK error so downstream callers always see a real Error with a
+    // useful message instead of the literal "[object Object]" that
+    // String() produces on a fal-SDK plain-object rejection.
+    if (err instanceof Error) throw err;
+    const e = err as { status?: number };
+    const wrapped = new Error(`fal.ai (${model}) failed: ${formatError(err)}`);
+    if (e?.status !== undefined) (wrapped as Error & { status?: number }).status = e.status;
+    throw wrapped;
+  }
 }

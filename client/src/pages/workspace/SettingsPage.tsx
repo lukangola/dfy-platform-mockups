@@ -17,8 +17,8 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  AlertTriangle, Check, ChevronDown, Copy, Crown, Loader2, Mail, RefreshCw,
-  Shield, Trash2, UserMinus, UserPlus, Users,
+  AlertTriangle, Check, ChevronDown, Copy, Crown, FolderOpen, Loader2, Mail, RefreshCw,
+  Shield, Trash2, UserMinus, UserPlus, Users, X,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import {
@@ -27,6 +27,9 @@ import {
   revokeTeamInvite,
   updateTeamMemberRole,
   removeTeamMember,
+  getMemberBrands,
+  setMemberBrands,
+  type MemberBrandAccess,
   type TeamSnapshot,
   type TeamRole,
 } from "@/lib/api";
@@ -48,6 +51,9 @@ function buildInviteUrl(token: string) {
 export default function SettingsPage() {
   const { user, role, logout } = useAuth();
   const [team, setTeam] = useState<TeamSnapshot | null>(null);
+  // Manage-workspaces modal — null when closed; object holds the
+  // target member's userId + display name while open.
+  const [workspaceModal, setWorkspaceModal] = useState<{ userId: string; name: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -234,6 +240,15 @@ export default function SettingsPage() {
                           <RoleBadge role={member.role} />
                         )}
 
+                        {team.role === "admin" && !isSelf && member.role !== "admin" && (
+                          <button
+                            onClick={() => setWorkspaceModal({ userId: member.userId, name: member.name })}
+                            className="p-2 rounded text-white/40 hover:text-cyan-300 hover:bg-cyan-500/10 transition-all"
+                            title={`Manage workspaces for ${member.name}`}
+                          >
+                            <FolderOpen size={12} />
+                          </button>
+                        )}
                         {team.role === "admin" && !isSelf && (
                           <button
                             onClick={async () => {
@@ -276,6 +291,186 @@ export default function SettingsPage() {
           )}
         </motion.div>
       </main>
+
+      {workspaceModal && (
+        <ManageWorkspacesModal
+          userId={workspaceModal.userId}
+          userName={workspaceModal.name}
+          onClose={() => setWorkspaceModal(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Manage Workspaces modal ──────────────────────────────────────────
+//
+// Per-user × per-brand access control. Loads the brand-list-with-flags
+// from /api/team/members/:userId/brands, lets the admin tick/untick each
+// brand, and PUTs the full set back on save. Admin targets get a
+// "User is an admin — already has full access" state with no checkboxes.
+function ManageWorkspacesModal({
+  userId,
+  userName,
+  onClose,
+}: {
+  userId: string;
+  userName: string;
+  onClose: () => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [brands, setBrands] = useState<MemberBrandAccess[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  // Local checkbox state, keyed by brandId. Initialized from the server's
+  // hasAccess flags so we can compute a clean diff on save.
+  const [checked, setChecked] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await getMemberBrands(userId);
+        if (cancelled) return;
+        setIsAdmin(data.isAdmin);
+        setBrands(data.brands);
+        setChecked(Object.fromEntries(data.brands.map((b) => [b.id, b.hasAccess])));
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [userId]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const brandIds = Object.entries(checked).filter(([, v]) => v).map(([k]) => k);
+      await setMemberBrands(userId, brandIds);
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const selectedCount = Object.values(checked).filter(Boolean).length;
+  const totalCount = brands.length;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-[#0c0c10] border border-white/[0.08] rounded-lg shadow-2xl w-full max-w-md max-h-[80vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
+          <div>
+            <div className="text-sm text-white/90 font-semibold">Manage Workspaces</div>
+            <div className="text-[11px] font-mono text-white/40 mt-0.5">
+              {userName}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1 rounded text-white/40 hover:text-white/80 hover:bg-white/[0.05] transition-all"
+            aria-label="Close"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          {loading ? (
+            <div className="flex items-center gap-2 text-[11px] font-mono text-white/40">
+              <Loader2 size={12} className="animate-spin" /> Loading workspaces…
+            </div>
+          ) : error ? (
+            <div className="flex items-start gap-2 p-3 rounded border border-rose-500/30 bg-rose-500/10 text-[11px] text-rose-300">
+              <AlertTriangle size={12} className="flex-shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          ) : isAdmin ? (
+            <div className="flex items-start gap-2 p-3 rounded border border-amber-500/30 bg-amber-500/10 text-[12px] text-amber-200">
+              <Crown size={14} className="flex-shrink-0 mt-0.5 text-amber-300" />
+              <span>
+                This user is an <strong>admin</strong> and automatically sees every workspace on
+                the team. Demote them to <em>member</em> first if you want to scope their access.
+              </span>
+            </div>
+          ) : brands.length === 0 ? (
+            <div className="text-[12px] text-white/50">
+              No workspaces on this team yet. Create one first, then come back to assign access.
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {brands.map((b) => (
+                <label
+                  key={b.id}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded border border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04] cursor-pointer transition-all"
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked[b.id] ?? false}
+                    onChange={(e) =>
+                      setChecked((p) => ({ ...p, [b.id]: e.target.checked }))
+                    }
+                    className="accent-cyan-400 w-3.5 h-3.5"
+                  />
+                  {b.logoUrl ? (
+                    <img
+                      src={b.logoUrl}
+                      alt=""
+                      className="w-6 h-6 rounded object-cover bg-white/[0.04] border border-white/[0.06] flex-shrink-0"
+                    />
+                  ) : (
+                    <div className="w-6 h-6 rounded bg-white/[0.04] border border-white/[0.06] flex items-center justify-center text-white/40 text-[10px] font-medium flex-shrink-0">
+                      {b.name.slice(0, 1).toUpperCase()}
+                    </div>
+                  )}
+                  <span className="text-sm text-white/85 flex-1 truncate">{b.name}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {!loading && !error && !isAdmin && brands.length > 0 && (
+          <div className="px-5 py-3 border-t border-white/[0.06] flex items-center justify-between gap-3">
+            <div className="text-[11px] font-mono text-white/40">
+              {selectedCount} of {totalCount} selected
+              {selectedCount === 0 && (
+                <span className="ml-2 text-amber-300/80">— user will see no workspaces</span>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={onClose}
+                className="px-3 py-1.5 rounded border border-white/[0.08] text-[11px] font-mono uppercase tracking-wider text-white/70 hover:border-white/[0.15] hover:text-white/90 transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="px-3 py-1.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-[11px] font-mono uppercase tracking-wider text-cyan-300 hover:bg-cyan-500/25 hover:border-cyan-500/50 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                {saving ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
+                Save
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

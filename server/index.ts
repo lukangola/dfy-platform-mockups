@@ -6,7 +6,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
 import { env, isDev } from "./lib/env.js";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql as sqlTag } from "drizzle-orm";
 import { db, schema } from "./lib/db.js";
 import { attachAuth, getOrCreateDefaultTeam } from "./lib/auth.js";
 import { ingestCharacterLibrary } from "./lib/characterIngest.js";
@@ -179,6 +179,52 @@ async function startServer() {
       }
     } catch (err) {
       console.error("[static-ads] boot ingest failed:", err);
+    }
+  })();
+
+  // Create the brand_members table if it doesn't exist yet, then seed it
+  // for existing non-admin members so the new per-workspace access feature
+  // ships without silently locking anyone out. Both steps idempotent:
+  //   - CREATE TABLE IF NOT EXISTS makes the schema migration safe to
+  //     re-run on every boot (avoids needing a separate drizzle migration
+  //     for this one-table addition).
+  //   - The INSERT uses ON CONFLICT (brand_id, user_id) DO NOTHING so
+  //     re-runs don't double-grant.
+  //
+  // Backfill policy: every (member, brand) pair on the same team gets a
+  // grant row. Admins are intentionally omitted — they implicitly see
+  // every brand via the role check in canSeeBrand(). After this initial
+  // seed, the admin uses SettingsPage → Manage workspaces to tighten
+  // access on a per-user basis.
+  void (async () => {
+    try {
+      await db.execute(sqlTag`
+        CREATE TABLE IF NOT EXISTS brand_members (
+          id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          created_at  timestamptz NOT NULL DEFAULT now(),
+          brand_id    uuid NOT NULL,
+          user_id     uuid NOT NULL,
+          created_by  uuid
+        );
+      `);
+      await db.execute(sqlTag`
+        CREATE UNIQUE INDEX IF NOT EXISTS brand_members_brand_user_uniq
+        ON brand_members (brand_id, user_id);
+      `);
+      const result = await db.execute(sqlTag`
+        INSERT INTO brand_members (brand_id, user_id, created_by)
+        SELECT b.id, tm.user_id, NULL
+        FROM team_members tm
+        JOIN brands b ON b.team_id = tm.team_id
+        WHERE tm.role = 'member'
+        ON CONFLICT (brand_id, user_id) DO NOTHING
+      `);
+      const inserted = (result as { rowCount?: number }).rowCount ?? 0;
+      if (inserted > 0) {
+        console.log(`[brand-members] seeded ${inserted} grant(s) for existing members`);
+      }
+    } catch (err) {
+      console.error("[brand-members] backfill failed (non-fatal):", err);
     }
   })();
 

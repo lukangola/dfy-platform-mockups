@@ -660,6 +660,44 @@ export async function removeTeamMember(userId: string): Promise<{ ok: true }> {
   return payload as { ok: true };
 }
 
+// ── Per-user × per-workspace access (admin-only) ──────────────────
+
+export type MemberBrandAccess = {
+  id: string;
+  name: string;
+  logoUrl: string | null;
+  hasAccess: boolean;
+};
+
+export type MemberBrandAccessResponse = {
+  isAdmin: boolean;
+  brands: MemberBrandAccess[];
+};
+
+export async function getMemberBrands(userId: string): Promise<MemberBrandAccessResponse> {
+  const res = await fetch(`/api/team/members/${userId}/brands`);
+  const payload = (await res.json().catch(() => ({}))) as MemberBrandAccessResponse | ApiError;
+  if (!res.ok) {
+    const msg = (payload as ApiError)?.error ?? `Request failed: ${res.status}`;
+    throw new Error(msg);
+  }
+  return payload as MemberBrandAccessResponse;
+}
+
+export async function setMemberBrands(userId: string, brandIds: string[]): Promise<{ ok: true; granted?: number; revoked?: number }> {
+  const res = await fetch(`/api/team/members/${userId}/brands`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ brandIds }),
+  });
+  const payload = (await res.json().catch(() => ({}))) as { ok: true; granted?: number; revoked?: number } | ApiError;
+  if (!res.ok) {
+    const msg = (payload as ApiError)?.error ?? `Request failed: ${res.status}`;
+    throw new Error(msg);
+  }
+  return payload as { ok: true; granted?: number; revoked?: number };
+}
+
 export type InvitePreview = { email: string; role: TeamRole; teamName: string | null };
 
 export function previewInvite(token: string): Promise<InvitePreview> {

@@ -2,6 +2,7 @@ import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
 import { db, schema } from "../lib/db.js";
 import { FalContentSafetyError, generateImage, generateVideo } from "../lib/fal.js";
+import { formatError } from "../lib/formatError.js";
 import { loadPrompt, PromptNotConfiguredError } from "../lib/prompts.js";
 
 export const generateRouter: Router = Router();
@@ -102,9 +103,11 @@ generateRouter.post("/text/:action", async (req: Request, res: Response) => {
       return sendError(res, 424, err.message, { action, kind: "text" });
     }
     console.error(`[generate/text/${action}]`, err);
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatError(err);
     await persist({ action, kind: "text", inputs: vars, output: null, model: "unknown", error: msg });
-    sendError(res, 500, msg, { action });
+    const status = (err as { status?: number })?.status;
+    const code = status && status >= 400 && status < 600 ? status : 500;
+    sendError(res, code, msg, { action });
   }
 });
 
@@ -162,9 +165,14 @@ generateRouter.post("/image/:action", async (req: Request, res: Response) => {
       return sendError(res, 422, msg, { action, errorCode: "content_safety_rejected" });
     }
     console.error(`[generate/image/${action}]`, err);
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatError(err);
     await persist({ action, kind: "image", inputs: { vars }, output: null, model: body.model ?? "unknown", error: msg });
-    sendError(res, 500, msg, { action });
+    // Honour an upstream status if the wrapped fal error carries one
+    // (e.g. fal returned 429 / 503) so the client can decide whether
+    // to auto-retry. Default to 500 for unknown failures.
+    const status = (err as { status?: number })?.status;
+    const code = status && status >= 400 && status < 600 ? status : 500;
+    sendError(res, code, msg, { action });
   }
 });
 
@@ -210,8 +218,10 @@ generateRouter.post("/video/:action", async (req: Request, res: Response) => {
       return sendError(res, 424, err.message, { action, kind: "video" });
     }
     console.error(`[generate/video/${action}]`, err);
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatError(err);
     await persist({ action, kind: "video", inputs: { vars }, output: null, model: body.model ?? "unknown", error: msg });
-    sendError(res, 500, msg, { action });
+    const status = (err as { status?: number })?.status;
+    const code = status && status >= 400 && status < 600 ? status : 500;
+    sendError(res, code, msg, { action });
   }
 });

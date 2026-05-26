@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { integer, jsonb, numeric, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { integer, jsonb, numeric, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 export const generations = pgTable("generations", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -233,6 +233,40 @@ export const teamMembers = pgTable("team_members", {
   role: text("role").notNull().default("member"), // admin | member
 });
 
+/**
+ * Per-user × per-brand access grants.
+ *
+ * One row per (user, brand) pair = "this user can see this brand in their
+ * workspace switcher and use it on every brand-scoped endpoint." Admins are
+ * NOT represented here — they implicitly see every brand on their team. We
+ * only persist rows for non-admin members so admin-bypass logic stays a
+ * single role check rather than a brand-count query.
+ *
+ * Created when:
+ *   - A new brand is created → the creator (if non-admin) gets a row.
+ *     Admins get implicit access via role; other teammates get no rows
+ *     by default — admin opens "Manage workspaces" to grant access.
+ *   - An admin uses the SettingsPage "Manage workspaces" UI to flip a
+ *     checkbox on for a specific member.
+ *   - Boot-time backfill (one-shot) when this table is first created:
+ *     grants every existing non-admin member access to every brand on
+ *     their team, so ship doesn't silently lock anyone out.
+ *
+ * Deleted when:
+ *   - Admin un-checks a brand in the modal.
+ *   - The brand is deleted (cascade — handled in DELETE /api/brands/:id).
+ *   - The user leaves the team (cascade — handled in DELETE team/members).
+ */
+export const brandMembers = pgTable("brand_members", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  brandId: uuid("brand_id").notNull(),
+  userId: uuid("user_id").notNull(),
+  createdBy: uuid("created_by"), // admin who granted access; null = system backfill
+}, (t) => ({
+  uniqBrandUser: uniqueIndex("brand_members_brand_user_uniq").on(t.brandId, t.userId),
+}));
+
 export const invites = pgTable("invites", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
@@ -255,6 +289,8 @@ export type TeamMember = typeof teamMembers.$inferSelect;
 export type NewTeamMember = typeof teamMembers.$inferInsert;
 export type Invite = typeof invites.$inferSelect;
 export type NewInvite = typeof invites.$inferInsert;
+export type BrandMember = typeof brandMembers.$inferSelect;
+export type NewBrandMember = typeof brandMembers.$inferInsert;
 export type Role = "admin" | "member";
 
 // ──────────────────────────────────────────────────────────────────────────

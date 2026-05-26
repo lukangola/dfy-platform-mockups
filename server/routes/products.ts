@@ -1,6 +1,8 @@
-import { desc, eq } from "drizzle-orm";
-import { type Request, type Response, Router } from "express";
+import { desc, eq, sql as sqlTag } from "drizzle-orm";
+import { type NextFunction, type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
+import { requireAuth } from "../lib/auth.js";
+import { canSeeBrand, canSeeProduct } from "../lib/brandAccess.js";
 import { db, schema } from "../lib/db.js";
 import { extractJsonObject } from "../lib/jsonExtract.js";
 import { loadPrompt, PromptNotConfiguredError } from "../lib/prompts.js";
@@ -9,6 +11,29 @@ import { fetchUrlMeta } from "../lib/urlMeta.js";
 import { getProductReferenceTemplateUrl } from "../lib/productReferenceTemplate.js";
 
 export const productsRouter: Router = Router();
+
+/**
+ * Gate every /:id route on whether the caller can see the product's
+ * brand. Mounting this once via `productsRouter.use("/:id", ...)` covers
+ * GET/PATCH/DELETE plus every nested POST (angles, mechanism, research,
+ * reassign-brand, image-candidate, etc.) without per-route boilerplate.
+ * Auth must already be attached upstream — we read req.auth set by the
+ * global attachAuth middleware.
+ */
+async function gateByProductAccess(req: Request, res: Response, next: NextFunction): Promise<void> {
+  if (!req.auth) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+  const { user, role } = req.auth;
+  const productId = req.params.id;
+  if (!productId) return next();
+  if (!(await canSeeProduct(user.id, role, productId))) {
+    res.status(404).json({ error: "Product not found" });
+    return;
+  }
+  next();
+}
 
 const RESEARCH_ACTION = "product_research";
 
@@ -40,10 +65,17 @@ function parseDelimitedAngles(text: string): { name: string; block: string }[] {
  * brandId is required in the multi-brand world — without it we'd leak other
  * brands' products into the active workspace.
  */
-productsRouter.get("/", async (req: Request, res: Response) => {
+productsRouter.get("/", requireAuth, async (req: Request, res: Response) => {
   try {
     const brandId = typeof req.query.brandId === "string" ? req.query.brandId : "";
     if (!brandId) return sendError(res, 400, "brandId query param is required");
+    const { user, role } = req.auth!;
+    if (!(await canSeeBrand(user.id, role, brandId))) {
+      // Don't leak existence — return an empty product list, same as
+      // if the brand legitimately had zero products. The 404 happens
+      // upstream when the client tries to load the brand itself.
+      return res.json({ products: [] });
+    }
     const rows = await db
       .select()
       .from(schema.products)
@@ -55,6 +87,11 @@ productsRouter.get("/", async (req: Request, res: Response) => {
     sendError(res, 500, err instanceof Error ? err.message : String(err));
   }
 });
+
+// Gate every /:id route after this point. Mounting once is mechanical
+// cover for GET/:id, PATCH/:id, DELETE/:id, plus every nested POST/PUT
+// under /:id (angles, mechanism, research, reassign-brand, etc.).
+productsRouter.use("/:id", requireAuth, gateByProductAccess);
 
 /**
  * GET /api/products/:id — fetch one product (used for polling research status).
@@ -143,6 +180,14 @@ productsRouter.post("/:id/reassign-brand", async (req: Request, res: Response) =
       .limit(1);
     if (!newBrand) return sendError(res, 404, "newBrandId does not match an existing brand");
 
+    // Caller must also have access to the TARGET brand — gateByProductAccess
+    // already proved access on the source (via the product's current
+    // brandId), but the target might be a brand the user can't see.
+    const { user, role } = req.auth!;
+    if (!(await canSeeBrand(user.id, role, newBrandId))) {
+      return sendError(res, 404, "newBrandId does not match an existing brand");
+    }
+
     if (product.brandId === newBrandId) {
       return res.json({
         ok: true,
@@ -152,13 +197,36 @@ productsRouter.post("/:id/reassign-brand", async (req: Request, res: Response) =
     }
 
     // Count what would move so the response is informative either way.
-    const [assets, lpBuildsRows] = await Promise.all([
-      db.select({ id: schema.brandAssets.id }).from(schema.brandAssets).where(eq(schema.brandAssets.productId, id)),
-      db.select({ id: schema.lpBuilds.id }).from(schema.lpBuilds).where(eq(schema.lpBuilds.productId, id)),
+    // `safeCount` swallows "relation does not exist" errors so this
+    // endpoint stays usable on production databases that haven't applied
+    // the LP cloner migration yet (lp_builds may not exist there).
+    const safeCount = async <T>(fn: () => Promise<T[]>): Promise<T[]> => {
+      try { return await fn(); } catch (e) {
+        console.warn("[products] reassign ref count skipped:", (e as Error).message);
+        return [];
+      }
+    };
+    // lp_builds may not exist on this deployment (LP cloner schema isn't
+    // shipped everywhere). Use raw SQL with a try/catch so the missing
+    // relation reports zero refs instead of TypeError.
+    const safeCountRaw = async (table: string, column: string, value: string): Promise<number> => {
+      try {
+        const result = await db.execute(sqlTag.raw(
+          `SELECT COUNT(*)::int AS count FROM "${table}" WHERE "${column}" = '${value}'`,
+        ));
+        const rows = (result as unknown as { rows?: Array<{ count: number }> }).rows ?? [];
+        return rows[0]?.count ?? 0;
+      } catch {
+        return 0;
+      }
+    };
+    const [assets, lpBuildsCount] = await Promise.all([
+      safeCount(() => db.select({ id: schema.brandAssets.id }).from(schema.brandAssets).where(eq(schema.brandAssets.productId, id))),
+      safeCountRaw("lp_builds", "product_id", id),
     ]);
     const counts = {
       brandAssets: assets.length,
-      lpBuilds: lpBuildsRows.length,
+      lpBuilds: lpBuildsCount,
     };
 
     if (dryRun) {
@@ -176,6 +244,11 @@ productsRouter.post("/:id/reassign-brand", async (req: Request, res: Response) =
     // setup here doesn't expose one cleanly — but the updates are
     // idempotent and side-effect-free, so a partial failure is safe to
     // retry.
+    const safeUpdate = async (label: string, fn: () => Promise<unknown>) => {
+      try { await fn(); } catch (e) {
+        console.warn(`[products] reassign update skipped ${label}:`, (e as Error).message);
+      }
+    };
     await Promise.all([
       db
         .update(schema.products)
@@ -188,10 +261,9 @@ productsRouter.post("/:id/reassign-brand", async (req: Request, res: Response) =
             .where(eq(schema.brandAssets.productId, id))
         : Promise.resolve(),
       counts.lpBuilds > 0
-        ? db
-            .update(schema.lpBuilds)
-            .set({ brandId: newBrandId })
-            .where(eq(schema.lpBuilds.productId, id))
+        ? safeUpdate("lp_builds", () => db.execute(sqlTag.raw(
+            `UPDATE "lp_builds" SET "brand_id" = '${newBrandId}' WHERE "product_id" = '${id}'`,
+          )))
         : Promise.resolve(),
     ]);
 
@@ -237,7 +309,7 @@ productsRouter.delete("/:id", async (req: Request, res: Response) => {
  * One of productUrl or factSheet is required. Creates the product row, returns
  * it immediately, then kicks off research async.
  */
-productsRouter.post("/", async (req: Request, res: Response) => {
+productsRouter.post("/", requireAuth, async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as {
     brandId?: string;
     productUrl?: string;
@@ -251,6 +323,10 @@ productsRouter.post("/", async (req: Request, res: Response) => {
 
   if (!body.brandId || typeof body.brandId !== "string") {
     return sendError(res, 400, "brandId is required");
+  }
+  const { user, role } = req.auth!;
+  if (!(await canSeeBrand(user.id, role, body.brandId))) {
+    return sendError(res, 404, "Brand not found");
   }
   const productUrl = body.productUrl?.trim() || "";
   const factSheet = body.factSheet?.trim() || "";

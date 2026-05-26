@@ -14,9 +14,11 @@
  * mandatory front/back clean product images), and returns { brand, product }
  * immediately while both research pipelines run async.
  */
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, sql as sqlTag } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
+import { requireAuth } from "../lib/auth.js";
+import { canSeeBrand, grantBrandsToUser, visibleBrandIds } from "../lib/brandAccess.js";
 import { db, schema } from "../lib/db.js";
 import { extractJsonObject } from "../lib/jsonExtract.js";
 import { loadPrompt, PromptNotConfiguredError } from "../lib/prompts.js";
@@ -31,11 +33,19 @@ function sendError(res: Response, status: number, message: string) {
   res.status(status).json({ error: message });
 }
 
-brandsRouter.get("/", async (_req: Request, res: Response) => {
+brandsRouter.get("/", requireAuth, async (req: Request, res: Response) => {
   try {
+    const { user, team, role } = req.auth!;
+    // Filter to the caller's team AND to brands they're allowed to see.
+    // Admins get everything on the team; members get only the brand ids
+    // listed in brand_members. Empty visible set → empty response (the
+    // BrandSwitcher renders the "ask your admin" empty state in this case).
+    const visible = await visibleBrandIds(user.id, role, team.id);
+    if (visible.size === 0) return res.json({ brands: [] });
     const rows = await db
       .select()
       .from(schema.brands)
+      .where(and(eq(schema.brands.teamId, team.id), inArray(schema.brands.id, Array.from(visible))))
       .orderBy(desc(schema.brands.createdAt));
     res.json({ brands: rows });
   } catch (err) {
@@ -44,8 +54,12 @@ brandsRouter.get("/", async (_req: Request, res: Response) => {
   }
 });
 
-brandsRouter.get("/:id", async (req: Request, res: Response) => {
+brandsRouter.get("/:id", requireAuth, async (req: Request, res: Response) => {
   try {
+    const { user, role } = req.auth!;
+    if (!(await canSeeBrand(user.id, role, req.params.id))) {
+      return sendError(res, 404, "Brand not found");
+    }
     const [row] = await db
       .select()
       .from(schema.brands)
@@ -63,8 +77,12 @@ brandsRouter.get("/:id", async (req: Request, res: Response) => {
  * PATCH /api/brands/:id — edit brand fields (name, brandUrl, research JSON).
  * Used by BrandInfoPage's "edit and save" flow.
  */
-brandsRouter.patch("/:id", async (req: Request, res: Response) => {
+brandsRouter.patch("/:id", requireAuth, async (req: Request, res: Response) => {
   try {
+    const { user, role } = req.auth!;
+    if (!(await canSeeBrand(user.id, role, req.params.id))) {
+      return sendError(res, 404, "Brand not found");
+    }
     const body = (req.body ?? {}) as {
       name?: string;
       brandUrl?: string | null;
@@ -107,7 +125,7 @@ brandsRouter.patch("/:id", async (req: Request, res: Response) => {
  * Creates the brand, creates its first product, returns both.
  * Brand research (brand_extract) and product research run async in parallel.
  */
-brandsRouter.post("/", async (req: Request, res: Response) => {
+brandsRouter.post("/", requireAuth, async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as {
     brandUrl?: string;
     productUrl?: string;
@@ -147,14 +165,29 @@ brandsRouter.post("/", async (req: Request, res: Response) => {
   const placeholderName = brandUrlParsed.hostname.replace(/^www\./, "");
 
   try {
+    const { user, team } = req.auth!;
     const [brand] = await db
       .insert(schema.brands)
       .values({
         name: placeholderName,
         brandUrl,
         researchStatus: "pending",
+        // Stamp the team on creation so the visibility filter picks it
+        // up immediately. Previously brands could be created with a NULL
+        // team_id (relying on the boot backfill); that's a race we don't
+        // need.
+        teamId: team.id,
       })
       .returning();
+
+    // Auto-grant access to (a) the creator and (b) every admin on the
+    // team — admins don't strictly need a row (the role check bypasses
+    // this table), but other MEMBERS who happen to be the creator do.
+    // We only persist a row for the creator if they're NOT an admin;
+    // admins get implicit access via canSeeBrand's role short-circuit.
+    if (req.auth!.role !== "admin") {
+      await grantBrandsToUser({ userId: user.id, brandIds: [brand.id], createdBy: user.id });
+    }
 
     // Derive product name: explicit > scrape > factSheet slice > fallback.
     let productName = body.productName?.trim() || "";
@@ -217,10 +250,14 @@ brandsRouter.post("/", async (req: Request, res: Response) => {
  * non-cascade response so an operator can see exactly what would be
  * removed before flipping the flag.
  */
-brandsRouter.delete("/:id", async (req: Request, res: Response) => {
+brandsRouter.delete("/:id", requireAuth, async (req: Request, res: Response) => {
   try {
     const id = req.params.id;
     const cascade = String(req.query.cascade ?? "").toLowerCase() === "true";
+    const { user, role } = req.auth!;
+    if (!(await canSeeBrand(user.id, role, id))) {
+      return sendError(res, 404, "Brand not found");
+    }
 
     const [row] = await db
       .select()
@@ -230,14 +267,42 @@ brandsRouter.delete("/:id", async (req: Request, res: Response) => {
     if (!row) return sendError(res, 404, "Brand not found");
 
     // Reference counts across every table that points at brand_id.
-    const [products, lpBuildsRows, brandAssetsRows] = await Promise.all([
-      db.select({ id: schema.products.id }).from(schema.products).where(eq(schema.products.brandId, id)),
-      db.select({ id: schema.lpBuilds.id }).from(schema.lpBuilds).where(eq(schema.lpBuilds.brandId, id)),
-      db.select({ id: schema.brandAssets.id }).from(schema.brandAssets).where(eq(schema.brandAssets.brandId, id)),
+    // `safeCount` wraps each query in a try/catch so a missing relation
+    // (e.g. `lp_builds` on a production DB that hasn't applied the LP
+    // cloner migration yet) reports zero refs instead of crashing with
+    // "Cannot read properties of undefined (reading 'id')" or a Postgres
+    // "relation does not exist" error.
+    const safeCount = async <T>(fn: () => Promise<T[]>): Promise<T[]> => {
+      try {
+        return await fn();
+      } catch (e) {
+        console.warn("[brands] reference count skipped:", (e as Error).message);
+        return [];
+      }
+    };
+    // Count references via raw SQL so we don't depend on `schema.lpBuilds`
+    // existing — the LP cloner schema isn't deployed everywhere, and a
+    // missing table just means zero refs for THIS deployment.
+    const safeCountRaw = async (table: string, column: string, value: string): Promise<number> => {
+      try {
+        const result = await db.execute(sqlTag.raw(
+          `SELECT COUNT(*)::int AS count FROM "${table}" WHERE "${column}" = '${value}'`,
+        ));
+        const rows = (result as unknown as { rows?: Array<{ count: number }> }).rows ?? [];
+        return rows[0]?.count ?? 0;
+      } catch {
+        // "relation does not exist" → table not deployed here. Treat as 0.
+        return 0;
+      }
+    };
+    const [products, lpBuildsCount, brandAssetsRows] = await Promise.all([
+      safeCount(() => db.select({ id: schema.products.id }).from(schema.products).where(eq(schema.products.brandId, id))),
+      safeCountRaw("lp_builds", "brand_id", id),
+      safeCount(() => db.select({ id: schema.brandAssets.id }).from(schema.brandAssets).where(eq(schema.brandAssets.brandId, id))),
     ]);
     const refs = {
       products: products.length,
-      lpBuilds: lpBuildsRows.length,
+      lpBuilds: lpBuildsCount,
       brandAssets: brandAssetsRows.length,
     };
     const totalRefs = refs.products + refs.lpBuilds + refs.brandAssets;
@@ -253,21 +318,37 @@ brandsRouter.delete("/:id", async (req: Request, res: Response) => {
     if (cascade && totalRefs > 0) {
       // Delete the dependents first so the brand delete doesn't leave
       // orphans. No FK cascade is configured in the schema; we do it
-      // manually here.
+      // manually here. Same safe-wrap pattern as the ref count above.
+      const safeDelete = async (label: string, fn: () => Promise<unknown>) => {
+        try {
+          await fn();
+        } catch (e) {
+          console.warn(`[brands] cascade-delete skipped ${label}:`, (e as Error).message);
+        }
+      };
       await Promise.all([
         refs.lpBuilds > 0
-          ? db.delete(schema.lpBuilds).where(eq(schema.lpBuilds.brandId, id))
+          ? safeDelete("lp_builds", () => db.execute(sqlTag.raw(`DELETE FROM "lp_builds" WHERE "brand_id" = '${id}'`)))
           : Promise.resolve(),
         refs.brandAssets > 0
-          ? db.delete(schema.brandAssets).where(eq(schema.brandAssets.brandId, id))
+          ? safeDelete("brand_assets", () => db.delete(schema.brandAssets).where(eq(schema.brandAssets.brandId, id)))
           : Promise.resolve(),
         refs.products > 0
-          ? db.delete(schema.products).where(eq(schema.products.brandId, id))
+          ? safeDelete("products", () => db.delete(schema.products).where(eq(schema.products.brandId, id)))
           : Promise.resolve(),
       ]);
       console.log(
         `[brands] cascade-delete for ${id}: products=${refs.products}, lpBuilds=${refs.lpBuilds}, brandAssets=${refs.brandAssets}`,
       );
+    }
+
+    // Always clean up brand_members grants for the brand we're deleting,
+    // regardless of cascade flag — orphaned grant rows would point at a
+    // non-existent brand and just confuse the access check.
+    try {
+      await db.delete(schema.brandMembers).where(eq(schema.brandMembers.brandId, id));
+    } catch (e) {
+      console.warn("[brands] brand_members cleanup skipped:", (e as Error).message);
     }
 
     await db.delete(schema.brands).where(eq(schema.brands.id, id));
@@ -286,8 +367,12 @@ brandsRouter.delete("/:id", async (req: Request, res: Response) => {
 /**
  * POST /api/brands/:id/research — manually re-run brand_extract for a brand.
  */
-brandsRouter.post("/:id/research", async (req: Request, res: Response) => {
+brandsRouter.post("/:id/research", requireAuth, async (req: Request, res: Response) => {
   try {
+    const { user, role } = req.auth!;
+    if (!(await canSeeBrand(user.id, role, req.params.id))) {
+      return sendError(res, 404, "Brand not found");
+    }
     const [row] = await db
       .select()
       .from(schema.brands)

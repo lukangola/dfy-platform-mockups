@@ -12,7 +12,8 @@ import { desc, eq, isNull, sql } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { db, schema } from "../lib/db.js";
 import type { NewBrandAsset } from "../db/schema.js";
-import { requireAdmin } from "../lib/auth.js";
+import { requireAdmin, requireAuth } from "../lib/auth.js";
+import { canSeeBrand } from "../lib/brandAccess.js";
 
 export const brandAssetsRouter: Router = Router();
 
@@ -69,10 +70,17 @@ function validateAsset(a: unknown, fallbackBrandId: string | null): IncomingAsse
   };
 }
 
-brandAssetsRouter.get("/", async (req: Request, res: Response) => {
+brandAssetsRouter.get("/", requireAuth, async (req: Request, res: Response) => {
   try {
     const brandId = typeof req.query.brandId === "string" ? req.query.brandId : "";
     if (!brandId) return sendError(res, 400, "brandId query param is required");
+    const { user, role } = req.auth!;
+    if (!(await canSeeBrand(user.id, role, brandId))) {
+      // Mirror products list: return an empty array on no-access so the
+      // workspace's data view degrades gracefully if a user lands on a
+      // brand they shouldn't (the underlying brand fetch will 404 too).
+      return res.json({ assets: [] });
+    }
     // Left-join users so the client gets a ready-to-render creator label
     // without a second round-trip. Left-join (not inner) so legacy rows with
     // null user_id still come back.
