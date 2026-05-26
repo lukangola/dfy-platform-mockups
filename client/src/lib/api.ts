@@ -175,6 +175,20 @@ export function uploadProductImageRaw(
   return post<{ url: string }>("/api/uploads/product-image", { dataUrl, filename });
 }
 
+/**
+ * Upload a brand logo. The server rasterises SVG inputs to PNG before
+ * storing, so the returned URL is always safe for downstream b-roll /
+ * message-testing pipelines (which reject SVG references). `converted`
+ * tells the caller whether a conversion happened, useful for UX copy
+ * ("Logo converted from SVG to PNG").
+ */
+export function uploadBrandLogoRaw(
+  dataUrl: string,
+  filename?: string,
+): Promise<{ url: string; converted: boolean }> {
+  return post<{ url: string; converted: boolean }>("/api/uploads/brand-logo", { dataUrl, filename });
+}
+
 // ---------- Products ----------
 
 export type ProductAngle = { name: string; block: string };

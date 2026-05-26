@@ -19,6 +19,7 @@ import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
 import { requireAuth } from "../lib/auth.js";
 import { canSeeBrand, grantBrandsToUser, visibleBrandIds } from "../lib/brandAccess.js";
+import { ensureLogoIsPng } from "../lib/logoConvert.js";
 import { db, schema } from "../lib/db.js";
 import { extractJsonObject } from "../lib/jsonExtract.js";
 import { loadPrompt, PromptNotConfiguredError } from "../lib/prompts.js";
@@ -92,7 +93,13 @@ brandsRouter.patch("/:id", requireAuth, async (req: Request, res: Response) => {
     const updates: Record<string, unknown> = {};
     if (typeof body.name === "string" && body.name.trim()) updates.name = body.name.trim();
     if (body.brandUrl !== undefined) updates.brandUrl = body.brandUrl ?? null;
-    if (body.logoUrl !== undefined) updates.logoUrl = body.logoUrl ?? null;
+    if (body.logoUrl !== undefined) {
+      // Normalise the logo before saving: if the URL points at an SVG,
+      // download + rasterise to PNG and store the PNG URL instead.
+      // Downstream consumers (b-roll, message-testing, etc.) reject SVG
+      // refs, so we never want an SVG URL on a brand row.
+      updates.logoUrl = body.logoUrl ? await ensureLogoIsPng(body.logoUrl) : null;
+    }
     if (body.research !== undefined) updates.research = body.research;
     if (Object.keys(updates).length === 0) return sendError(res, 400, "No updates provided");
 
@@ -437,8 +444,15 @@ async function runBrandResearch(brandId: string, brandUrl: string): Promise<void
       throw err;
     }
 
-    const logoUrl = typeof parsed.logoUrl === "string" ? parsed.logoUrl : null;
+    const rawLogoUrl = typeof parsed.logoUrl === "string" ? parsed.logoUrl : null;
     const extractedName = typeof parsed.name === "string" ? parsed.name.trim() : "";
+
+    // Convert SVG logos to PNG before persisting. fal.ai's image
+    // generation models reject SVGs as reference images, which makes the
+    // entire B-Roll pipeline fail for brands that happen to have an SVG
+    // logo. Normalising at ingestion time means downstream consumers
+    // never have to think about format compatibility.
+    const logoUrl = await ensureLogoIsPng(rawLogoUrl);
 
     // brand_extract is the source of truth for name + logo — overwrite
     // whatever placeholder is on the row. If extraction returned a blank

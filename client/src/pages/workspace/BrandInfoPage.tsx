@@ -9,9 +9,9 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Palette, Globe, Edit3, Save, Type, MessageCircle,
   Sparkles, CheckCircle2, RefreshCw, AlertTriangle,
-  Plus, Trash2, ImageOff, Loader2,
+  Plus, Trash2, ImageOff, Loader2, Upload,
 } from "lucide-react";
-import { patchBrand, retriggerBrandResearch, type BrandResearch } from "@/lib/api";
+import { patchBrand, retriggerBrandResearch, uploadBrandLogoRaw, type BrandResearch } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
 
 type BrandColor = NonNullable<BrandResearch["colorPalette"]>[number];
@@ -103,11 +103,48 @@ function LogoBox({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(logoUrl ?? "");
   const [errored, setErrored] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadNote, setUploadNote] = useState<string | null>(null);
+  // Hidden file input — we drive the open via a styled button so the UI
+  // stays consistent with the rest of the editor (the native button is
+  // browser-styled and looks out of place).
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!editing) setDraft(logoUrl ?? "");
     setErrored(false);
   }, [logoUrl, editing]);
+
+  // File-picker handler. Reads the picked file as a base64 dataUrl, POSTs
+  // to /api/uploads/brand-logo (which converts SVG → PNG server-side),
+  // then saves the returned URL on the brand. The server can take a beat
+  // for SVG conversion + the fal.storage upload, so we show a spinner.
+  const handleFile = async (file: File) => {
+    setUploadError(null);
+    setUploadNote(null);
+    setUploading(true);
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+        reader.onerror = () => reject(new Error("Failed to read file"));
+        reader.readAsDataURL(file);
+      });
+      if (!dataUrl) throw new Error("Could not read file");
+      const { url, converted } = await uploadBrandLogoRaw(dataUrl, file.name);
+      onSave(url);
+      setDraft(url);
+      setEditing(false);
+      if (converted) setUploadNote("Converted SVG → PNG");
+      // Clear the input so picking the same file again re-fires onChange.
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUploading(false);
+    }
+  };
 
   return (
     <div className="shrink-0 flex flex-col items-center gap-2">
@@ -129,24 +166,50 @@ function LogoBox({
           {editing ? "Cancel" : logoUrl ? "Edit" : "Add"}
         </button>
       </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/svg+xml"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void handleFile(f);
+        }}
+      />
       {editing && (
-        <div className="w-full min-w-[260px] flex items-center gap-2">
-          <input
-            type="text"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="https://…/logo.png"
-            className="flex-1 bg-white/[0.03] border border-cyan-500/30 rounded px-2 py-1 text-[11px] text-white/80 outline-none font-mono"
-          />
+        <div className="w-full min-w-[260px] flex flex-col gap-1.5">
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="https://…/logo.png"
+              className="flex-1 bg-white/[0.03] border border-cyan-500/30 rounded px-2 py-1 text-[11px] text-white/80 outline-none font-mono"
+            />
+            <button
+              onClick={() => {
+                onSave(draft.trim());
+                setEditing(false);
+              }}
+              className="px-2 py-1 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+            >
+              Save
+            </button>
+          </div>
           <button
-            onClick={() => {
-              onSave(draft.trim());
-              setEditing(false);
-            }}
-            className="px-2 py-1 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            className="flex items-center justify-center gap-1.5 px-2 py-1 rounded text-[10px] font-mono uppercase tracking-wider border border-white/[0.1] bg-white/[0.03] text-white/70 hover:border-cyan-500/30 hover:text-cyan-300 disabled:opacity-50 transition-colors"
           >
-            Save
+            {uploading ? <Loader2 size={10} className="animate-spin" /> : <Upload size={10} />}
+            {uploading ? "Uploading…" : "Upload from file (SVG → PNG)"}
           </button>
+          {uploadNote && (
+            <span className="text-[9px] font-mono text-emerald-400/80">{uploadNote}</span>
+          )}
+          {uploadError && (
+            <span className="text-[9px] font-mono text-rose-400/80">{uploadError}</span>
+          )}
         </div>
       )}
       {errored && !editing && (
