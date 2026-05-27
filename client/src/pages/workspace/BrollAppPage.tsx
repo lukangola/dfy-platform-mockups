@@ -223,6 +223,48 @@ export default function BrollAppPage() {
   const [selectedType, setSelectedType] = useState<ShotType | "all">("all");
   const [selectedShot, setSelectedShot] = useState<UiShot | null>(null);
 
+  // Inline feedback UX on each image / video card. Each shot id can have
+  // its own "feedback open" state on the card itself, letting the user
+  // type direction inline and fire "Regenerate with Feedback" without
+  // having to open the right-side detail panel first. Mirrors the same
+  // pattern Character B-Roll uses — the underlying regenerateImage /
+  // regenerateVideo already accept a feedback string, this just wires
+  // up the second entry point right where users are looking.
+  const [imageFeedbackOpen, setImageFeedbackOpen] = useState<Set<string>>(new Set());
+  function toggleImageFeedback(shotId: string) {
+    setImageFeedbackOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(shotId)) next.delete(shotId);
+      else next.add(shotId);
+      return next;
+    });
+  }
+  function closeImageFeedback(shotId: string) {
+    setImageFeedbackOpen((prev) => {
+      if (!prev.has(shotId)) return prev;
+      const next = new Set(prev);
+      next.delete(shotId);
+      return next;
+    });
+  }
+  const [videoFeedbackOpen, setVideoFeedbackOpen] = useState<Set<string>>(new Set());
+  function toggleVideoFeedback(shotId: string) {
+    setVideoFeedbackOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(shotId)) next.delete(shotId);
+      else next.add(shotId);
+      return next;
+    });
+  }
+  function closeVideoFeedback(shotId: string) {
+    setVideoFeedbackOpen((prev) => {
+      if (!prev.has(shotId)) return prev;
+      const next = new Set(prev);
+      next.delete(shotId);
+      return next;
+    });
+  }
+
   // Brand assets export state
   const [savingToBrandAssets, setSavingToBrandAssets] = useState(false);
   const [brandAssetsSavedCount, setBrandAssetsSavedCount] = useState(0);
@@ -1370,34 +1412,81 @@ export default function BrollAppPage() {
                               <div className="text-[10px] text-white/40 mt-1 line-clamp-2 leading-relaxed">{shot.description}</div>
                               <div className="text-[10px] text-white/30 mt-2 font-mono truncate">📍 {shot.location}</div>
                               {shot.imageStatus === "ready" && (
-                                <div className="flex gap-1 mt-3" onClick={(e) => e.stopPropagation()}>
-                                  <button
-                                    onClick={() =>
-                                      setImageApproval(
-                                        shot.id,
-                                        shot.imageApproval === "approved" ? "pending" : "approved",
-                                      )
-                                    }
-                                    className={`flex-1 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider border transition-all flex items-center justify-center gap-1 ${
-                                      shot.imageApproval === "approved"
-                                        ? "bg-emerald-500/25 text-emerald-300 border-emerald-500/40"
-                                        : "bg-emerald-500/10 text-emerald-400/70 border-emerald-500/20 hover:bg-emerald-500/20"
-                                    }`}
-                                  >
-                                    <Check size={9} /> {shot.imageApproval === "approved" ? "Approved" : "Approve"}
-                                  </button>
-                                  <button
-                                    onClick={() => void regenerateImage(shot.id)}
-                                    className="flex-1 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider bg-cyan-500/10 text-cyan-400/70 border border-cyan-500/20 hover:bg-cyan-500/20 transition-all flex items-center justify-center gap-1"
-                                  >
-                                    <RefreshCw size={9} /> Regen
-                                  </button>
-                                  <button
-                                    onClick={() => setImageApproval(shot.id, "rejected")}
-                                    className="py-1.5 px-2 rounded text-[9px] font-mono uppercase tracking-wider bg-rose-500/10 text-rose-400/70 border border-rose-500/20 hover:bg-rose-500/20 transition-all"
-                                  >
-                                    <X size={9} />
-                                  </button>
+                                <div onClick={(e) => e.stopPropagation()}>
+                                  <div className="flex gap-1 mt-3">
+                                    <button
+                                      onClick={() =>
+                                        setImageApproval(
+                                          shot.id,
+                                          shot.imageApproval === "approved" ? "pending" : "approved",
+                                        )
+                                      }
+                                      className={`flex-1 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider border transition-all flex items-center justify-center gap-1 ${
+                                        shot.imageApproval === "approved"
+                                          ? "bg-emerald-500/25 text-emerald-300 border-emerald-500/40"
+                                          : "bg-emerald-500/10 text-emerald-400/70 border-emerald-500/20 hover:bg-emerald-500/20"
+                                      }`}
+                                    >
+                                      <Check size={9} /> {shot.imageApproval === "approved" ? "Approved" : "Approve"}
+                                    </button>
+                                    <button
+                                      onClick={() => void regenerateImage(shot.id)}
+                                      className="flex-1 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider bg-cyan-500/10 text-cyan-400/70 border border-cyan-500/20 hover:bg-cyan-500/20 transition-all flex items-center justify-center gap-1"
+                                      title="Regenerate from scratch — no prior image used as reference"
+                                    >
+                                      <RefreshCw size={9} /> Regen
+                                    </button>
+                                    <button
+                                      onClick={() => toggleImageFeedback(shot.id)}
+                                      className={`flex-1 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider border transition-all flex items-center justify-center gap-1 ${
+                                        imageFeedbackOpen.has(shot.id)
+                                          ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                                          : "bg-white/[0.04] text-white/60 border-white/[0.08] hover:bg-white/[0.08]"
+                                      }`}
+                                      title="Refine this image with written direction — passes the current image to nano-banana-pro/edit as the edit source"
+                                    >
+                                      <MessageSquare size={9} /> Feedback
+                                    </button>
+                                    <button
+                                      onClick={() => setImageApproval(shot.id, "rejected")}
+                                      className="py-1.5 px-2 rounded text-[9px] font-mono uppercase tracking-wider bg-rose-500/10 text-rose-400/70 border border-rose-500/20 hover:bg-rose-500/20 transition-all"
+                                      title="Reject"
+                                    >
+                                      <X size={9} />
+                                    </button>
+                                  </div>
+                                  {imageFeedbackOpen.has(shot.id) && (
+                                    <div className="mt-2 space-y-1.5">
+                                      <textarea
+                                        value={shot.imageFeedback}
+                                        onChange={(e) =>
+                                          patchShot(shot.id, { imageFeedback: e.target.value })
+                                        }
+                                        rows={3}
+                                        placeholder="What should change? e.g. 'tighter framing on the bottle', 'warmer light', 'no second product in frame'..."
+                                        className="w-full bg-white/[0.03] border border-white/[0.08] rounded px-2 py-1.5 text-[10px] text-white/80 placeholder:text-white/25 outline-none resize-none font-mono leading-relaxed focus:border-amber-500/30"
+                                        autoFocus
+                                      />
+                                      <div className="flex gap-1">
+                                        <button
+                                          onClick={() => {
+                                            const text = shot.imageFeedback.trim();
+                                            if (text) void regenerateImage(shot.id, text);
+                                          }}
+                                          disabled={!shot.imageFeedback.trim()}
+                                          className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                                        >
+                                          <RefreshCw size={9} /> Regen w/ Feedback
+                                        </button>
+                                        <button
+                                          onClick={() => closeImageFeedback(shot.id)}
+                                          className="px-2 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider bg-white/[0.03] text-white/50 border border-white/[0.08] hover:bg-white/[0.06] transition-all"
+                                        >
+                                          Cancel
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -1569,36 +1658,82 @@ export default function BrollAppPage() {
                               <div className="text-xs font-medium text-white/80 truncate">{shot.title}</div>
                               <div className="text-[10px] text-white/30 font-mono truncate">{SHOT_TYPE_INFO[shot.type].label}</div>
                               {shot.videoStatus === "ready" && (
-                                <div className="flex gap-1 mt-3" onClick={(e) => e.stopPropagation()}>
-                                  <button
-                                    onClick={() =>
-                                      setVideoApproval(
-                                        shot.id,
-                                        shot.videoApproval === "approved" ? "pending" : "approved",
-                                      )
-                                    }
-                                    className={`flex-1 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider border transition-all flex items-center justify-center gap-1 ${
-                                      shot.videoApproval === "approved"
-                                        ? "bg-emerald-500/25 text-emerald-300 border-emerald-500/40"
-                                        : "bg-emerald-500/10 text-emerald-400/70 border-emerald-500/20 hover:bg-emerald-500/20"
-                                    }`}
-                                  >
-                                    <Check size={9} /> {shot.videoApproval === "approved" ? "Approved" : "Approve"}
-                                  </button>
-                                  <button
-                                    onClick={() => void regenerateVideo(shot.id)}
-                                    className="flex-1 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider bg-cyan-500/10 text-cyan-400/70 border border-cyan-500/20 hover:bg-cyan-500/20 transition-all flex items-center justify-center gap-1"
-                                  >
-                                    <RefreshCw size={9} /> Regen
-                                  </button>
-                                  <button
-                                    onClick={() => downloadVideo(shot)}
-                                    disabled={shot.videoApproval !== "approved"}
-                                    className="py-1.5 px-2 rounded text-[9px] font-mono uppercase tracking-wider bg-cyan-500/10 text-cyan-400/70 border border-cyan-500/20 hover:bg-cyan-500/20 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-                                    title={shot.videoApproval === "approved" ? "Download MP4" : "Approve first to enable download"}
-                                  >
-                                    <Download size={9} />
-                                  </button>
+                                <div onClick={(e) => e.stopPropagation()}>
+                                  <div className="flex gap-1 mt-3">
+                                    <button
+                                      onClick={() =>
+                                        setVideoApproval(
+                                          shot.id,
+                                          shot.videoApproval === "approved" ? "pending" : "approved",
+                                        )
+                                      }
+                                      className={`flex-1 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider border transition-all flex items-center justify-center gap-1 ${
+                                        shot.videoApproval === "approved"
+                                          ? "bg-emerald-500/25 text-emerald-300 border-emerald-500/40"
+                                          : "bg-emerald-500/10 text-emerald-400/70 border-emerald-500/20 hover:bg-emerald-500/20"
+                                      }`}
+                                    >
+                                      <Check size={9} /> {shot.videoApproval === "approved" ? "Approved" : "Approve"}
+                                    </button>
+                                    <button
+                                      onClick={() => void regenerateVideo(shot.id)}
+                                      className="flex-1 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider bg-cyan-500/10 text-cyan-400/70 border border-cyan-500/20 hover:bg-cyan-500/20 transition-all flex items-center justify-center gap-1"
+                                      title="Regenerate from scratch — uses the existing image as the starting frame"
+                                    >
+                                      <RefreshCw size={9} /> Regen
+                                    </button>
+                                    <button
+                                      onClick={() => toggleVideoFeedback(shot.id)}
+                                      className={`flex-1 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider border transition-all flex items-center justify-center gap-1 ${
+                                        videoFeedbackOpen.has(shot.id)
+                                          ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                                          : "bg-white/[0.04] text-white/60 border-white/[0.08] hover:bg-white/[0.08]"
+                                      }`}
+                                      title="Refine this video with written direction — your feedback is appended to the video prompt"
+                                    >
+                                      <MessageSquare size={9} /> Feedback
+                                    </button>
+                                    <button
+                                      onClick={() => downloadVideo(shot)}
+                                      disabled={shot.videoApproval !== "approved"}
+                                      className="py-1.5 px-2 rounded text-[9px] font-mono uppercase tracking-wider bg-cyan-500/10 text-cyan-400/70 border border-cyan-500/20 hover:bg-cyan-500/20 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                                      title={shot.videoApproval === "approved" ? "Download MP4" : "Approve first to enable download"}
+                                    >
+                                      <Download size={9} />
+                                    </button>
+                                  </div>
+                                  {videoFeedbackOpen.has(shot.id) && (
+                                    <div className="mt-2 space-y-1.5">
+                                      <textarea
+                                        value={shot.videoFeedback}
+                                        onChange={(e) =>
+                                          patchShot(shot.id, { videoFeedback: e.target.value })
+                                        }
+                                        rows={3}
+                                        placeholder="What should change? e.g. 'slower camera drift', 'tilt instead of pour', 'less hand motion'..."
+                                        className="w-full bg-white/[0.03] border border-white/[0.08] rounded px-2 py-1.5 text-[10px] text-white/80 placeholder:text-white/25 outline-none resize-none font-mono leading-relaxed focus:border-amber-500/30"
+                                        autoFocus
+                                      />
+                                      <div className="flex gap-1">
+                                        <button
+                                          onClick={() => {
+                                            const text = shot.videoFeedback.trim();
+                                            if (text) void regenerateVideo(shot.id, text);
+                                          }}
+                                          disabled={!shot.videoFeedback.trim()}
+                                          className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                                        >
+                                          <RefreshCw size={9} /> Regen w/ Feedback
+                                        </button>
+                                        <button
+                                          onClick={() => closeVideoFeedback(shot.id)}
+                                          className="px-2 py-1.5 rounded text-[9px] font-mono uppercase tracking-wider bg-white/[0.03] text-white/50 border border-white/[0.08] hover:bg-white/[0.06] transition-all"
+                                        >
+                                          Cancel
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
                                 </div>
                               )}
                             </div>
