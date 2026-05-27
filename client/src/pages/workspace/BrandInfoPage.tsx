@@ -159,11 +159,21 @@ function LogoBox({
         ) : (
           <ImageOff size={20} className="text-white/20" />
         )}
+        {/* Primary action on the hover overlay is now Upload, not URL-paste.
+            Clicking opens the OS file picker directly — no intermediate
+            "type the URL" step the user has to dismiss first. The URL paste
+            option lives below as a secondary fallback for power users with a
+            specific CDN URL in hand. */}
         <button
-          onClick={() => setEditing((v) => !v)}
-          className="absolute inset-x-0 bottom-0 bg-black/70 text-[9px] font-mono text-white/70 py-1 opacity-0 group-hover:opacity-100 transition-opacity uppercase tracking-wider"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+          className="absolute inset-x-0 bottom-0 bg-black/70 text-[9px] font-mono text-white/70 py-1 opacity-0 group-hover:opacity-100 transition-opacity uppercase tracking-wider flex items-center justify-center gap-1 disabled:opacity-100"
         >
-          {editing ? "Cancel" : logoUrl ? "Edit" : "Add"}
+          {uploading ? (
+            <><Loader2 size={9} className="animate-spin" /> Uploading…</>
+          ) : (
+            <><Upload size={9} /> {logoUrl ? "Change" : "Upload"}</>
+          )}
         </button>
       </div>
       <input
@@ -176,6 +186,17 @@ function LogoBox({
           if (f) void handleFile(f);
         }}
       />
+      {/* Secondary fallback: a small "paste URL instead" link that toggles
+          the URL input. Most users won't need it — pick from disk and we
+          take care of conversion + upload. */}
+      {!editing && (
+        <button
+          onClick={() => setEditing(true)}
+          className="text-[9px] font-mono text-white/30 hover:text-white/60 underline underline-offset-2 transition-colors"
+        >
+          or paste URL
+        </button>
+      )}
       {editing && (
         <div className="w-full min-w-[260px] flex flex-col gap-1.5">
           <div className="flex items-center gap-2">
@@ -195,24 +216,22 @@ function LogoBox({
             >
               Save
             </button>
+            <button
+              onClick={() => setEditing(false)}
+              className="px-2 py-1 rounded text-[10px] font-mono text-white/40 hover:text-white/70 transition-colors"
+            >
+              Cancel
+            </button>
           </div>
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            className="flex items-center justify-center gap-1.5 px-2 py-1 rounded text-[10px] font-mono uppercase tracking-wider border border-white/[0.1] bg-white/[0.03] text-white/70 hover:border-cyan-500/30 hover:text-cyan-300 disabled:opacity-50 transition-colors"
-          >
-            {uploading ? <Loader2 size={10} className="animate-spin" /> : <Upload size={10} />}
-            {uploading ? "Uploading…" : "Upload from file (SVG → PNG)"}
-          </button>
-          {uploadNote && (
-            <span className="text-[9px] font-mono text-emerald-400/80">{uploadNote}</span>
-          )}
-          {uploadError && (
-            <span className="text-[9px] font-mono text-rose-400/80">{uploadError}</span>
-          )}
         </div>
       )}
-      {errored && !editing && (
+      {uploadNote && (
+        <span className="text-[9px] font-mono text-emerald-400/80">{uploadNote}</span>
+      )}
+      {uploadError && (
+        <span className="text-[9px] font-mono text-rose-400/80 text-center max-w-[200px]">{uploadError}</span>
+      )}
+      {errored && !editing && !uploading && (
         <span className="text-[9px] font-mono text-rose-400/70">Couldn't load logo</span>
       )}
     </div>

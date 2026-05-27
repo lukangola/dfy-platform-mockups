@@ -34,6 +34,7 @@ import {
 } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
 import { downloadViaBlob } from "@/lib/download";
+import { regenImageWithFeedback } from "@/lib/imageFeedbackRegen";
 
 const STEPS = ["Setup", "Images", "Videos"];
 
@@ -488,20 +489,23 @@ export default function SingleSceneAppPage() {
     });
     try {
       if (feedbackText && target.imageUrl) {
-        const refs: string[] = [target.imageUrl];
-        if (characterImageUrl && characterImageUrl !== target.imageUrl) refs.push(characterImageUrl);
-        if (selectedProduct && promptReferencesProduct(target.imagePrompt ?? target.description)) {
-          for (const u of collectProductImageUrls()) {
-            if (!refs.includes(u)) refs.push(u);
-          }
+        // Shared image-feedback rework — same helper drives Character
+        // B-Roll and Product B-Roll. The helper prepends the source
+        // image; extraRefs order follows the model's reference priority
+        // (identity first, then product).
+        const extraRefs: string[] = [];
+        if (characterImageUrl && characterImageUrl !== target.imageUrl) {
+          extraRefs.push(characterImageUrl);
         }
-        const res = await generateImage("character_broll_image_feedback", {
-          vars: { feedback: feedbackText },
-          input: { image_urls: refs, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" },
-          model: "fal-ai/nano-banana-pro/edit",
+        if (selectedProduct && promptReferencesProduct(target.imagePrompt ?? target.description)) {
+          for (const u of collectProductImageUrls()) extraRefs.push(u);
+        }
+        const newUrl = await regenImageWithFeedback({
+          feedback: feedbackText,
+          sourceImageUrl: target.imageUrl,
+          extraRefs,
+          action: "character_broll_image_feedback",
         });
-        const newUrl = res.urls[0];
-        if (!newUrl) throw new Error("No image URL returned");
         patchShot(sceneId, { imageStatus: "ready", imageUrl: newUrl });
         return;
       }

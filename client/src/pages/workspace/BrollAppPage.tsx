@@ -26,6 +26,7 @@ import {
   type Product, type BrollShot, type BrollShotList,
   type ProductMechanism,
 } from "@/lib/api";
+import { regenImageWithFeedback } from "@/lib/imageFeedbackRegen";
 import { useBrand } from "@/contexts/BrandContext";
 import { SHOT_TYPE_INFO, type ShotType } from "@/lib/mockData";
 import { downloadViaBlob } from "@/lib/download";
@@ -494,25 +495,57 @@ export default function BrollAppPage() {
       ...(feedbackText ? { imageFeedback: feedbackText } : {}),
     });
     try {
+      // FEEDBACK PATH — feedback supplied AND a prior image exists. Route
+      // through the focused rework prompt (`prompts/broll_image_feedback.md`)
+      // via the shared `regenImageWithFeedback` helper. That helper also
+      // backs Character B-Roll + Single Scene; the difference is just the
+      // prompt file (the product variant drops character-identity rules).
+      //
+      // We used to append the feedback as a tail of the full scene prompt
+      // ("…1500 chars of camera/lighting/pose…\n\nAdditional direction
+      // from user: <feedback>"). nano-banana-pro/edit weighted the long
+      // original section much more than the short user direction at the
+      // tail, so feedback often had little visible effect. The rework
+      // prompt inverts that — feedback IS the directive, "preserve
+      // everything else" is the constraint, and the prior image is the
+      // edit source (image_urls[0]).
+      if (feedbackText && target.imageUrl) {
+        const newUrl = await regenImageWithFeedback({
+          feedback: feedbackText,
+          sourceImageUrl: target.imageUrl,
+          extraRefs: collectReferenceImagesForShot(target),
+          action: "broll_image_feedback",
+        });
+        // Bake the feedback into the stored imagePrompt for traceability +
+        // future video prompt alignment, then invalidate the stale video
+        // prompt so the next video pass rewrites from the new still.
+        const updatedPrompt = target.imagePrompt
+          ? `${target.imagePrompt}\n\nAdditional direction from user: ${feedbackText}`
+          : feedbackText;
+        patchShot(shotId, {
+          imageStatus: "ready",
+          imageUrl: newUrl,
+          imagePrompt: updatedPrompt,
+          videoPrompt: undefined,
+        });
+        return;
+      }
+
+      // FRESH-REGEN PATH — no feedback or no prior image. Either:
+      //   - user clicked the plain "regenerate" button → produce a different
+      //     take of the same shot, no prior image as ref;
+      //   - or this is the first generation attempt, so there's nothing
+      //     to edit yet.
       let basePrompt = target.imagePrompt;
       if (!basePrompt) {
         const [written] = await writeImagePrompts([target]);
         basePrompt = written ?? "";
       }
-      const finalPrompt = feedbackText
-        ? `${basePrompt}\n\nAdditional direction from user: ${feedbackText}`
-        : basePrompt;
-      // Stash the updated image prompt AND invalidate any stale video prompt
-      // for this shot. If the user changed something about the still (e.g.
-      // "make the lighting warmer", "tighter framing"), the existing video
-      // prompt was written against the OLD still and will no longer match.
-      // Clearing videoPrompt forces writeVideoPrompts to regenerate it from
-      // the new image_prompt on the next video pass.
       patchShot(shotId, {
-        imagePrompt: finalPrompt,
+        imagePrompt: basePrompt,
         ...(feedbackText ? { videoPrompt: undefined } : {}),
       });
-      const url = await callImageModel(target, finalPrompt);
+      const url = await callImageModel(target, basePrompt);
       patchShot(shotId, { imageStatus: "ready", imageUrl: url });
     } catch (err) {
       patchShot(shotId, {

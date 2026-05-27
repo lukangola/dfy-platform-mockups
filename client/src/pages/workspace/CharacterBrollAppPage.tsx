@@ -31,6 +31,7 @@ import {
 } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
 import { downloadViaBlob } from "@/lib/download";
+import { regenImageWithFeedback } from "@/lib/imageFeedbackRegen";
 
 const STEPS = ["Input", "Shot List", "Images", "Videos"];
 
@@ -945,33 +946,29 @@ export default function CharacterBrollAppPage() {
       // feedback IS the directive, and "preserve everything else from the
       // source" is the constraint.
       if (feedbackText && target.imageUrl) {
-        // image_urls order is significant for nano-banana-pro/edit:
-        //   [0] source frame to edit (the current image)
+        // extraRefs order is significant for nano-banana-pro/edit. The shared
+        // `regenImageWithFeedback` helper prepends the source frame as
+        // image_urls[0]; the order below becomes [1..n]:
         //   [1] character portrait (identity anchor)
         //   [2..] product references (when product is in frame)
-        const refs: string[] = [target.imageUrl];
-        if (characterImageUrl && characterImageUrl !== target.imageUrl) refs.push(characterImageUrl);
+        const extraRefs: string[] = [];
+        if (characterImageUrl && characterImageUrl !== target.imageUrl) {
+          extraRefs.push(characterImageUrl);
+        }
         const includeProduct =
           shouldIncludeProductRefs(target.category) ||
           promptReferencesProduct(target.imagePrompt ?? "");
         if (includeProduct) {
-          for (const u of collectProductImageUrls()) {
-            if (!refs.includes(u)) refs.push(u);
-          }
+          for (const u of collectProductImageUrls()) extraRefs.push(u);
         }
-
-        const res = await generateImage("character_broll_image_feedback", {
-          vars: { feedback: feedbackText },
-          input: {
-            image_urls: refs,
-            aspect_ratio: "9:16",
-            num_images: 1,
-            output_format: "jpeg",
-          },
-          model: "fal-ai/nano-banana-pro/edit",
+        const newUrl = await regenImageWithFeedback({
+          feedback: feedbackText,
+          sourceImageUrl: target.imageUrl,
+          extraRefs,
+          // Character variant keeps the existing prompt (face / iPhone-candid
+          // rules). Product B-Roll passes "broll_image_feedback" here.
+          action: "character_broll_image_feedback",
         });
-        const newUrl = res.urls[0];
-        if (!newUrl) throw new Error("No image URL returned");
         // Append the feedback to imagePrompt AND clear any stale videoPrompt.
         // Reason: the video prompt writer reads `image_prompt` to align motion
         // with the actual still. If we leave imagePrompt unchanged after a
