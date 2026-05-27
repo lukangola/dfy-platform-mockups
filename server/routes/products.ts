@@ -1222,6 +1222,126 @@ async function runMechanismExtraction(productId: string): Promise<void> {
   }
 }
 
+// ── Bundle classification ─────────────────────────────────────────────
+// Persisted on `research.bundle`. When a product is a BUNDLE (multiple
+// distinct components in one offering), the reference-sheet generator
+// switches to the per-component variant so each component gets its own
+// labelled hero / orthographic / opening-mechanism / dispensing /
+// content-swatch row. Single products skip this entirely — same prompt,
+// same vars as before. See `prompts/product_bundle_classify.md`.
+
+type BundleComponent = {
+  label: string;
+  packagingDescription: string;
+  openingMechanism: string;
+  dispensing: string;
+  contentAppearance: string;
+  approximateSize: string | null;
+};
+
+type BundleClassification = {
+  isBundle: boolean;
+  rationale?: string;
+  components: BundleComponent[];
+  classifiedAt: string;
+  model?: string;
+};
+
+/**
+ * Run the classifier and parse its output. Returns null on any failure
+ * (model error, parse error, missing fields) so the caller can fall
+ * through to the existing single-product code path. We never let
+ * a classifier failure break reference-sheet generation.
+ */
+async function classifyBundleSafe(args: {
+  productId: string;
+  productInfoShort: string;
+  factSheet: string;
+  researchMarkdown: string;
+  imageUrls: string[];
+}): Promise<BundleClassification | null> {
+  try {
+    const prompt = loadPrompt("product_bundle_classify", {
+      product_info_short: args.productInfoShort || "(none)",
+      fact_sheet: args.factSheet?.trim() || "(none provided)",
+      // Truncate research the same way the main prompt does so the
+      // classifier doesn't pay for a 6KB+ context every call.
+      research_markdown:
+        (args.researchMarkdown ?? "").length > 6000
+          ? (args.researchMarkdown ?? "").slice(0, 6000) + "\n\n[...truncated]"
+          : args.researchMarkdown || "(none)",
+    });
+    // Vision input: the supplied product photos. Cap at 6 so the call
+    // is fast and the model isn't drowning in angles of the same thing.
+    const imageUrls = args.imageUrls.slice(0, 6);
+    const result = await generateText({
+      systemPrompt: prompt.rendered,
+      userMessage: "Classify this product now. Return JSON only.",
+      model: prompt.config.model,
+      maxTokens: prompt.config.maxTokens ?? 3000,
+      imageUrls,
+    });
+    const parsed = extractJsonObject<{
+      isBundle?: unknown;
+      rationale?: unknown;
+      components?: unknown;
+    }>(result.text, { stopReason: result.stopReason ?? undefined, action: "product_bundle_classify" });
+
+    if (typeof parsed.isBundle !== "boolean" || !Array.isArray(parsed.components)) {
+      console.warn(
+        `[products] bundle classifier returned malformed output for ${args.productId}; treating as single`,
+      );
+      return null;
+    }
+    const components: BundleComponent[] = parsed.components
+      .filter((c): c is Record<string, unknown> => !!c && typeof c === "object")
+      .map((c) => ({
+        label: typeof c.label === "string" ? c.label.trim() : "Unknown component",
+        packagingDescription: typeof c.packagingDescription === "string" ? c.packagingDescription.trim() : "TBD",
+        openingMechanism: typeof c.openingMechanism === "string" ? c.openingMechanism.trim() : "TBD",
+        dispensing: typeof c.dispensing === "string" ? c.dispensing.trim() : "TBD",
+        contentAppearance: typeof c.contentAppearance === "string" ? c.contentAppearance.trim() : "TBD",
+        approximateSize:
+          typeof c.approximateSize === "string" && c.approximateSize.trim() ? c.approximateSize.trim() : null,
+      }));
+    return {
+      isBundle: parsed.isBundle,
+      rationale: typeof parsed.rationale === "string" ? parsed.rationale : undefined,
+      components,
+      classifiedAt: new Date().toISOString(),
+      model: result.model,
+    };
+  } catch (err) {
+    console.warn(
+      `[products] bundle classifier failed for ${args.productId} (falling back to single):`,
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
+}
+
+/**
+ * Render the components array into the human-readable Markdown block
+ * the bundle reference-sheet prompt expects. Numbered, one component
+ * per block, with every spec field labelled — this is what the
+ * downstream image model reads to know which component is which.
+ */
+function renderComponentsBreakdown(components: BundleComponent[]): string {
+  return components
+    .map((c, i) => {
+      const lines = [
+        `### Component ${i + 1} — ${c.label}`,
+        `- packagingDescription: ${c.packagingDescription}`,
+        `- openingMechanism: ${c.openingMechanism}`,
+        `- dispensing: ${c.dispensing}`,
+        `- contentAppearance: ${c.contentAppearance}`,
+        `- approximateSize: ${c.approximateSize ?? "TBD"}`,
+      ];
+      return lines.join("\n");
+    })
+    .join("\n\n");
+}
+
 /**
  * Async runner — generates the 9:16 product reference sheet via
  * fal-ai/nano-banana-pro/edit. Uses the template at
@@ -1366,11 +1486,78 @@ async function runReferenceSheetGeneration(
         ].join("\n")
       : "";
 
-    const prompt = loadPrompt("product_reference_image", {
-      product_info: productInfo,
-      hero_image_note: heroImageNote,
-      feedback_note: feedbackNote,
-    });
+    // ── Bundle detection ────────────────────────────────────────────
+    // Classify whether this offering is a single product or a bundle of
+    // multiple distinct components. The result is cached on
+    // `research.bundle` and survives feedback regens (we re-use the
+    // cached classification rather than re-paying the classifier call
+    // on every retrigger).
+    //
+    // Hard rule: if the classifier returns SINGLE (or fails), the call
+    // BELOW falls through to the existing `product_reference_image`
+    // prompt with the exact same vars and image inputs as before — so
+    // single-product output stays bit-identical to pre-bundle behaviour.
+    const cachedBundle = (research as { bundle?: BundleClassification | null }).bundle ?? null;
+    const bundleClassification: BundleClassification | null =
+      feedbackMode && cachedBundle
+        ? cachedBundle
+        : await classifyBundleSafe({
+            productId,
+            productInfoShort: [
+              `Name: ${row.name || "(unknown)"}`,
+              row.category ? `Category: ${row.category}` : "",
+              row.productUrl ? `Source URL: ${row.productUrl}` : "",
+            ].filter(Boolean).join("\n"),
+            factSheet: row.factSheet ?? "",
+            researchMarkdown,
+            imageUrls: productImages,
+          });
+    const isBundle =
+      bundleClassification?.isBundle === true &&
+      Array.isArray(bundleClassification.components) &&
+      bundleClassification.components.length >= 2;
+    if (bundleClassification) {
+      console.log(
+        `[products] bundle classification for ${productId}: isBundle=${bundleClassification.isBundle}, components=${bundleClassification.components?.length ?? 0}${
+          bundleClassification.rationale ? ` (${bundleClassification.rationale})` : ""
+        }`,
+      );
+    }
+    // Persist the classification so the UI / API can show "Bundle detected"
+    // and so feedback regens can reuse it without re-classifying.
+    if (bundleClassification && !feedbackMode) {
+      const [freshForBundle] = await db
+        .select()
+        .from(schema.products)
+        .where(eq(schema.products.id, productId))
+        .limit(1);
+      const freshResearchForBundle = (freshForBundle?.research ?? {}) as Record<string, unknown>;
+      await db
+        .update(schema.products)
+        .set({
+          research: { ...freshResearchForBundle, bundle: bundleClassification },
+        })
+        .where(eq(schema.products.id, productId));
+    }
+
+    // Pick the prompt variant + render. Single-product → identical to
+    // pre-bundle behaviour (same prompt, same vars). Bundle → the
+    // per-component variant with a `components_breakdown` block that
+    // tells the model what each component IS, how it opens, what it
+    // dispenses, what the contents look like.
+    const prompt = isBundle && bundleClassification
+      ? loadPrompt("product_reference_image_bundle", {
+          product_info: productInfo,
+          hero_image_note: heroImageNote,
+          feedback_note: feedbackNote,
+          component_count: String(bundleClassification.components.length),
+          components_breakdown: renderComponentsBreakdown(bundleClassification.components),
+        })
+      : loadPrompt("product_reference_image", {
+          product_info: productInfo,
+          hero_image_note: heroImageNote,
+          feedback_note: feedbackNote,
+        });
 
     // nano-banana-pro/edit takes the prompt + image_urls. Cap at 8 images.
     // - feedbackMode: IMAGE 1 = existing sheet (edit base), then product photos
