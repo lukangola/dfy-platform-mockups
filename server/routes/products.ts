@@ -1397,7 +1397,7 @@ async function runReferenceSheetGeneration(
     // generated reference sheet couldn't reproduce back-of-pack ingredient
     // panels or lifestyle / packaging detail. Dedupe across all sources
     // since the URL may appear in both the candidates array and a column.
-    const productImages = Array.from(
+    const rawProductImages = Array.from(
       new Set(
         [
           mainImage,
@@ -1407,6 +1407,64 @@ async function runReferenceSheetGeneration(
         ].filter((u): u is string => Boolean(u))
       )
     );
+
+    // Sanitize the URL list before handing it to fal.ai. Two concrete
+    // failure modes this catches:
+    //   1) Unrendered template URLs. Some shops embed Liquid /
+    //      Mustache variables in their product-grid `<img>` tags and
+    //      only fill them in via client-side JS. When the scraper grabs
+    //      raw HTML it sometimes pulls URLs like
+    //        https://shop.example.com/products/{{ it.product.image.thumb }}
+    //      The string can arrive either raw or percent-encoded
+    //      (`%7B%7B`/`%7D%7D`). fal.ai then 404s fetching the URL and
+    //      returns "Unprocessable Entity" for the whole request — so a
+    //      single garbage candidate kills the entire reference-sheet
+    //      generation even though every other URL was fine.
+    //   2) `http://` URLs. fal usually upgrades, but some endpoints
+    //      have rejected http:// in the past — cheap to normalise.
+    //
+    // We log dropped URLs so the next time a generation fails with
+    // 422 we can scan logs for "dropped image_url" instead of digging
+    // through a vague fal error body. Failure mode going forward is
+    // "we gave fal fewer images than expected" rather than "the whole
+    // request died on a broken candidate".
+    const sanitizeImageUrlForFal = (url: string): string | null => {
+      const trimmed = (url ?? "").trim();
+      if (!trimmed) return null;
+      // Reject unrendered template variables (raw or percent-encoded).
+      if (
+        trimmed.includes("{{") ||
+        trimmed.includes("}}") ||
+        /%7[bB]/.test(trimmed) ||
+        /%7[dD]/.test(trimmed)
+      ) {
+        return null;
+      }
+      // Upgrade http:// → https://. (Some fal endpoints have
+      // historically rejected http:// inputs.)
+      const upgraded = trimmed.replace(/^http:\/\//i, "https://");
+      // Final sanity: must look like a fully-qualified URL.
+      try {
+        const u = new URL(upgraded);
+        if (u.protocol !== "https:") return null;
+        return upgraded;
+      } catch {
+        return null;
+      }
+    };
+    const productImages: string[] = [];
+    const droppedImages: string[] = [];
+    for (const u of rawProductImages) {
+      const clean = sanitizeImageUrlForFal(u);
+      if (clean) productImages.push(clean);
+      else droppedImages.push(u);
+    }
+    if (droppedImages.length > 0) {
+      console.log(
+        `[products] reference sheet for ${productId}: dropped ${droppedImages.length} unusable image_url(s):`,
+        droppedImages,
+      );
+    }
 
     if (productImages.length === 0) {
       await db
