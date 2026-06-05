@@ -1355,6 +1355,14 @@ async function runReferenceSheetGeneration(
 ): Promise<void> {
   const started = Date.now();
   const feedback = opts.feedback?.trim() || undefined;
+  // Debug-state hoisted above the try so the catch can persist what we
+  // actually sent to fal — previous failed-generation rows only stored
+  // `{ productId }` in inputs, which made diagnosing "Not Found" /
+  // "Unprocessable Entity" failures basically impossible because we
+  // couldn't tell which image_urls had been fed to the model.
+  let debugImageUrls: string[] = [];
+  let debugDroppedImages: string[] = [];
+  let debugBundleUsed: { isBundle: boolean; components: number } | null = null;
   try {
     const [row] = await db
       .select()
@@ -1459,6 +1467,7 @@ async function runReferenceSheetGeneration(
       if (clean) productImages.push(clean);
       else droppedImages.push(u);
     }
+    debugDroppedImages = droppedImages;
     if (droppedImages.length > 0) {
       console.log(
         `[products] reference sheet for ${productId}: dropped ${droppedImages.length} unusable image_url(s):`,
@@ -1574,6 +1583,9 @@ async function runReferenceSheetGeneration(
       bundleClassification?.isBundle === true &&
       Array.isArray(bundleClassification.components) &&
       bundleClassification.components.length >= 2;
+    debugBundleUsed = bundleClassification
+      ? { isBundle, components: bundleClassification.components?.length ?? 0 }
+      : null;
     if (bundleClassification) {
       console.log(
         `[products] bundle classification for ${productId}: isBundle=${bundleClassification.isBundle}, components=${bundleClassification.components?.length ?? 0}${
@@ -1625,6 +1637,7 @@ async function runReferenceSheetGeneration(
         ? [existingSheetUrl, ...productImages]
         : [templateUrl, ...productImages]
     ).slice(0, 8);
+    debugImageUrls = imageUrls;
 
     const result = await generateImage({
       model: "fal-ai/nano-banana-pro/edit",
@@ -1684,21 +1697,53 @@ async function runReferenceSheetGeneration(
     // Chain mechanism extraction — uses the new reference sheet + product photo.
     void runMechanismExtraction(productId);
   } catch (err) {
-    // fal-ai errors attach a `.body.detail` array with the real validation
-    // message (e.g. "image_urls[3] could not be fetched", "too many images").
-    // Extract it so the user and logs see the actual cause, not "Unprocessable Entity".
-    const falDetail = (err as { body?: { detail?: unknown } })?.body?.detail;
-    const falDetailStr = falDetail
-      ? typeof falDetail === "string"
-        ? falDetail
-        : JSON.stringify(falDetail)
-      : null;
+    // fal-ai errors carry diagnostic info in several places depending on
+    // the failure mode. We dig into all of them so the persisted error
+    // tells the operator what actually went wrong instead of just
+    // "Unprocessable Entity" or "Not Found":
+    //
+    //   - body.detail              → validation messages (e.g. "image_urls[3] could not be fetched")
+    //   - body                     → some fal subdomains return the body as a string
+    //   - status                   → HTTP status (422 / 404 / 500 / etc.)
+    //   - name                     → error class name (ApiError / ValidationError)
+    //
+    // We also persist the full input the runner sent — image_urls (which
+    // 90% of failures involve), URLs we dropped during sanitization, and
+    // the bundle-classifier verdict — so the generations row is enough
+    // by itself to reproduce or pinpoint the failure without re-running
+    // the pipeline.
+    const errObj = (err ?? {}) as {
+      status?: number;
+      body?: unknown;
+      message?: string;
+      name?: string;
+    };
+    let falDetailStr: string | null = null;
+    if (errObj.body && typeof errObj.body === "object") {
+      const bod = errObj.body as { detail?: unknown };
+      if (typeof bod.detail === "string") {
+        falDetailStr = bod.detail;
+      } else if (bod.detail !== undefined) {
+        try { falDetailStr = JSON.stringify(bod.detail); } catch { /* ignore */ }
+      }
+    } else if (typeof errObj.body === "string" && errObj.body.trim()) {
+      falDetailStr = errObj.body;
+    }
     const baseMsg = err instanceof Error ? err.message : String(err);
-    const msg = falDetailStr ? `${baseMsg} — ${falDetailStr}` : baseMsg;
+    const statusPrefix = errObj.status ? `HTTP ${errObj.status}: ` : "";
+    const msg = falDetailStr
+      ? `${statusPrefix}${baseMsg} — ${falDetailStr}`
+      : `${statusPrefix}${baseMsg}`;
     console.error(
       `[products] reference sheet generation failed for ${productId}:`,
       err,
-      falDetailStr ? `\n  fal detail: ${falDetailStr}` : "",
+      `\n  status=${errObj.status ?? "(none)"}`,
+      `\n  name=${errObj.name ?? "(none)"}`,
+      `\n  body=${typeof errObj.body === "string" ? errObj.body.slice(0, 300) : JSON.stringify(errObj.body ?? null).slice(0, 300)}`,
+      `\n  image_urls fed to fal (${debugImageUrls.length}):`,
+      debugImageUrls,
+      `\n  image_urls dropped at sanitize (${debugDroppedImages.length}):`,
+      debugDroppedImages,
     );
     const [row] = await db
       .select()
@@ -1727,8 +1772,28 @@ async function runReferenceSheetGeneration(
     await db.insert(schema.generations).values({
       action: "product_reference_image",
       kind: "image",
-      inputs: { productId },
-      output: null,
+      inputs: {
+        productId,
+        // The actual list of URLs we sent to fal — pinpoints which image
+        // the model couldn't fetch / validate when something fails server-side.
+        productImages: debugImageUrls,
+        // What sanitisation already removed before fal was called.
+        droppedImages: debugDroppedImages,
+        // Whether we routed through the bundle prompt or the single-product
+        // prompt — affects the prompt vars + the components_breakdown var.
+        bundleUsed: debugBundleUsed,
+        feedback: feedback ?? null,
+      },
+      output: {
+        // Stash the raw error shape so future debugging has the full
+        // fal response, not just the stringified message.
+        errorDetail: {
+          status: errObj.status ?? null,
+          name: errObj.name ?? null,
+          message: errObj.message ?? null,
+          body: errObj.body ?? null,
+        },
+      },
       model: "fal-ai/nano-banana-pro/edit",
       error: msg,
       durationMs: Date.now() - started,
