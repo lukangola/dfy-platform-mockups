@@ -21,7 +21,7 @@ import { listiclesRouter } from "./routes/listicles.js";
 import { teamRouter } from "./routes/team.js";
 import { isNull } from "drizzle-orm";
 import { messageTestingRouter } from "./routes/messageTesting.js";
-import { productsRouter } from "./routes/products.js";
+import { productsRouter, sweepOrphanedMechanismExtractions } from "./routes/products.js";
 import { staticAdsRouter } from "./routes/staticAds.js";
 import { staticAdsIterationsRouter } from "./routes/staticAdsIterations.js";
 import { runDeconstruction, runNicheClassification, staticAdReferencesRouter } from "./routes/staticAdReferences.js";
@@ -305,6 +305,29 @@ async function startServer() {
       }
     } catch (err) {
       console.error("[characters] boot ingest failed:", err);
+    }
+  })();
+
+  // Mechanism-extraction rescue sweep. The reference-sheet → mechanism
+  // chain is fire-and-forget (`void runMechanismExtraction(...)`), so a
+  // server restart between sheet completion and mechanism start leaves
+  // the product orphaned (sheet=complete, mechanism=null). Manual rescue
+  // scripts that write referenceSheetUrl directly create the same shape.
+  // This sweep resets any "running" status (those are crash orphans from
+  // the previous process) and re-triggers extraction for every product
+  // whose sheet is complete but whose mechanism is missing.
+  // Idempotent: products with a complete mechanism are skipped.
+  void (async () => {
+    try {
+      const result = await sweepOrphanedMechanismExtractions();
+      if (result.resetRunning > 0) {
+        console.log(`[products] mechanism sweep: reset ${result.resetRunning} stuck "running" status(es) from crash orphans`);
+      }
+      if (result.triggered > 0) {
+        console.log(`[products] mechanism sweep: triggered extraction for ${result.triggered} orphan(s); ${result.skipped} skipped`);
+      }
+    } catch (err) {
+      console.error("[products] mechanism sweep failed (non-fatal):", err);
     }
   })();
 }

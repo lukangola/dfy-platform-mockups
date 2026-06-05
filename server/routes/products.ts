@@ -104,6 +104,12 @@ productsRouter.get("/:id", async (req: Request, res: Response) => {
       .where(eq(schema.products.id, req.params.id))
       .limit(1);
     if (!row) return sendError(res, 404, "Product not found");
+    // Auto-heal: if this product has a reference sheet but no mechanism
+    // extraction (orphaned by a crashed chain runner, a manual rescue, or
+    // a failed extractor), kick the extractor off in the background.
+    // Idempotent — re-running while extraction is in flight is a no-op.
+    const research = (row.research ?? {}) as Record<string, unknown>;
+    maybeTriggerMechanismExtraction(row.id, research, row.productImageUrl);
     res.json({ product: row });
   } catch (err) {
     console.error("[products] get failed:", err);
@@ -1171,6 +1177,169 @@ async function extractMechanismSync(
   });
 
   return mechanism;
+}
+
+/**
+ * Inspect a product's research blob and decide whether the mechanism
+ * extractor needs to be (re-)triggered. Fire-and-forget.
+ *
+ * Why this exists:
+ *   The happy path is runReferenceSheetGeneration → runMechanismExtraction
+ *   chained in-process. But that chain can be broken several ways:
+ *     (a) Server crash / restart between sheet completion and mechanism start
+ *         (the chained call is `void runMechanismExtraction(...)` — fire-and-
+ *         forget — so a redeploy at the wrong moment leaves an orphan).
+ *     (b) Manual rescue scripts that write `referenceSheetUrl` straight to
+ *         the row without invoking the runner.
+ *     (c) Mechanism extraction itself failing on a transient fal hiccup
+ *         (Claude vision call dropped, JSON parse failed, etc.).
+ *   Without auto-heal, the product is stuck in "sheet but no mechanism"
+ *   state until a human notices. The single-product GET handler calls this
+ *   so any orphan heals the moment the user opens its workspace; the
+ *   boot-time sweep in server/index.ts catches the rest.
+ *
+ * Idempotent: re-running while an extraction is already in flight is a
+ * no-op (we re-read inside the IIFE before flipping status to "running").
+ *
+ * Returns true if extraction was kicked off (for logging at the call site).
+ */
+export function maybeTriggerMechanismExtraction(
+  productId: string,
+  research: Record<string, unknown>,
+  productImageUrl: string | null | undefined,
+): boolean {
+  if (!productImageUrl) return false;
+  if ((research as { referenceSheetStatus?: string }).referenceSheetStatus !== "complete") return false;
+  if (!(research as { referenceSheetUrl?: string }).referenceSheetUrl) return false;
+  const mech = (research as { mechanism?: unknown }).mechanism;
+  const status = (research as { mechanismStatus?: string }).mechanismStatus;
+  const haveMech = Array.isArray(mech) && mech.length > 0;
+  // Already healthy — done.
+  if (status === "complete" && haveMech) return false;
+  // Currently in-flight — leave it alone (the running extractor will finish
+  // or fail; the next GET after that will heal a failure).
+  if (status === "running") return false;
+  // Anything else (pending, failed, undefined, or "complete" with empty
+  // mechanism) is fair game for a re-trigger.
+  void (async () => {
+    try {
+      // Re-read fresh to handle the race where two GETs both see "pending"
+      // and both try to trigger — the second one will see "running" here
+      // and bail.
+      const [row] = await db
+        .select()
+        .from(schema.products)
+        .where(eq(schema.products.id, productId))
+        .limit(1);
+      if (!row) return;
+      const fresh = (row.research ?? {}) as Record<string, unknown>;
+      const freshStatus = (fresh as { mechanismStatus?: string }).mechanismStatus;
+      const freshMech = (fresh as { mechanism?: unknown }).mechanism;
+      if (freshStatus === "running") return;
+      if (freshStatus === "complete" && Array.isArray(freshMech) && freshMech.length > 0) return;
+      console.log(
+        `[products] auto-healing mechanism for ${productId} (referenceSheet=complete, mechanismStatus=${freshStatus ?? "(none)"})`,
+      );
+      await db
+        .update(schema.products)
+        .set({
+          research: { ...fresh, mechanismStatus: "running", mechanismError: null },
+        })
+        .where(eq(schema.products.id, productId));
+      await runMechanismExtraction(productId);
+    } catch (err) {
+      console.error(`[products] auto-heal trigger failed for ${productId}:`, err);
+    }
+  })();
+  return true;
+}
+
+/**
+ * Boot-time sweep: find every product that has a complete reference sheet
+ * but no mechanism and trigger extraction. Runs once at server startup.
+ *
+ * Step 1 — reset any "running" status to "pending". Anything in "running"
+ *   at boot time was orphaned by the previous process's exit; the in-flight
+ *   extractor died with the server. Resetting unblocks step 2.
+ * Step 2 — scan for orphans (referenceSheetStatus=complete + no mechanism)
+ *   and trigger extraction for each, throttled so we don't hammer fal /
+ *   Anthropic at startup.
+ *
+ * Idempotent: products with mechanism already extracted are skipped; the
+ * helper itself is idempotent re: in-flight extractions.
+ */
+export async function sweepOrphanedMechanismExtractions(): Promise<{
+  resetRunning: number;
+  triggered: number;
+  skipped: number;
+}> {
+  // Step 1: reset "running" → "pending" for crash-orphans.
+  let resetRunning = 0;
+  try {
+    const stuck = await db
+      .select()
+      .from(schema.products);
+    for (const p of stuck) {
+      const research = (p.research ?? {}) as Record<string, unknown>;
+      if ((research as { mechanismStatus?: string }).mechanismStatus === "running") {
+        await db
+          .update(schema.products)
+          .set({
+            research: { ...research, mechanismStatus: "pending", mechanismError: null },
+          })
+          .where(eq(schema.products.id, p.id));
+        resetRunning++;
+      }
+    }
+  } catch (err) {
+    console.error("[products] mechanism sweep: reset stage failed:", err);
+  }
+
+  // Step 2: trigger extraction for orphans, throttled to avoid a thundering
+  // herd against fal / Anthropic on boot.
+  let triggered = 0;
+  let skipped = 0;
+  try {
+    const all = await db.select().from(schema.products);
+    const orphans = all.filter((p) => {
+      const r = (p.research ?? {}) as Record<string, unknown>;
+      if ((r as { referenceSheetStatus?: string }).referenceSheetStatus !== "complete") return false;
+      if (!(r as { referenceSheetUrl?: string }).referenceSheetUrl) return false;
+      if (!p.productImageUrl) return false;
+      const mech = (r as { mechanism?: unknown }).mechanism;
+      const status = (r as { mechanismStatus?: string }).mechanismStatus;
+      if (status === "complete" && Array.isArray(mech) && mech.length > 0) return false;
+      return true;
+    });
+    if (orphans.length === 0) return { resetRunning, triggered: 0, skipped: 0 };
+    console.log(`[products] mechanism sweep: ${orphans.length} orphan(s) to heal`);
+    // Run sequentially with a small inter-trigger delay — extractor itself
+    // is mostly Anthropic-bound and a single product takes ~30s. No need to
+    // parallelise at boot.
+    for (const p of orphans) {
+      const research = (p.research ?? {}) as Record<string, unknown>;
+      try {
+        await db
+          .update(schema.products)
+          .set({
+            research: { ...research, mechanismStatus: "running", mechanismError: null },
+          })
+          .where(eq(schema.products.id, p.id));
+        // Fire-and-forget per product — the sweep returns immediately and
+        // each extraction completes (or fails) in the background. This
+        // matches the fetch-time auto-heal pattern: the user can refresh
+        // and see status flipping as extractions finish.
+        void runMechanismExtraction(p.id);
+        triggered++;
+      } catch (err) {
+        console.error(`[products] mechanism sweep: trigger failed for ${p.id}:`, err);
+        skipped++;
+      }
+    }
+  } catch (err) {
+    console.error("[products] mechanism sweep: scan stage failed:", err);
+  }
+  return { resetRunning, triggered, skipped };
 }
 
 /**
