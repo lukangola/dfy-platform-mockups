@@ -1177,7 +1177,7 @@ async function extractMechanismSync(
  * Async runner — updates research.mechanismStatus so the UI polls can show
  * "running" / "complete" / "failed".
  */
-async function runMechanismExtraction(productId: string): Promise<void> {
+export async function runMechanismExtraction(productId: string): Promise<void> {
   try {
     const [row] = await db
       .select()
