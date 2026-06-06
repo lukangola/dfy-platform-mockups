@@ -61,6 +61,7 @@ You are rewriting the source copy as-is — keeping its structure, its rhythm, i
 
 ## ANTI-PATTERNS (FORBIDDEN)
 
+- ❌ **Changing numeric literals.** If the source contains specific numbers — a listicle count ("9 Reasons"), a percentage ("47% Rabatt"), a count of customers ("8,000+"), a price ("$54.99"), a serving size ("5 g"), a guarantee window ("30 Tage"), a section index ("06"), or a star count ("4.8") — they must appear in the rewrite EXACTLY as in the source. Do NOT rephrase "9 Reasons" into "7 Gründe" or any other count. Do NOT round or swap them. Numbers are the one thing the rewriter is forbidden to invent. (Exception: explicit offer details supplied in the `{{offer}}` input below — those take precedence over the source's numbers because they belong to the new product, not the source.)
 - ❌ **Announcing the classification.** Never write "This appears to be a UGC script" or "I've identified this as a listicle". Just rewrite.
 - ❌ **Forcing the listicle format** (numbered "13 Reasons Why..." with hook line + TLDR + closing offer block) onto a source that obviously wasn't a listicle. The listicle format only applies when the source was already a listicle.
 - ❌ Adding a "closing offer block", a "Subject:" line, an `[ACT 1]` heading, etc. when the inferred content type doesn't call for it.
