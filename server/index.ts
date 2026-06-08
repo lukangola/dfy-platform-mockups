@@ -14,7 +14,7 @@ import { backfillCharacterSeedancePrep, prepareCharacterForSeedance } from "./li
 import { ingestStaticAdLibrary } from "./lib/staticAdIngest.js";
 import { authRouter } from "./routes/auth.js";
 import { brandAssetsRouter } from "./routes/brandAssets.js";
-import { brandsRouter } from "./routes/brands.js";
+import { brandsRouter, runBrandResearch } from "./routes/brands.js";
 import { charactersRouter } from "./routes/characters.js";
 import { generateRouter } from "./routes/generate.js";
 import { listiclesRouter } from "./routes/listicles.js";
@@ -328,6 +328,45 @@ async function startServer() {
       }
     } catch (err) {
       console.error("[products] mechanism sweep failed (non-fatal):", err);
+    }
+  })();
+
+  // Brand-guidelines backfill. Every brand whose row has a brandUrl but
+  // no guidelinesMarkdown (i.e. predates the migration from the old
+  // brand_extract JSON to the new Brand Guidelines Generator skill) gets
+  // its identity regenerated as a markdown style guide. Runs in the
+  // background after the listener is up — first request to BrandInfoPage
+  // will see "researching" and poll until the markdown lands.
+  //
+  // Idempotent: brands that already have a markdown are skipped. Errors
+  // per brand are logged but don't block the others; the affected row
+  // just keeps researchStatus=failed and the user can retry from the UI.
+  void (async () => {
+    try {
+      const candidates = await db
+        .select({ id: schema.brands.id, name: schema.brands.name, brandUrl: schema.brands.brandUrl, guidelinesMarkdown: schema.brands.guidelinesMarkdown })
+        .from(schema.brands);
+      const orphans = candidates.filter((b) =>
+        b.brandUrl != null && b.brandUrl.trim().length > 0 &&
+        (b.guidelinesMarkdown == null || b.guidelinesMarkdown.trim().length === 0),
+      );
+      if (orphans.length === 0) return;
+      console.log(`[brands] backfill: ${orphans.length} brand(s) need guidelines markdown — kicking off`);
+      // Sequential to avoid running N concurrent web_search / web_fetch
+      // tool sessions against Anthropic at once. Each extraction is
+      // ~30-90 seconds; running 5 brands sequentially is still well
+      // under any practical boot time.
+      for (const b of orphans) {
+        try {
+          console.log(`[brands] backfill: generating guidelines for "${b.name}" (${b.id})`);
+          await runBrandResearch(b.id, b.brandUrl!);
+        } catch (err) {
+          console.error(`[brands] backfill failed for ${b.id} (non-fatal):`, err);
+        }
+      }
+      console.log(`[brands] backfill: done`);
+    } catch (err) {
+      console.error("[brands] backfill sweep failed (non-fatal):", err);
     }
   })();
 }

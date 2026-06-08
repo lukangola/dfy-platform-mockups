@@ -78,6 +78,13 @@
       "when": 1779294421259,
       "tag": "0010_curly_demogoblin",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1780775789154,
+      "tag": "0011_add_guidelines_markdown",
+      "breakpoints": true
     }
   ]
 }

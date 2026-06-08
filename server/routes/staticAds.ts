@@ -29,11 +29,23 @@ export const staticAdsRouter: Router = Router();
 type IncomingBrand = {
   name?: string;
   websiteUrl?: string;
-  description?: string;
-  tone?: string;
-  colorPalette?: Array<{ name?: string; hex?: string; usage?: string }>;
-  fonts?: Array<{ name?: string; usage?: string; weight?: string }>;
   logoUrl?: string | null;
+  /**
+   * The single source of truth — the brand's full 8-section guidelines
+   * markdown (from prompts/brand_guidelines.md). When present, the
+   * markdown is injected directly into the static-ad image prompt as
+   * the brand context block. The legacy structured fields below are
+   * a fallback for brands that haven't been re-extracted yet.
+   */
+  guidelinesMarkdown?: string | null;
+  /** @deprecated legacy fields — used only when guidelinesMarkdown is missing. */
+  description?: string;
+  /** @deprecated */
+  tone?: string;
+  /** @deprecated */
+  colorPalette?: Array<{ name?: string; hex?: string; usage?: string }>;
+  /** @deprecated */
+  fonts?: Array<{ name?: string; usage?: string; weight?: string }>;
 };
 
 type RecreateBody = {
@@ -118,6 +130,23 @@ function formatBrand(brand: IncomingBrand | null | undefined): string {
   if (!brand || !brand.name) {
     return "(No brand identity provided — fall back to the tone/style implied by the reference ad.)";
   }
+  // Preferred path: the brand has its full guidelines markdown. The
+  // model gets the entire 8-section style guide as context — color
+  // palette + typography + voice + do's & don'ts in one block. This is
+  // strictly more information than the old hand-formatted snippet.
+  if (typeof brand.guidelinesMarkdown === "string" && brand.guidelinesMarkdown.trim().length > 0) {
+    return [
+      `Name: ${brand.name}`,
+      brand.websiteUrl ? `Website: ${brand.websiteUrl}` : null,
+      "",
+      "Brand Guidelines (single source of truth — match the color palette, typography, and voice exactly):",
+      "",
+      brand.guidelinesMarkdown.trim(),
+    ].filter((l) => l !== null).join("\n");
+  }
+  // Fallback for legacy brands that haven't been re-extracted yet.
+  // Identical to the original hand-formatted shape — keeps existing
+  // workspaces functional during the migration window.
   const parts: string[] = [];
   parts.push(`Name: ${brand.name}`);
   if (brand.websiteUrl) parts.push(`Website: ${brand.websiteUrl}`);

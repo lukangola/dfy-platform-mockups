@@ -107,15 +107,22 @@ export default function StaticAdsAppPage() {
   const { activeBrand, activeBrandId } = useBrand();
   const brand = useMemo(() => {
     if (!activeBrand) return null;
+    // Prefer the new guidelines markdown — it carries the full brand
+    // identity (palette, typography, voice, do's & don'ts) in one
+    // block. Legacy structured fields (still on activeBrand.research
+    // until the boot-time backfill regenerates each brand) are passed
+    // through as a fallback so workspaces don't break mid-migration.
     const r = activeBrand.research ?? {};
     return {
       name: activeBrand.name,
       websiteUrl: r.websiteUrl ?? activeBrand.brandUrl ?? "",
+      logoUrl: activeBrand.logoUrl ?? r.logoUrl ?? null,
+      guidelinesMarkdown: activeBrand.guidelinesMarkdown ?? null,
+      // Legacy fallback — server uses these only when guidelinesMarkdown is empty.
       description: r.description ?? "",
       tone: r.tone ?? "",
       colorPalette: r.colorPalette ?? [],
       fonts: r.fonts ?? [],
-      logoUrl: activeBrand.logoUrl ?? r.logoUrl ?? null,
     };
   }, [activeBrand]);
 

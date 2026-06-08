@@ -19,6 +19,7 @@
  *   POST   /api/listicles/:id/render-html                — render the full HTML
  *   POST   /api/listicles/:id/deploy                     — push to LanderLab
  */
+import https from "node:https";
 import { and, asc, eq } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
@@ -80,6 +81,48 @@ function stripBoilerplate(text: string): string {
     .replace(/If there is no product image needed[^.]*\./gi, "");
 }
 
+/**
+ * Pull every "N. ..." numbered section heading number out of rendered
+ * listicle HTML. Tolerant of various heading shapes the model might use:
+ *
+ *   <h2>1. Headline...</h2>
+ *   <h2 class="x">  7. Headline</h2>
+ *   <h2><span>11</span>. Headline</h2>  (rare)
+ *
+ * The regex matches a digit-run at the start of any h2/h3 content, after
+ * stripping inner tags. We dedupe so an accidental double-render counts
+ * as one. Returns the section numbers in document order.
+ */
+function extractRenderedSectionNumbers(html: string): number[] {
+  const out: number[] = [];
+  const re = /<h2[^>]*>([\s\S]*?)<\/h2>/gi;
+  const seen = new Set<number>();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const inner = (m[1] ?? "").replace(/<[^>]+>/g, "").trim();
+    const numMatch = inner.match(/^\s*(\d{1,2})\b/);
+    if (!numMatch) continue;
+    const n = parseInt(numMatch[1] ?? "0", 10);
+    if (n > 0 && n <= 30 && !seen.has(n)) {
+      out.push(n);
+      seen.add(n);
+    }
+  }
+  return out;
+}
+
+/**
+ * Given the expected section count (e.g. 11) and the numbers we found in
+ * the rendered HTML, return the missing numbers (e.g. [7, 11]). Detects
+ * both "skipped middle" and "missing end".
+ */
+function computeMissingSections(expected: number, rendered: number[]): number[] {
+  const have = new Set(rendered);
+  const missing: number[] = [];
+  for (let i = 1; i <= expected; i++) if (!have.has(i)) missing.push(i);
+  return missing;
+}
+
 function imagePromptMentionsProduct(text: string, productName: string | null | undefined): boolean {
   if (!text) return false;
 
@@ -114,15 +157,43 @@ function imagePromptMentionsProduct(text: string, productName: string | null | u
     if (new RegExp(`\\b${phrasePattern}\\b`, "i").test(scanText)) return true;
   }
 
-  // Generic packaging nouns, word-boundary matched. Curated to avoid false
-  // positives from common English words.
+  // Generic packaging nouns + product-category nouns. When the prompt
+  // references any of these — even without the brand name — the section
+  // is clearly about a consumable product and the model would otherwise
+  // invent a competing brand (the AURA-BOTANICS-style hallucination
+  // bug). Attaching the product reference image forces the model to
+  // use the actual product instead.
+  //
+  // Curated to avoid false positives from common English words. The
+  // category list covers skincare (cleanser/serum/cream/oil/etc.),
+  // supplements (powder/capsule/gummy/scoop), beverages (drink/shake/
+  // latte/blend), and food (bar/cookie/chew). Add more as new product
+  // categories surface.
   const generic = [
+    // Packaging nouns
     "the product", "this product", "the packaging", "product packaging",
     "the pouch", "the bag", "the bottle", "the jar", "the sachet",
     "the container", "the label", "the dropper", "the nozzle", "the wrapper",
+    "the tube", "the can", "the box", "the stick", "the tin", "the pump",
     "supplement bag", "powder bag", "powder pouch",
+    // Skincare category nouns — "the gel cleanser" → product is the cleanser.
+    "the cleanser", "the gel cleanser", "the foaming cleanser",
+    "the serum", "the moisturizer", "the moisturiser", "the cream",
+    "the gel cream", "the face oil", "the body oil", "the toner", "the mist",
+    "the spray", "the lotion", "the balm", "the mask", "the patches",
+    "the sunscreen", "the spf", "the retinol", "the salicylic", "the eye cream",
+    "the kit", "the routine", "the 3-step", "the three-step", "the system",
+    // Supplements / wellness
+    "the supplement", "the capsule", "the tablet", "the gummy", "the gummies",
+    "the scoop", "the powder mix", "the powder blend", "the protein", "the collagen",
+    // Beverages / functional drinks
+    "the drink", "the shake", "the latte", "the blend", "the brew", "the elixir",
+    // Food / snack
+    "the bar", "the cookie", "the chew", "the chews",
+    // Generic action that requires a product
+    "applying the", "applying it", "using the", "scoop of",
   ];
-  if (generic.some((g) => new RegExp(`\\b${g}\\b`, "i").test(scanText))) return true;
+  if (generic.some((g) => new RegExp(`\\b${g.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(scanText))) return true;
 
   // Marker tokens used in master prompts (least-ambiguous fallback).
   if (/@element\d/i.test(scanText) || /@image[3-9]/i.test(scanText)) return true;
@@ -375,7 +446,19 @@ listiclesRouter.post("/:id/analyze-ad", async (req: Request, res: Response) => {
     // 3) Load brand + product context for the prompt.
     const [product] = await db.select().from(schema.products).where(eq(schema.products.id, row.productId)).limit(1);
     const [brand] = await db.select().from(schema.brands).where(eq(schema.brands.id, row.brandId)).limit(1);
-    const brandDescription = ((brand?.research ?? {}) as { description?: string }).description ?? "";
+    // Brand description for the angle extractor: prefer pulling the
+    // Brand Overview section out of the new guidelines markdown
+    // (single source of truth). Falls back to the legacy
+    // research.description for brands not yet re-extracted.
+    const brandDescription = brand?.guidelinesMarkdown
+      ? brand.guidelinesMarkdown
+          .split(/^## 2\./m)[0]
+          ?.replace(/^# [^\n]*\n/, "")
+          .replace(/^>.*$/gm, "")
+          .trim()
+          .slice(0, 800)
+        ?? ""
+      : ((brand?.research ?? {}) as { description?: string }).description ?? "";
 
     // 4) Extract angle via Claude. For static ads we attach the image
     //    URL so Claude vision can read it. For video we just hand over
@@ -478,20 +561,72 @@ listiclesRouter.post("/:id/extract-offer", async (req: Request, res: Response) =
     // discount across all variants (Math.round((1 - price/compare) * 100)),
     // and feed that as a verified fact to the offer_extract prompt — so
     // Claude can't invent a different number.
+    //
+    // We ALSO capture the maxDiscount in a separate variable so that AFTER
+    // the offer_extract call we can override Claude's output if it ignored
+    // the verified number. Belt-and-suspenders: the prompt asks Claude to
+    // use it, and we double-check the JSON he returned, replacing any
+    // smaller number with the verified MAX.
     let pricingFacts = "";
+    let verifiedMaxDiscount = 0;
+    // Node's built-in fetch() is undici-based and sends a fingerprint
+    // (Accept-Encoding: br/gzip + others) that Shopify's geo-routing
+    // uses to serve a different storefront — for Blume specifically
+    // it returns the US store JSON (no compare_at_price) instead of
+    // the canonical international store ($75 / $132 → 43% off).
+    // `https.request` doesn't trigger that routing, so we use it for
+    // the .json fetch. Same data, same TLS, just consistent storefront.
+    const fetchShopifyJsonRaw = (url: string): Promise<unknown> =>
+      new Promise((resolve, reject) => {
+        try {
+          const u = new URL(url);
+          const req = https.request({
+            method: "GET",
+            hostname: u.hostname,
+            path: u.pathname + u.search,
+            timeout: 8000,
+            headers: { "User-Agent": "Mozilla/5.0 (compatible; InanaBot/1.0)", Accept: "*/*" },
+          }, (res) => {
+            let body = "";
+            res.on("data", (c) => { body += c; });
+            res.on("end", () => {
+              try { resolve(JSON.parse(body)); }
+              catch (e) { reject(e); }
+            });
+          });
+          req.on("error", reject);
+          req.on("timeout", () => { req.destroy(new Error("shopify json fetch timeout")); });
+          req.end();
+        } catch (e) { reject(e); }
+      });
     try {
       const m = row.destinationUrl.match(/^(.+\/products\/[^/?#]+)/);
       if (m) {
         const jsonUrl = m[1] + ".json";
-        const jr = await fetch(jsonUrl, {
-          headers: { "User-Agent": "Mozilla/5.0 (compatible; InanaBot/1.0)" },
-        });
-        if (jr.ok) {
-          const productJson = (await jr.json()) as {
-            product?: {
-              variants?: { title?: string; price?: string | number; compare_at_price?: string | number | null }[];
-            };
+        // NOTE: deliberately uses fetchShopifyJsonRaw (https.request),
+        // NOT global fetch(). Node's undici-based fetch triggers
+        // Shopify's geo-routing and serves the US storefront for many
+        // CA/EU brands — that storefront often has no compare_at_price
+        // even when the canonical international storefront does (Blume
+        // is the canonical example: US returns $66.95 / no discount,
+        // international returns $75 / $132 = 43% off).
+        let productJson: {
+          product?: {
+            variants?: { title?: string; price?: string | number; compare_at_price?: string | number | null }[];
           };
+        } = {};
+        try {
+          productJson = await fetchShopifyJsonRaw(jsonUrl) as typeof productJson;
+        } catch (rawErr) {
+          // Fallback to fetch if the raw https request fails for any
+          // reason (cert, DNS) — at least we get SOMETHING.
+          console.warn(`[listicles] raw https fetch failed for ${jsonUrl}, falling back to fetch():`, rawErr);
+          const jr = await fetch(jsonUrl, {
+            headers: { "User-Agent": "Mozilla/5.0 (compatible; InanaBot/1.0)" },
+          });
+          if (jr.ok) productJson = await jr.json() as typeof productJson;
+        }
+        if (productJson?.product) {
           const variants = productJson.product?.variants ?? [];
           const rows: string[] = [];
           let maxDiscount = 0;
@@ -508,6 +643,7 @@ listiclesRouter.post("/:id/extract-offer", async (req: Request, res: Response) =
             rows.push(`  - ${v.title ?? "(untitled)"}: price=${price}, compare_at=${compare || "(none)"}, discount=${discount}%`);
           }
           if (variants.length > 0) {
+            verifiedMaxDiscount = maxDiscount;
             pricingFacts =
               `\n\n## VERIFIED SHOPIFY PRICING (canonical — use this, not your interpretation of the HTML)\n\n` +
               `Variants:\n${rows.join("\n")}\n\n` +
@@ -546,6 +682,38 @@ listiclesRouter.post("/:id/extract-offer", async (req: Request, res: Response) =
       // with an empty offer object. Swallow + leave parsed = {}.
     }
 
+    // POST-EXTRACT OVERRIDE: when the Shopify .json fact-check found a
+    // verified max discount, force discount_label + raw_offer_summary to
+    // reflect it. Some Claude runs ignore the prompt's "use exactly N%"
+    // instruction and pick a smaller variant-specific number out of the
+    // raw HTML — this guarantees we always advertise the MAX possible
+    // discount (which is what every downstream tool — announcement bar,
+    // CTA, savings ribbon — should align on).
+    if (verifiedMaxDiscount > 0) {
+      const parsedLabel = typeof parsed.discount_label === "string" ? parsed.discount_label : "";
+      const parsedPercent = parsedLabel.match(/(\d{1,3})\s*%/)?.[1];
+      const parsedNum = parsedPercent ? parseInt(parsedPercent, 10) : 0;
+      if (!parsedLabel || parsedNum < verifiedMaxDiscount) {
+        const correctedLabel = `Up to ${verifiedMaxDiscount}% off`;
+        console.log(
+          `[listicles] discount override: model said "${parsedLabel || "(empty)"}" (${parsedNum}%), corrected to "${correctedLabel}" (verified max ${verifiedMaxDiscount}%)`,
+        );
+        parsed.discount_label = correctedLabel;
+        // Also patch raw_offer_summary so the listicle copy generator
+        // gets the right number in the offer hint.
+        const existingSummary = typeof parsed.raw_offer_summary === "string" ? parsed.raw_offer_summary : "";
+        if (existingSummary) {
+          parsed.raw_offer_summary = existingSummary.replace(/\bUp to \d{1,3}\s*%/i, `Up to ${verifiedMaxDiscount}%`);
+          // If the summary didn't have a "Up to X%" phrase at all, prefix it.
+          if (!/\d{1,3}\s*%/.test(parsed.raw_offer_summary as string)) {
+            parsed.raw_offer_summary = `Up to ${verifiedMaxDiscount}% off — ${existingSummary}`;
+          }
+        } else {
+          parsed.raw_offer_summary = `Up to ${verifiedMaxDiscount}% off`;
+        }
+      }
+    }
+
     await touch(row.id, { offerExtract: parsed });
     res.json({ offer: parsed });
   } catch (err) {
@@ -579,12 +747,26 @@ listiclesRouter.post("/:id/generate-copy", async (req: Request, res: Response) =
     const offer = (row.offerExtract as { raw_offer_summary?: string } | null)?.raw_offer_summary
       ?? "(no offer details — write a strong CTA but don't invent specific discounts)";
 
-    const brandContext = [
-      brand.name ? `Name: ${brand.name}` : null,
-      brand.brandUrl ? `URL: ${brand.brandUrl}` : null,
-      (brand.research as { tone?: string })?.tone ? `Tone: ${(brand.research as { tone?: string }).tone}` : null,
-      (brand.research as { description?: string })?.description ? `Description: ${(brand.research as { description?: string }).description}` : null,
-    ].filter(Boolean).join("\n");
+    // Brand context for the listicle copy generator. Prefer the new
+    // single-source-of-truth guidelines markdown (carries voice, tone,
+    // do's & don'ts — much richer than the old description+tone pair).
+    // Falls back to the legacy `research` fields for brands not yet
+    // re-extracted under the new pipeline.
+    const brandContext = brand.guidelinesMarkdown
+      ? [
+          brand.name ? `Name: ${brand.name}` : null,
+          brand.brandUrl ? `URL: ${brand.brandUrl}` : null,
+          "",
+          "Brand Guidelines (style, voice, palette, do's & don'ts):",
+          "",
+          brand.guidelinesMarkdown.trim(),
+        ].filter((s) => s !== null).join("\n")
+      : [
+          brand.name ? `Name: ${brand.name}` : null,
+          brand.brandUrl ? `URL: ${brand.brandUrl}` : null,
+          (brand.research as { tone?: string })?.tone ? `Tone: ${(brand.research as { tone?: string }).tone}` : null,
+          (brand.research as { description?: string })?.description ? `Description: ${(brand.research as { description?: string }).description}` : null,
+        ].filter(Boolean).join("\n");
 
     // Winning-ad context (only when source === "winning_ad"). Build the
     // structured block the prompt expects + a list of the brand's OTHER
@@ -798,6 +980,25 @@ listiclesRouter.post("/:id/images/:imageId/generate", async (req: Request, res: 
         imageUrls = productRefs;
       }
 
+      // Anti-hallucination guard. When we're sending the prompt to the
+      // text-to-image model WITHOUT product reference images, the model
+      // is free to invent any product that fits the scene — that's how
+      // we ended up with "AURA BOTANICS Gel Cleanser" appearing in a
+      // Blume listicle. Append a strict NO-PRODUCT rule that explicitly
+      // forbids any commercial product, bottle, tube, container, or
+      // brand-bearing object from appearing in the frame. The model can
+      // still render hands, hair, water, lather, soap suds, droplets —
+      // just no product container that could be mistaken for a
+      // competitor's packaging.
+      //
+      // We append the guard at runtime (not only in the prompt that
+      // produced the imagePrompt) so it benefits cached / older
+      // listicle image rows on every Regen — no need to start from
+      // step 1.
+      if (productRefs.length === 0) {
+        finalPrompt = `${finalPrompt}\n\nSTRICT NO-PRODUCT RULE — render NOTHING that could be mistaken for a commercial product. NO bottle, tube, jar, pump, dropper, sachet, pouch, can, tin, box, container, packaging, label, brand name, logo, or branded item ANYWHERE in the frame — not in the foreground, not in the background, not in hand, not on counter, not on shelf, not in mirror reflection. If the scene calls for an action that involves a product (washing, applying, sipping), render ONLY the action and its visible result (lather, foam, water, droplets, glow on skin, hand reaching, etc.) — never the container itself. Generic unbranded everyday objects (a plain glass of water, a plain ceramic mug, a plain hand towel) are fine; anything bearing a label, a wordmark, or a recognizable packaging shape is FORBIDDEN.`;
+      }
+
       // Pick the right fal model: nano-banana-pro/edit is image-to-image and
       // requires at least one image_url. When the per-section prompt does
       // NOT mention the product (and we therefore deliberately withheld the
@@ -898,19 +1099,147 @@ listiclesRouter.post("/:id/render-html", async (req: Request, res: Response) => 
     const [brand] = await db.select().from(schema.brands).where(eq(schema.brands.id, row.brandId)).limit(1);
     if (!product || !brand) return sendError(res, 404, "Linked product or brand missing");
 
-    // Pull brand palette + fonts from research, with sensible defaults.
-    const research = (brand.research ?? {}) as {
-      colorPalette?: { name?: string; hex: string; usage?: string }[];
-      fonts?: { name: string; usage?: string }[];
-      description?: string;
+    // Brand palette, fonts, AND design-system tokens for the HTML
+    // render. brand.guidelinesMarkdown is the single source of truth;
+    // parseBrandGuidelines + pickCtaColor + pickBackgroundColor turn
+    // it into the specific CSS values the lander template needs.
+    //
+    // Why all this routing? An earlier version did `primary = palette[0]?.hex`
+    // which broke for any brand whose first palette entry was a hero/
+    // background color (e.g. Blume Peach #F6CDB7) rather than the CTA
+    // color (Blume Terracotta #C97B5C). The new picker scores each
+    // palette color by its `usage` text + WCAG contrast against white,
+    // so a CTA is never a pastel and a page background is never a deep
+    // charcoal. When the brand markdown has the dedicated Design System
+    // section (## 9), those values override the score — explicit beats
+    // inference.
+    const { parseBrandGuidelines, pickCtaColor, pickBackgroundColor, pickBodyTextColor, isLoadableFontName } = await import("../lib/brandGuidelinesParse.js");
+    let palette: { name?: string; hex: string; usage?: string }[];
+    let fonts: { name: string; usage?: string }[];
+    let designSystem: import("../lib/brandGuidelinesParse.js").ParsedDesignSystem | null = null;
+    if (brand.guidelinesMarkdown) {
+      const parsed = parseBrandGuidelines(brand.guidelinesMarkdown);
+      palette = parsed.colors.map((c) => ({ name: c.name, hex: c.hex, usage: c.usage }));
+      fonts = parsed.fonts.map((f) => ({ name: f.name, usage: f.role.toLowerCase() }));
+      designSystem = parsed.designSystem;
+    } else {
+      const research = (brand.research ?? {}) as {
+        colorPalette?: { name?: string; hex: string; usage?: string }[];
+        fonts?: { name: string; usage?: string }[];
+      };
+      palette = research.colorPalette ?? [];
+      fonts = research.fonts ?? [];
+    }
+    // Convert palette into the ParsedColor shape pickCtaColor expects.
+    const palettePicker = palette.filter((c) => /^#[0-9A-Fa-f]{6}$/.test(c.hex)).map((c) => ({
+      name: c.name ?? "",
+      hex: c.hex.toUpperCase(),
+      usage: c.usage ?? "",
+    }));
+    const primary = pickCtaColor(designSystem, palettePicker) ?? palette[0]?.hex ?? "#C8A56A";
+    const pageBg = pickBackgroundColor(designSystem, palettePicker) ?? "#FFFFFF";
+    // Brand-tinted body text color (when the brand uses dark navy /
+    // charcoal as its body text instead of #1F1F1F). Falls back to a
+    // generic dark when the palette doesn't expose one.
+    const bodyTextHex = pickBodyTextColor(palettePicker) ?? "#1F1F1F";
+    // Muted text — derived from the body text color, lightened. If we
+    // can't determine the body text deterministically, fall back to a
+    // neutral mid-gray.
+    const mutedTextHex = bodyTextHex === "#1F1F1F" ? "#6B6B6B" : "#7A7A85";
+    // Accent — second-best CTA-like score that isn't the primary, or palette[1].
+    const accent = palette.find((c) => c.hex.toUpperCase() !== primary.toUpperCase())?.hex ?? palette[1]?.hex ?? "#8B6A3A";
+    // Hook callout background — a light tint. Prefer the page background
+    // if it's already a light cream; otherwise use a known light entry.
+    const hookBg = pageBg && pageBg.toLowerCase() !== "#ffffff"
+      ? pageBg
+      : palette.find((c) => /soft|cream|tint|pastel|background/i.test(c.usage ?? ""))?.hex ?? palette[2]?.hex ?? "#F8F0E0";
+    // Fonts — drop unloadable names so we never inject broken CSS
+    // (e.g. `font-family: Display Serif (custom — likely Didone), sans-serif`).
+    // When no valid family remains we fall back to safe defaults the
+    // listicle prompt already knows how to render.
+    const validFonts = fonts.filter((f) => isLoadableFontName(f.name));
+    const headingFont =
+      validFonts.find((f) => /primary|head|display|h1|h2/i.test(f.usage ?? ""))?.name
+      ?? validFonts[0]?.name
+      ?? "Playfair Display";
+    const bodyFont =
+      validFonts.find((f) => /secondary|body|paragraph|text/i.test(f.usage ?? ""))?.name
+      ?? validFonts[1]?.name
+      ?? validFonts[0]?.name
+      ?? "Inter";
+
+    // Design-system tokens for the CTA button — fall through to safe
+    // listicle defaults when the brand markdown predates Section 9 or
+    // the model didn't fill in a value. The hover effect is intentionally
+    // a free-text string — the lander prompt converts it into a CSS
+    // declaration the model picks.
+    const cta = designSystem?.cta ?? null;
+    const btnRadius = cta?.borderRadius ?? "10px";
+    const btnPadding = cta?.padding ?? "18px 28px";
+    const btnFontWeight = cta?.fontWeight ?? "700";
+    const btnFontTransform = cta?.fontTransform ?? "uppercase";
+    const btnLetterSpacing = cta?.letterSpacing ?? "0.04em";
+    const btnBorder = cta?.border ?? "none";
+    const btnShadow = cta?.boxShadow ?? "none";
+    const btnHover = cta?.hover ?? "darkens slightly";
+    const btnTextColor = cta?.color ?? "#FFFFFF";
+    const cardRadius = designSystem?.card?.borderRadius ?? "12px";
+    const cardBorder = designSystem?.card?.border ?? "1px solid rgba(0,0,0,0.06)";
+    const cardShadow = designSystem?.card?.boxShadow ?? "none";
+
+    // Auxiliary brand colors the listicle prompt needs for surfaces
+    // OTHER than the CTA: the announcement bar background (a dark,
+    // brand-derived navy/charcoal/terracotta, NOT a hardcoded Javvy
+    // purple), the trust-pill cream (a darker tint of the page bg),
+    // and the buy-box card cream (slightly off-white that still feels
+    // on-brand).
+    //
+    // Picking strategy:
+    //   ANN_BG_HEX  = the darkest non-text color in the palette
+    //                 (charcoal, navy, deep terracotta). Falls back to
+    //                 the CTA hex if no dark palette entry exists.
+    //   TRUST_BG    = a darker shade of the page background, derived
+    //                 algorithmically (pageBg darkened ~8%).
+    //   CARD_BG     = page bg if the brand uses a colored page bg;
+    //                 otherwise white.
+    //
+    // These eliminate the hardcoded #2a2552 / #FFF1D6 / #FFF8E7 that
+    // were baked into the listicle template from the Javvy clone era.
+    const relLum = (hex: string): number => {
+      const h = hex.replace(/^#/, "");
+      if (h.length !== 6) return 1;
+      const v = (s: string) => parseInt(s, 16) / 255;
+      const r = v(h.slice(0, 2)), g = v(h.slice(2, 4)), b = v(h.slice(4, 6));
+      const lin = (c: number) => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+      return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
     };
-    const palette = research.colorPalette ?? [];
-    const fonts = research.fonts ?? [];
-    const primary = palette[0]?.hex ?? "#C8A56A";
-    const accent = palette[1]?.hex ?? "#8B6A3A";
-    const hookBg = palette[2]?.hex ?? "#F8F0E0";
-    const headingFont = fonts.find((f) => /head|display|h1|h2/i.test(f.usage ?? ""))?.name ?? fonts[0]?.name ?? "Inter, system-ui, sans-serif";
-    const bodyFont = fonts.find((f) => /body|paragraph|text/i.test(f.usage ?? ""))?.name ?? fonts[1]?.name ?? fonts[0]?.name ?? "Inter, system-ui, sans-serif";
+    const darkenHex = (hex: string, amount: number): string => {
+      const h = hex.replace(/^#/, "");
+      if (h.length !== 6) return hex;
+      const r = parseInt(h.slice(0, 2), 16);
+      const g = parseInt(h.slice(2, 4), 16);
+      const b = parseInt(h.slice(4, 6), 16);
+      const d = (c: number) => Math.max(0, Math.min(255, Math.round(c * (1 - amount))));
+      return `#${d(r).toString(16).padStart(2, "0")}${d(g).toString(16).padStart(2, "0")}${d(b).toString(16).padStart(2, "0")}`.toUpperCase();
+    };
+    // Darkest palette color — what an announcement bar / footer / dark
+    // band needs to read as a strong banded color. Excludes the page
+    // background, which can also be very dark on dark-mode brands.
+    const darkestCandidate = palette
+      .filter((c) => /^#[0-9A-Fa-f]{6}$/.test(c.hex))
+      .filter((c) => c.hex.toUpperCase() !== pageBg.toUpperCase())
+      .sort((a, b) => relLum(a.hex) - relLum(b.hex))[0];
+    const annBgHex = darkestCandidate?.hex ?? primary;
+    const annTextHex = relLum(annBgHex) < 0.4 ? "#FFFFFF" : "#1F1F1F";
+    // Trust pill — slightly darker tint of the page background so the
+    // pill reads as elevated on the cream. If the page bg is white we
+    // use a very faint warm gray so it doesn't disappear.
+    const trustBg = pageBg.toUpperCase() === "#FFFFFF" ? "#F4F4F4" : darkenHex(pageBg, 0.05);
+    // Buy-box card — keep white when the page bg is also white,
+    // otherwise inherit the page bg so the card sits flat on the page
+    // rather than introducing a third color.
+    const cardBg = designSystem?.card?.background
+      ?? (pageBg.toUpperCase() === "#FFFFFF" ? "#FFFFFF" : pageBg);
 
     const offer = (row.offerExtract ?? {}) as {
       discount_label?: string;
@@ -1018,7 +1347,17 @@ listiclesRouter.post("/:id/render-html", async (req: Request, res: Response) => 
       LANGUAGE: row.language,
       PRODUCT_NAME: product.name,
       PRODUCT_CATEGORY: product.category ?? "product",
-      AUDIENCE_DESCRIPTION: research.description ?? "people interested in this category",
+      // Description for the listicle's audience block. Prefer pulling
+      // the Brand Overview section out of guidelinesMarkdown; fall back
+      // to the legacy research.description.
+      AUDIENCE_DESCRIPTION: (() => {
+        if (brand.guidelinesMarkdown) {
+          const overview = brand.guidelinesMarkdown.split(/^## 2\./m)[0] ?? "";
+          const trimmed = overview.replace(/^# [^\n]*\n/, "").replace(/^>.*$/gm, "").trim();
+          if (trimmed) return trimmed.slice(0, 600);
+        }
+        return ((brand.research ?? {}) as { description?: string }).description ?? "people interested in this category";
+      })(),
       ANNOUNCEMENT_LINE_1: announcementLine1,
       ANNOUNCEMENT_LINE_2: announcementLine2,
       MAIN_HEADLINE: mainHeadline,
@@ -1045,14 +1384,53 @@ listiclesRouter.post("/:id/render-html", async (req: Request, res: Response) => 
       TRUST_LINE: offer.trust_line ?? "",
       BRAND_NAME: brand.name,
       BRAND_LOGO_URL: brand.logoUrl ?? "",
-      BRAND_TAGLINE: (brand.research as { tagline?: string })?.tagline ?? "",
+      // Tagline was a legacy field on the old JSON research shape. It
+      // isn't a first-class field in the new guidelines markdown, so we
+      // fall through to empty when the brand has been re-extracted. The
+      // listicle template renders an empty tagline gracefully.
+      BRAND_TAGLINE: (brand.research as { tagline?: string } | null)?.tagline ?? "",
       FOOTER_LINKS: "",
       YEAR: String(new Date().getFullYear()),
       PRIMARY_HEX: primary,
       ACCENT_HEX: accent,
       HOOK_BG_HEX: hookBg,
+      PAGE_BG_HEX: pageBg,
+      // Darkest brand color — announcement bar, footer band, any
+      // strong dark surface. Replaces the hardcoded #2a2552 Javvy navy
+      // the lander template was inheriting.
+      ANN_BG_HEX: annBgHex,
+      ANN_TEXT_HEX: annTextHex,
+      // Trust pill background — a faintly-darker tint of the page bg.
+      TRUST_BG_HEX: trustBg,
+      // Buy-box / feature card surface background — derived from the
+      // brand's page bg, not a hardcoded cream.
+      CARD_BG_HEX: cardBg,
+      // Body text color — many DTC brands use a brand-tinted dark
+      // (Blume's navy `#001E42`, e.g.) instead of pure black. Picked
+      // from the brand's palette via usage-text scoring; falls back
+      // to the listicle's generic #1F1F1F when no brand body-text
+      // color was extracted.
+      BODY_TEXT_HEX: bodyTextHex,
+      MUTED_TEXT_HEX: mutedTextHex,
       HEADING_FONT: headingFont,
       BODY_FONT: bodyFont,
+      // Brand-specific button design tokens — parsed from
+      // brand.guidelinesMarkdown § 9 Design System. The lander template
+      // applies them verbatim so cloned pages match the brand's actual
+      // button style (radius, padding, shadow, hover behaviour) rather
+      // than the listicle's hardcoded chunky-shadow default.
+      BTN_RADIUS: btnRadius,
+      BTN_PADDING: btnPadding,
+      BTN_FONT_WEIGHT: btnFontWeight,
+      BTN_FONT_TRANSFORM: btnFontTransform,
+      BTN_LETTER_SPACING: btnLetterSpacing,
+      BTN_BORDER: btnBorder,
+      BTN_SHADOW: btnShadow,
+      BTN_HOVER: btnHover,
+      BTN_TEXT_COLOR: btnTextColor,
+      CARD_RADIUS: cardRadius,
+      CARD_BORDER: cardBorder,
+      CARD_SHADOW: cardShadow,
       LANGUAGE_SPECIFIC_NOTES: row.language === "de" ? "Use the formal/informal voice that matches the brand tone — for wellbe-style brands, prefer informal 'du'." : "",
       HTML_FEEDBACK: row.htmlFeedback?.trim() || "(no feedback — this is the first render or the user is happy enough to deploy)",
     };
@@ -1066,10 +1444,69 @@ listiclesRouter.post("/:id/render-html", async (req: Request, res: Response) => 
         model: prompt.config.model,
         maxTokens: prompt.config.maxTokens ?? 16000,
       });
-      const html = result.text.trim();
+      let html = result.text.trim();
       if (!html.toLowerCase().includes("<!doctype html>")) {
         throw new Error("HTML render did not produce a full document (missing <!DOCTYPE html>)");
       }
+
+      // POST-RENDER SECTION-COUNT VALIDATION + RETRY
+      //
+      // Even with explicit "render every REASON" instructions in the
+      // prompt, the model occasionally drops sections — usually #7 +
+      // #11 on an 11-section listicle. Detect missing section numbers
+      // in the rendered HTML and run a single targeted re-render with
+      // an explicit "you missed sections X and Y" feedback. Capped at
+      // one retry to avoid infinite loops if the model keeps failing.
+      //
+      // Detection: look for `<h2>...N. ...</h2>` style numbered
+      // headings (matches the prompt's section structure). Compare
+      // against the count we sent in REASONS_BLOCK.
+      const expectedCount = parsedReasons.length;
+      const rendered = extractRenderedSectionNumbers(html);
+      const missing = computeMissingSections(expectedCount, rendered);
+      if (missing.length > 0) {
+        console.warn(
+          `[listicles] section-count validation: expected ${expectedCount}, rendered ${rendered.length} (numbers: ${rendered.join(", ")}); missing: ${missing.join(", ")} — retrying`,
+        );
+        const missingReasonsBlock = missing
+          .map((n) => {
+            const r = parsedReasons[n - 1];
+            if (!r) return null;
+            const img = images[n - 1];
+            return [
+              `REASON ${n}:`,
+              `  HEADLINE: ${r.headline}`,
+              `  IMAGE_URL: ${img?.imageUrl ?? ""}`,
+              `  BODY: ${r.body}`,
+            ].join("\n");
+          })
+          .filter(Boolean)
+          .join("\n\n");
+        const fixupUser =
+          `The previous HTML render dropped ${missing.length} numbered section(s): ${missing.join(", ")}. ` +
+          `Re-render the COMPLETE HTML document including ALL ${expectedCount} numbered sections this time. ` +
+          `The sections you missed last time:\n\n${missingReasonsBlock}\n\n` +
+          `Output the FULL document from <!DOCTYPE html> to </html> — not just the missing sections. ` +
+          `Every numbered section from 1 to ${expectedCount} must appear in document order, each rendered with its own image and CTA microcopy.`;
+        const fixupResult = await generateText({
+          systemPrompt: prompt.rendered,
+          userMessage: fixupUser,
+          model: prompt.config.model,
+          maxTokens: prompt.config.maxTokens ?? 16000,
+        });
+        const fixupHtml = fixupResult.text.trim();
+        if (fixupHtml.toLowerCase().includes("<!doctype html>")) {
+          const renderedAfter = extractRenderedSectionNumbers(fixupHtml);
+          const stillMissing = computeMissingSections(expectedCount, renderedAfter);
+          if (stillMissing.length < missing.length) {
+            html = fixupHtml;
+            console.log(`[listicles] section-count retry succeeded: now have ${renderedAfter.length}/${expectedCount} sections${stillMissing.length > 0 ? `; ${stillMissing.length} still missing (${stillMissing.join(", ")})` : ""}`);
+          } else {
+            console.warn(`[listicles] section-count retry did not improve (still missing: ${stillMissing.join(", ")}); keeping first render`);
+          }
+        }
+      }
+
       await touch(row.id, { renderedHtml: html, status: "ready", error: null });
       res.json({ renderedHtml: html });
     } catch (err) {

@@ -80,6 +80,11 @@ export default function ListicleBuilderAppPage() {
   const [langDropdownOpen, setLangDropdownOpen] = useState(false);
 
   const [destinationUrl, setDestinationUrl] = useState("");
+  // Tracks the product URL the destinationUrl field was last auto-prefilled
+  // from. We only overwrite the field when (a) it's still empty, OR (b) it
+  // still matches a previous prefill — so a user who manually typed their
+  // own destination doesn't lose it when they switch products.
+  const lastPrefilledProductUrl = useRef<string>("");
   const [guidance, setGuidance] = useState("");
   const [pastedCopy, setPastedCopy] = useState("");
 
@@ -161,6 +166,22 @@ export default function ListicleBuilderAppPage() {
   const productAngles: ProductAngle[] = selectedProduct?.research?.angles ?? [];
   const selectedAngle = productAngles.find((a) => a.name === selectedAngleName) ?? null;
   const selectedLang = LANGUAGES.find((l) => l.code === selectedLanguage) ?? LANGUAGES[0];
+
+  // Prefill the destination URL with the selected product's productUrl
+  // when (a) the URL field is empty, OR (b) it still matches a previous
+  // prefill. This way the offer extraction has a working URL by default
+  // — every product page is the canonical "where this listicle sends
+  // people". Users who paste their own destination URL keep it on
+  // product switches.
+  useEffect(() => {
+    const productUrl = selectedProduct?.productUrl?.trim() ?? "";
+    if (!productUrl) return;
+    const current = destinationUrl.trim();
+    if (current === "" || current === lastPrefilledProductUrl.current) {
+      setDestinationUrl(productUrl);
+      lastPrefilledProductUrl.current = productUrl;
+    }
+  }, [selectedProduct?.productUrl, destinationUrl]);
 
   // ── Helpers ──
   const setupReady =

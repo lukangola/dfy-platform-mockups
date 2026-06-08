@@ -228,17 +228,23 @@ export default function CopyEngineAppPage() {
     setSavedToAssets(false);
   }
 
-  // Build the brand_context blob from the active brand's research.
+  // Build the brand_context blob from the active brand's guidelines.
+  // Prefer the new guidelines markdown when present (single source of
+  // truth — carries voice/tone/imagery/do's & don'ts). Fall back to the
+  // legacy structured fields for brands not yet re-extracted.
   const brandContext = useMemo(() => {
-    const parts: string[] = [];
-    if (activeBrand?.name) parts.push(`Brand: ${activeBrand.name}`);
-    const r = activeBrand?.research;
+    if (!activeBrand?.name) return "(no brand context available)";
+    if (activeBrand.guidelinesMarkdown && activeBrand.guidelinesMarkdown.trim().length > 0) {
+      return `Brand: ${activeBrand.name}\n\n${activeBrand.guidelinesMarkdown.trim()}`;
+    }
+    const parts: string[] = [`Brand: ${activeBrand.name}`];
+    const r = activeBrand.research;
     if (r) {
       if (typeof r.tone === "string" && r.tone.trim()) parts.push(`Tone: ${r.tone.trim()}`);
       if (typeof r.description === "string" && r.description.trim())
         parts.push(`Description: ${r.description.trim()}`);
     }
-    return parts.length ? parts.join("\n") : "(no brand context available)";
+    return parts.join("\n");
   }, [activeBrand]);
 
   const sourceCopyReady = mode !== "rewrite" || sourceCopy.trim().length > 0;

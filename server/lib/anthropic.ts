@@ -157,11 +157,36 @@ export async function generateText(args: {
     stop_reason: string | null;
   };
 
-  const res = await retryOnTransient(async () =>
-    (betas.length > 0
+  // Streaming vs non-streaming choice:
+  //
+  //   The Anthropic SDK refuses non-streaming requests when max_tokens
+  //   is high enough that the operation could exceed the 10-minute
+  //   request timeout — it throws "Streaming is required for
+  //   operations that may take longer than 10 minutes." We hit this on
+  //   the listicle HTML render after bumping max_tokens to 24k. So:
+  //   anything ≥ ~12k tokens on Opus 4.x is routed through the stream
+  //   API and the final message is collected via `.finalMessage()`.
+  //
+  //   Streaming is also the SDK's recommended default for long requests
+  //   per the claude-api skill — we just hadn't reached the threshold
+  //   on any prior endpoint.
+  const STREAMING_MIN_TOKENS = 12_000;
+  const useStreaming = (args.maxTokens ?? 8192) >= STREAMING_MIN_TOKENS;
+
+  const res = await retryOnTransient(async () => {
+    if (useStreaming) {
+      // .finalMessage() collects the full response after the stream
+      // completes, so the caller gets the same Message shape as the
+      // non-streaming path.
+      const stream = betas.length > 0
+        ? anthropic.beta.messages.stream({ ...request, betas } as unknown as Parameters<typeof anthropic.beta.messages.stream>[0])
+        : anthropic.messages.stream(request as unknown as Parameters<typeof anthropic.messages.stream>[0]);
+      return (await stream.finalMessage()) as unknown as MessageLike;
+    }
+    return (betas.length > 0
       ? await anthropic.beta.messages.create({ ...request, betas } as unknown as Parameters<typeof anthropic.beta.messages.create>[0])
-      : await anthropic.messages.create(request as unknown as Parameters<typeof anthropic.messages.create>[0])) as unknown as MessageLike
-  );
+      : await anthropic.messages.create(request as unknown as Parameters<typeof anthropic.messages.create>[0])) as unknown as MessageLike;
+  });
 
   const text = res.content
     .filter((b) => b.type === "text")

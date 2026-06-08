@@ -1,7 +1,7 @@
 ---
 expectsJson: false
 model: claude-opus-4-7
-maxTokens: 16000
+maxTokens: 24000
 ---
 
 Build a long-form editorial advertorial landing page in {{LANGUAGE}} for {{PRODUCT_NAME}},
@@ -102,7 +102,7 @@ substituting only the text content and the brand background color):
 ```html
 <div style="z-index:99999;position:sticky;top:0;width:100%;">
   <div style="display:flex;flex-flow:column;width:100%;position:relative;">
-    <div style="display:flex;width:100%;color:#fff;background-color:#2a2552;justify-content:center;align-items:center;padding:10px 3%;gap:20px;">
+    <div style="display:flex;width:100%;color:{{ANN_TEXT_HEX}};background-color:{{ANN_BG_HEX}};justify-content:center;align-items:center;padding:10px 3%;gap:20px;">
       <!-- TEXT BLOCK -->
       <div style="display:flex;flex-flow:column;justify-content:center;align-items:center;line-height:1.2;">
         <div class="ann-bar-line1" style="text-transform:uppercase;font-size:18px;font-weight:900;line-height:1.2;white-space:nowrap;">{{ANNOUNCEMENT_LINE_1}}</div>
@@ -112,18 +112,18 @@ substituting only the text content and the brand background color):
       <div class="js-countdown-bar ann-bar-pill" data-countdown-seconds="14400" data-countdown-key="main"
            style="display:flex;justify-content:center;align-items:flex-start;background:#fff;border-radius:5px;width:150px;padding:5px 10px;gap:1px;flex-shrink:0;">
         <div style="display:flex;flex-flow:column;justify-content:center;align-items:center;">
-          <div data-cd-h class="ann-bar-num" style="color:#2a2552;font-family:ui-monospace,Menlo,monospace;font-size:22px;font-weight:900;line-height:1;">00</div>
-          <div class="ann-bar-lbl" style="color:#2a2552;text-transform:uppercase;font-size:12px;font-weight:500;line-height:1.2;">Hrs</div>
+          <div data-cd-h class="ann-bar-num" style="color:{{ANN_BG_HEX}};font-family:ui-monospace,Menlo,monospace;font-size:22px;font-weight:900;line-height:1;">00</div>
+          <div class="ann-bar-lbl" style="color:{{ANN_BG_HEX}};text-transform:uppercase;font-size:12px;font-weight:500;line-height:1.2;">Hrs</div>
         </div>
-        <div style="color:#2a2552;padding:0 0.15rem;font-weight:800;line-height:1;align-self:flex-start;">:</div>
+        <div style="color:{{ANN_BG_HEX}};padding:0 0.15rem;font-weight:800;line-height:1;align-self:flex-start;">:</div>
         <div style="display:flex;flex-flow:column;justify-content:center;align-items:center;">
-          <div data-cd-m class="ann-bar-num" style="color:#2a2552;font-family:ui-monospace,Menlo,monospace;font-size:22px;font-weight:900;line-height:1;">00</div>
-          <div class="ann-bar-lbl" style="color:#2a2552;text-transform:uppercase;font-size:12px;font-weight:500;line-height:1.2;">Min</div>
+          <div data-cd-m class="ann-bar-num" style="color:{{ANN_BG_HEX}};font-family:ui-monospace,Menlo,monospace;font-size:22px;font-weight:900;line-height:1;">00</div>
+          <div class="ann-bar-lbl" style="color:{{ANN_BG_HEX}};text-transform:uppercase;font-size:12px;font-weight:500;line-height:1.2;">Min</div>
         </div>
-        <div style="color:#2a2552;padding:0 0.15rem;font-weight:800;line-height:1;align-self:flex-start;">:</div>
+        <div style="color:{{ANN_BG_HEX}};padding:0 0.15rem;font-weight:800;line-height:1;align-self:flex-start;">:</div>
         <div style="display:flex;flex-flow:column;justify-content:center;align-items:center;">
-          <div data-cd-s class="ann-bar-num" style="color:#2a2552;font-family:ui-monospace,Menlo,monospace;font-size:22px;font-weight:900;line-height:1;">00</div>
-          <div class="ann-bar-lbl" style="color:#2a2552;text-transform:uppercase;font-size:12px;font-weight:500;line-height:1.2;">Sec</div>
+          <div data-cd-s class="ann-bar-num" style="color:{{ANN_BG_HEX}};font-family:ui-monospace,Menlo,monospace;font-size:22px;font-weight:900;line-height:1;">00</div>
+          <div class="ann-bar-lbl" style="color:{{ANN_BG_HEX}};text-transform:uppercase;font-size:12px;font-weight:500;line-height:1.2;">Sec</div>
         </div>
       </div>
     </div>
@@ -133,12 +133,16 @@ substituting only the text content and the brand background color):
 
 CRITICAL DETAILS — do not deviate:
 
-- **Background color is ALWAYS `#2a2552`** — Javvy's exact navy.
-  Do NOT use the brand primary color for the announcement bar bg.
-  Do NOT use any other navy. Do NOT pick a brand-derived shade.
-  Hardcode `#2a2552` even if the brand primary is also dark — the
-  announcement bar always uses Javvy's navy. (Brand color is used
-  elsewhere — CTA button, accents — not here.)
+- **Background color is `{{ANN_BG_HEX}}`** — the darkest color in the
+  brand's actual palette (the brand's navy / charcoal / deep
+  terracotta — whatever the brand uses for its strongest dark band).
+  Do NOT invent a navy. Do NOT use any hex that isn't one of the
+  template variables.
+- **Text color on the bar is `{{ANN_TEXT_HEX}}`** — auto-picked for
+  contrast (white on dark bars, near-black on light bars).
+- **Countdown numbers inside the white pill** use the SAME `{{ANN_BG_HEX}}`
+  hex so the digits read against the white pill as the same dark
+  brand color.
 - **Bar height is set by content + 10px padding top/bottom**. Do NOT
   add additional padding. Do NOT add `min-height`. The bar should
   read as ~60-68px tall on desktop, no more.
@@ -261,7 +265,7 @@ Element details:
     is centered — that's a DIFFERENT element. Listicle section H2s
     are always left-aligned.)
   - Use the heading font ({{HEADING_FONT}}), sans-serif.
-  - Color: dark navy / body color #1F1F1F.
+  - Color: dark navy / body color {{BODY_TEXT_HEX}}.
 - Image: square 1:1 aspect ratio, rounded ~10-12px corners
   Source: {{REASON_N_IMAGE_URL}}
 - **Body paragraph(s) — match Javvy exactly:**
@@ -270,7 +274,7 @@ Element details:
   - **font-weight: 400**
   - **letter-spacing: -0.02em** (very subtle tightening)
   - **line-height: 1.5** (NOT 1.6)
-  - Color: dark gray #1F1F1F
+  - Color: dark gray {{BODY_TEXT_HEX}}
   - Use the body font ({{BODY_FONT}})
 - **Inline CTA link (conditional)** — small text link directly below the
   last body paragraph, styled as inline CTA microcopy (brand-primary
@@ -315,14 +319,17 @@ re-skinned with this brand's colors.
   Complex Formula — for tight, smooth skin and pain-free joints..."
   is FORBIDDEN). The only text between the headline and the CTA is the
   short scarcity sentence in step 3 below.
-- DO NOT use brand-primary background for the card. The card is ALWAYS
-  cream / butter (#FFF8E7) with dashed yellow border.
+- DO NOT use brand-primary background for the card body — the card is
+  the BRAND'S cream / soft-tint page surface, not the CTA color.
 
 OUTER CARD WRAPPER:
-- Card background: soft cream / butter color (#FFF8E7 or similar pale
-  yellow-tinted off-white). NOT pure white. NOT brand primary.
-- Dashed border around the card: 2px dashed, slightly muted yellow
-  (#E8D77A or similar). Rounded corners ~12px.
+- Card background: **{{CARD_BG_HEX}}** — derived from the brand's
+  actual page background (a brand cream when the brand uses one,
+  otherwise white). NOT pure-white-when-the-brand-uses-cream. NOT
+  brand primary CTA color.
+- Dashed border around the card: 2px dashed using **{{ACCENT_HEX}}**
+  (the brand's secondary accent) — never an invented yellow. Card
+  border-radius: **{{CARD_RADIUS}}**.
 - Max-width 880px (slightly wider than the 768px article column so the
   two-column layout has room on desktop). Centered on viewport.
 - Generous internal padding: ~40-56px desktop, ~24px mobile.
@@ -353,10 +360,11 @@ LEFT COLUMN (product image):
 - {{OFFER_PRODUCT_IMAGE_URL}} as a single `<img>` element
 - Rounded ~12px corners
 - `object-fit: cover`, full column width
-- A soft cream/lavender colored background block behind it (in case the
-  image has transparency). Match the Javvy reference's "lavender card
-  with product floating" feel — a subtle solid color (~#E8E3F5 or a
-  light tint of brand primary) behind the image, rounded ~12px.
+- A soft brand-derived background block behind it (in case the image
+  has transparency). Use **{{HOOK_BG_HEX}}** (the brand's hook /
+  callout background tint — already brand-derived). Rounded
+  **{{CARD_RADIUS}}** corners. Never invent a lavender or any other
+  off-brand color.
 
 RIGHT COLUMN (content), in this exact vertical order — NO other
 elements may appear in this column. **The right column container uses
@@ -370,7 +378,7 @@ are ALL centered within the column.**
    bold, with horizontal separator lines on either side. Single
    horizontal row. Example markup:
    ```
-   <div style="display:flex;align-items:center;gap:12px;color:#1F1F1F;font-weight:700;text-transform:uppercase;font-size:13px;letter-spacing:0.05em;">
+   <div style="display:flex;align-items:center;gap:12px;color:{{BODY_TEXT_HEX}};font-weight:700;text-transform:uppercase;font-size:13px;letter-spacing:0.05em;">
      <hr style="flex:1;border:0;border-top:1px solid currentColor;"/>
      <span>🎁 FREE GIFTS WITH YOUR ORDER</span>
      <hr style="flex:1;border:0;border-top:1px solid currentColor;"/>
@@ -391,7 +399,7 @@ are ALL centered within the column.**
    - Two coloured spans inside the same headline:
      - PART A (RED #DC2626, weight 700): "UP TO {{DISCOUNT_PERCENT}}% OFF"
        (English) / "BIS ZU {{DISCOUNT_PERCENT}}% RABATT" (German)
-     - PART B (#1F1F1F, weight 700): " FOR A LIMITED TIME ONLY!"
+     - PART B ({{BODY_TEXT_HEX}}, weight 700): " FOR A LIMITED TIME ONLY!"
        (English) / " NUR FÜR KURZE ZEIT!" (German)
    - Same font-family + weight on both spans — only the color differs.
    - If {{DISCOUNT_PERCENT}} is empty, fall back to {{DISCOUNT_LABEL}}
@@ -399,7 +407,7 @@ are ALL centered within the column.**
    - Example markup:
      ```html
      <h2 style="text-align:center;font-size:1.7rem;font-weight:700;line-height:1.2;font-family:{{HEADING_FONT}};margin:0;">
-       <span style="color:#DC2626;">UP TO {{DISCOUNT_PERCENT}}% OFF</span><span style="color:#1F1F1F;"> FOR A LIMITED TIME ONLY!</span>
+       <span style="color:#DC2626;">UP TO {{DISCOUNT_PERCENT}}% OFF</span><span style="color:{{BODY_TEXT_HEX}};"> FOR A LIMITED TIME ONLY!</span>
      </h2>
      ```
 
@@ -411,12 +419,35 @@ are ALL centered within the column.**
    - Do NOT add a second paragraph. Do NOT describe the product here.
 
 4. **PRIMARY CTA button** — large, full-width within the right column,
-   centered text:
-   - Background: **{{PRIMARY_HEX}}** (the BRAND primary color from
-     brand.research.colorPalette — NOT a hardcoded green)
-   - Text: white, bold, all-caps, ~18-20px
-   - Rounded ~8-12px corners
-   - Generous vertical padding ~20-24px
+   centered text. The button design MATCHES THE BRAND'S OWN BUTTON STYLE
+   from brand.guidelinesMarkdown § 9 Design System (parsed and passed in
+   as the vars below). Do NOT invent your own chunky-shadow-with-thick-
+   border CTA style — use the brand's actual values verbatim:
+   - **background: {{PRIMARY_HEX}}** — extracted from the brand's
+     design system as the actual CTA color (NOT a pastel hero color).
+   - **color: {{BTN_TEXT_COLOR}}** — brand's CTA text color (usually
+     white or near-black).
+   - **font-family: {{HEADING_FONT}}, sans-serif**
+   - **font-weight: {{BTN_FONT_WEIGHT}}**
+   - **text-transform: {{BTN_FONT_TRANSFORM}}** — usually `uppercase`
+     for DTC.
+   - **letter-spacing: {{BTN_LETTER_SPACING}}**
+   - **border-radius: {{BTN_RADIUS}}** — the brand's actual radius. If
+     the brand uses pills (`999px`) honour that. If they use sharp (`0`),
+     honour that too.
+   - **padding: {{BTN_PADDING}}** — verbatim, e.g. `14px 28px`.
+   - **border: {{BTN_BORDER}}** — usually `none`, occasionally a thin
+     outline.
+   - **box-shadow: {{BTN_SHADOW}}** — apply VERBATIM. If the brand
+     uses an offset-solid pattern (e.g. `4px 4px 0 #FFFFFF`), the
+     button will visibly sit on a stacked-paper underlayer — that's
+     CORRECT and brand-required. Do not "improve" it by adding a blur
+     or softening it. If the brand uses `none`, the button is flat.
+   - **Hover behaviour**: implement a `:hover` that matches "{{BTN_HOVER}}"
+     — e.g. for "darkens ~8%" emit `filter: brightness(0.92);`, for
+     "scales 1.02" emit `transform: scale(1.02);`.
+   - Width: full width of the right column on desktop, full width of
+     the card on mobile.
    - Content: if {{DISCOUNT_PERCENT}} is non-empty, write
      "GET {{DISCOUNT_PERCENT}}% OFF →" (English) or
      "SICHERE DIR {{DISCOUNT_PERCENT}}% RABATT →" (German).
@@ -442,10 +473,10 @@ are ALL centered within the column.**
      `04:00:00`.
    - On mobile the label + timer can wrap to two centered lines if needed.
 
-6. **Cream pill bar** — single pill containing two trust facts
-   separated by a vertical divider. Background: lighter cream
-   (#FFF1D6 or similar, slightly darker than the card background).
-   Rounded fully, ~12-16px padding:
+6. **Trust pill bar** — single pill containing two trust facts
+   separated by a vertical divider. Background: **{{TRUST_BG_HEX}}**
+   (a slightly darker tint of the brand's page bg — derived, never
+   invented). Rounded fully, ~12-16px padding:
    - LEFT half: "Sell-Out Risk: **{{SCARCITY_LINE}}**" (the
      scarcity-level word like "High" in RED bold). In German:
      "Sell-Out Risk: **Hoch**".
@@ -504,9 +535,9 @@ SECTION 6 — FOOTER
   fabricate /privacy or /terms placeholders — those would 404). Wrap
   it like this:
   ```
-  <div style="margin-top:12px;font-size:12px;color:#6B6B6B;text-align:center;">{{FOOTER_LINKS_HTML}}</div>
+  <div style="margin-top:12px;font-size:12px;color:{{MUTED_TEXT_HEX}};text-align:center;">{{FOOTER_LINKS_HTML}}</div>
   ```
-  Style links with `color:#6B6B6B;text-decoration:none;` and
+  Style links with `color:{{MUTED_TEXT_HEX}};text-decoration:none;` and
   `text-decoration:underline` on hover.
 - Copyright line below the policy links: "© {{YEAR}}, {{BRAND_NAME}}" (smaller, ~11px)
 - DO NOT invent additional links beyond what {{FOOTER_LINKS_HTML}}
@@ -517,14 +548,43 @@ SECTION 6 — FOOTER
 DESIGN SYSTEM (apply globally)
 ═══════════════════════════════════════
 
-COLORS:
-- Primary brand color: {{PRIMARY_HEX}}
-- Accent / CTA color: {{ACCENT_HEX}}
-- Announcement bar background: #111111
-- Hook callout background: {{HOOK_BG_HEX}} (light tinted)
-- Body background: #FFFFFF
-- Body text: #1F1F1F (near-black for editorial feel)
-- Muted text (dates, captions): #6B6B6B
+COLORS — STRICT RULE: every hex code in the rendered HTML must come
+from THIS LIST. No inventing colors. No copying from the source
+template. No grabbing colors from the angle / product / reference. If
+you find yourself about to write a hex code that isn't in this list,
+stop and pick the closest brand variable instead.
+
+The ONLY allowed hex sources:
+- **Brand variables** (all derived from brand.guidelinesMarkdown):
+  - `{{PAGE_BG_HEX}}` — body + full-width section background
+  - `{{PRIMARY_HEX}}` — primary CTA color, link color, action emphasis
+  - `{{ACCENT_HEX}}` — secondary highlight / accent border / divider
+  - `{{HOOK_BG_HEX}}` — hook callout / image card behind product
+  - `{{ANN_BG_HEX}}` — announcement bar background (brand's darkest)
+  - `{{ANN_TEXT_HEX}}` — announcement bar text (auto-contrast)
+  - `{{TRUST_BG_HEX}}` — trust pill background (page bg, darkened)
+  - `{{CARD_BG_HEX}}` — buy-box / feature card background
+  - `{{BODY_TEXT_HEX}}` — body text (brand-tinted dark — navy / charcoal / dark brown depending on brand, NOT always #1F1F1F)
+  - `{{MUTED_TEXT_HEX}}` — muted text / captions / placeholders
+- **Universal hardcoded colors** (the only hex values you may write
+  literally without a template variable):
+  - `#FFFFFF` — white text on dark surfaces (when {{ANN_TEXT_HEX}}
+    isn't appropriate, e.g. on the dark CTA when button text is
+    explicitly meant to be white)
+  - `#DC2626` — sale / discount red, used ONLY for the percent-off
+    headline and the live countdown timer digits
+- ALWAYS uppercase the hex digits in your output.
+- DO NOT use rgba() with custom hex values — only `rgba(0,0,0, x)` for
+  shadows is allowed.
+
+CARD / SECTION CONTAINERS (apply to feature sections, FAQ items,
+testimonial cards, buy box — anywhere the source layout uses a card-
+like container):
+- border-radius: {{CARD_RADIUS}}
+- border: {{CARD_BORDER}}
+- box-shadow: {{CARD_SHADOW}}
+- background: #FFFFFF (or the brand's cream page bg if the page bg
+  is colored — use white-on-cream contrast for card surfaces)
 
 TYPOGRAPHY (Javvy-exact — apply these values verbatim, do not adjust):
 
@@ -557,7 +617,7 @@ TYPOGRAPHY (Javvy-exact — apply these values verbatim, do not adjust):
   - font-weight: 400
   - letter-spacing: -0.02em (very subtle tightening)
   - line-height: 1.5
-  - color: #1F1F1F
+  - color: {{BODY_TEXT_HEX}}
   - LEFT-aligned
 
 - **Hook callout copy**, **author byline**, **scarcity text**, **trust
@@ -600,6 +660,24 @@ HOOK_LINE: {{HOOK_LINE}}
 
 REASONS:
 {{REASONS_BLOCK}}
+
+— SECTION COUNT GUARANTEE (read-once verification before you ship the HTML) —
+
+The REASONS block above lists numbered items as `REASON 1:`, `REASON 2:`,
+… `REASON N:`. **You MUST render every single REASON as its own
+`<section>` with its own numbered H2.** Count the REASONs in the block
+above, count the `<section>` elements you emit, and verify they match.
+If the block has 11 REASONs, the body has 11 numbered sections. If it
+has 10, the body has 10. Never fewer.
+
+**The closing offer block is SEPARATE and ADDITIONAL** — it is not a
+substitute for the last numbered reason. Even when the last REASON's
+copy says "the offer is the obvious next step", that REASON gets its
+own numbered `<section>` first, THEN the offer block follows.
+
+If you're at the end and the section count doesn't match, GO BACK and
+add the missing section before closing `<body>` — do not output a
+truncated page.
 
 OFFER_LABEL: {{OFFER_LABEL}}
 OFFER_PRODUCT_IMAGE_URL: {{OFFER_PRODUCT_IMAGE_URL}}
@@ -682,7 +760,7 @@ AFTER our inline `<style>`.
 <style>
   /* Override LanderLab base — keep body edge-to-edge and frame-free */
   html, body { margin: 0 !important; padding: 0 !important; border: 0 !important; }
-  body { background: #fff; }
+  body { background: {{PAGE_BG_HEX}}; }
   * { box-sizing: border-box; }
   /* Prevent the announcement bar text lines from wrapping mid-line
      (otherwise trailing emojis fall to their own row). The mobile

@@ -31,7 +31,7 @@ comparison table — we explicitly remove it from our adaptation.
    angle's audience-facing category.
 
    Pattern:
-   `# 10 Reasons Why This [Product Type] is the #1 [Angle-Derived Category] for [Year]`
+   `# 11 Reasons Why This [Product Type] is the #1 [Angle-Derived Category] for [Year]`
 
    Where:
    - `[Product Type]` = a short generic descriptor for what the product
@@ -47,14 +47,15 @@ comparison table — we explicitly remove it from our adaptation.
 
    Examples:
    - Angle "Aching Joints / Mobility Panic" + product "wellbe Beauty Kollagen" →
-     `# 10 Reasons Why This Collagen Supplement is the #1 Joint-Pain Remedy for 2026`
+     `# 11 Reasons Why This Collagen Supplement is the #1 Joint-Pain Remedy for 2026`
    - Angle "Cortisol-driven belly fat" + product "Ryze Mushroom Coffee" →
-     `# 10 Reasons Why This Mushroom Coffee is the #1 Cortisol-Reduction Drink for 2026`
+     `# 11 Reasons Why This Mushroom Coffee is the #1 Cortisol-Reduction Drink for 2026`
 
-   **The number is exactly 10.** It must match the count of numbered
-   sections in the body (also exactly 10). Earlier drafts of this template
-   used "11 Reasons" on the H1 (with the offer block as an implied 11th) —
-   that mismatch read as a bug and we've aligned both to 10.
+   **The number is exactly 11.** It must match the count of numbered
+   sections in the body (also exactly 11). The closing offer block is
+   SEPARATE from the 11 numbered sections — it is NOT section #12 and
+   it does NOT collapse into section #11. All 11 content sections must
+   be in the body before the offer block.
 
    The product NAME (the brand-branded full name) goes in the **body
    sections** and the **offer block**, not in the H1. The H1 stays
@@ -67,11 +68,11 @@ comparison table — we explicitly remove it from our adaptation.
    *Jade M. · February 4, 2026 · 4 min read*
 
 4. **TLDR line** — exactly one sentence, ending in `👇`. Pattern:
-   `**TLDR:** Using [Product Name] has 10 life-changing benefits 👇`
+   `**TLDR:** Using [Product Name] has 11 life-changing benefits 👇`
 
-5. **The 10 numbered sections.** The body has exactly 10 numbered
-   sections. This matches the count in the H1 ("10 Reasons") and in the
-   TLDR ("10 life-changing benefits"). Each section follows this exact
+5. **The 11 numbered sections.** The body has exactly 11 numbered
+   sections. This matches the count in the H1 ("11 Reasons") and in the
+   TLDR ("11 life-changing benefits"). Each section follows this exact
    micro-structure:
 
    ### [n]. [Bold benefit headline — short, punchy, opinionated]
@@ -84,7 +85,7 @@ comparison table — we explicitly remove it from our adaptation.
      They end after the body paragraph(s). This mirrors the canonical
      reference — the early sections build curiosity without yet pushing
      the click.
-   - **Sections #3 through #10 MUST have the `👉` CTA microcopy line.**
+   - **Sections #3 through #11 MUST have the `👉` CTA microcopy line.**
      One per section, no exceptions.
    - **Every CTA microcopy link target is `{{destination_url}}` — the
      exact URL the user supplied** (or `#` if none was supplied). Do
@@ -94,7 +95,7 @@ comparison table — we explicitly remove it from our adaptation.
      generation time.
    - CTA microcopy varies in flavor. Examples: *Try it free for 7 days*, *Grab the starter pack while it's 58% off*, *See the 60-second routine*, *Lock in your launch-week price*. Vary verb + payoff every time.
    - Section #1 should be the strongest single benefit driven by the angle.
-   - The **last numbered section (#10)** should nudge the reader back to the top / make them feel like they've now seen the whole picture and the offer is the obvious next step.
+   - The **last numbered section (#11)** should nudge the reader back to the top / make them feel like they've now seen the whole picture and the offer is the obvious next step. **It is a full content section with body copy and the `👉` CTA microcopy — it is NOT the offer block, do NOT merge it with the offer block.**
 
 6. **Closing offer block** — sits below the last numbered section. Matches
    the rhythm of the Javvy reference template (https://try.javvycoffee.com/ps/) — tight, urgent, no
@@ -155,7 +156,7 @@ comparison table — we explicitly remove it from our adaptation.
 - ❌ Quoting yourself as if you're an authority. The voice is a real customer / friend, not an editor or expert.
 - ❌ Using the words *unleash*, *revolutionary*, *game-changer*, *next-level*, *cutting-edge*, *synergy*. Banned.
 - ❌ Repeating the same CTA microcopy twice. Every 👉 CTA line is unique.
-- ❌ **Wrong section count.** The body contains EXACTLY 10 numbered sections. The H1 reads "10 Reasons" and the TLDR reads "10 life-changing benefits" — all three counts must agree. Count the numbered sections in the body before you finish — must be exactly 10.
+- ❌ **Wrong section count.** The body contains EXACTLY 11 numbered sections. The H1 reads "11 Reasons" and the TLDR reads "11 life-changing benefits" — all three counts must agree. Count the numbered sections in the body before you finish — must be exactly 11. Earlier drafts of this template used 10 sections; we explicitly bumped to 11 to match the canonical Javvy reference's section count.
 - ❌ **Including a comparison table** at the top of the listicle, between the byline and the numbered sections. The canonical reference has one; we explicitly REMOVE it from our adaptation. The first numbered section starts immediately after the byline / TLDR. No table, no chart, no row of icons comparing the product to alternatives.
 
 ---
@@ -184,7 +185,7 @@ Output **only** the finished listicle, in clean Markdown. No preamble, no closin
 {{offer}}
 ```
 
-**DESTINATION URL — the exact URL every CTA link in the listicle must point to.** All the `👉 **[...]({{destination_url}})**` microcopy links on sections #3-#10 and the closing offer block's `**[GET X% OFF →]({{destination_url}})**` button must use this URL as their link target verbatim. If this value is `#` or a placeholder, use it as-is — the renderer fills it in correctly.
+**DESTINATION URL — the exact URL every CTA link in the listicle must point to.** All the `👉 **[...]({{destination_url}})**` microcopy links on sections #3-#11 and the closing offer block's `**[GET X% OFF →]({{destination_url}})**` button must use this URL as their link target verbatim. If this value is `#` or a placeholder, use it as-is — the renderer fills it in correctly.
 
 ---
 

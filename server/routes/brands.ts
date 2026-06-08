@@ -21,14 +21,20 @@ import { requireAuth } from "../lib/auth.js";
 import { canSeeBrand, grantBrandsToUser, visibleBrandIds } from "../lib/brandAccess.js";
 import { ensureLogoIsPng } from "../lib/logoConvert.js";
 import { db, schema } from "../lib/db.js";
-import { extractJsonObject } from "../lib/jsonExtract.js";
+import { parseBrandGuidelines } from "../lib/brandGuidelinesParse.js";
 import { loadPrompt, PromptNotConfiguredError } from "../lib/prompts.js";
 import { fetchUrlMeta } from "../lib/urlMeta.js";
 import { runResearch as runProductResearch } from "./products.js";
 
 export const brandsRouter: Router = Router();
 
-const BRAND_RESEARCH_ACTION = "brand_extract";
+// The Brand Guidelines Generator skill (adapted into prompts/brand_guidelines.md)
+// is the single source of truth for brand identity. Output is the 8-section
+// markdown style guide stored verbatim on brand.guidelinesMarkdown — rendered
+// in the BrandInfoPage UI and injected into every downstream creative tool's
+// prompt. The old `brand_extract` action that produced a JSON dossier is
+// retired; nothing new reads brand.research.
+const BRAND_RESEARCH_ACTION = "brand_guidelines";
 
 function sendError(res: Response, status: number, message: string) {
   res.status(status).json({ error: message });
@@ -88,6 +94,7 @@ brandsRouter.patch("/:id", requireAuth, async (req: Request, res: Response) => {
       name?: string;
       brandUrl?: string | null;
       logoUrl?: string | null;
+      guidelinesMarkdown?: string;
       research?: unknown;
     };
     const updates: Record<string, unknown> = {};
@@ -99,6 +106,18 @@ brandsRouter.patch("/:id", requireAuth, async (req: Request, res: Response) => {
       // Downstream consumers (b-roll, message-testing, etc.) reject SVG
       // refs, so we never want an SVG URL on a brand row.
       updates.logoUrl = body.logoUrl ? await ensureLogoIsPng(body.logoUrl) : null;
+    }
+    if (typeof body.guidelinesMarkdown === "string") {
+      // Editor saved the markdown directly. Update the source of truth,
+      // and re-derive the mirrored brand.name + brand.logoUrl from the
+      // new content so the brand chip stays consistent.
+      const md = body.guidelinesMarkdown;
+      updates.guidelinesMarkdown = md;
+      const reparsed = parseBrandGuidelines(md);
+      if (reparsed.name && !body.name) updates.name = reparsed.name;
+      if (reparsed.logoUrl && body.logoUrl === undefined) {
+        updates.logoUrl = await ensureLogoIsPng(reparsed.logoUrl);
+      }
     }
     if (body.research !== undefined) updates.research = body.research;
     if (Object.keys(updates).length === 0) return sendError(res, 400, "No updates provided");
@@ -402,11 +421,18 @@ brandsRouter.post("/:id/research", requireAuth, async (req: Request, res: Respon
 });
 
 /**
- * Runs the brand_extract master prompt against the brand URL, parses the JSON
- * dossier, and stores it on brands.research. Also mirrors the logoUrl into the
- * dedicated column so the BrandSwitcher can render it without parsing JSON.
+ * Runs the brand_guidelines prompt (adapted from the Brand Guidelines
+ * Generator skill) against the brand URL. The prompt's output is the raw
+ * 8-section markdown style guide — that's the single source of truth.
+ *
+ * After generation we run the deterministic markdown parser to mirror
+ * `name` (from the H1) and `logoUrl` (from the Logo Usage section's image
+ * link) into the dedicated brand columns. Those mirrored columns let the
+ * BrandSwitcher render the brand chip + logo without having to parse
+ * markdown on every request. They are derived, not authored — re-running
+ * research overwrites them from the new markdown.
  */
-async function runBrandResearch(brandId: string, brandUrl: string): Promise<void> {
+export async function runBrandResearch(brandId: string, brandUrl: string): Promise<void> {
   const started = Date.now();
   try {
     await db
@@ -422,30 +448,29 @@ async function runBrandResearch(brandId: string, brandUrl: string): Promise<void
       tools: prompt.config.tools,
     });
 
-    // brand_extract is expectsJson: true. Use the centralised extractor —
-    // it strips ```json fences, then if that fails grabs the first
-    // balanced { ... } substring (which survives trailing commentary).
-    // Logs stop_reason + length in the error for fast debugging when
-    // the upstream prompt truncates or goes off-format.
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = extractJsonObject<Record<string, unknown>>(result.text, {
-        stopReason: result.stopReason,
-        action: BRAND_RESEARCH_ACTION,
-      });
-    } catch (err) {
-      // Log the full raw output so we can post-mortem prompt issues
-      // without redeploying. The error thrown is short + user-safe.
+    // The skill is configured `expectsJson: false`. The raw response IS
+    // the markdown document — no JSON parsing, no fence stripping. We
+    // trim trailing whitespace defensively and verify the document
+    // starts at an H1 (the prompt is strict that the first character
+    // must be `#`).
+    const markdown = result.text.replace(/^\s+|\s+$/g, "");
+    if (!markdown.startsWith("#")) {
       console.error(
-        `[brands] ${BRAND_RESEARCH_ACTION} parse failed for ${brandUrl}.\n` +
+        `[brands] ${BRAND_RESEARCH_ACTION} output didn't start with an H1 for ${brandUrl}.\n` +
         `stop_reason=${result.stopReason} tokensOut=${result.tokensOut}\n` +
-        `RAW OUTPUT:\n${result.text}`
+        `RAW OUTPUT:\n${result.text}`,
       );
-      throw err;
+      throw new Error("Brand guidelines output did not start with a markdown heading — prompt likely produced commentary instead of the document.");
     }
 
-    const rawLogoUrl = typeof parsed.logoUrl === "string" ? parsed.logoUrl : null;
-    const extractedName = typeof parsed.name === "string" ? parsed.name.trim() : "";
+    // Deterministic one-way read of the markdown for the two derived
+    // fields the brand chip + downstream tools need without parsing the
+    // full document. parseBrandGuidelines is not a separate extraction
+    // method — it's a regex view of the section structure the prompt
+    // emits.
+    const parsed = parseBrandGuidelines(markdown);
+    const rawLogoUrl = parsed.logoUrl;
+    const extractedName = parsed.name;
 
     // Convert SVG logos to PNG before persisting. fal.ai's image
     // generation models reject SVGs as reference images, which makes the
@@ -454,14 +479,19 @@ async function runBrandResearch(brandId: string, brandUrl: string): Promise<void
     // never have to think about format compatibility.
     const logoUrl = await ensureLogoIsPng(rawLogoUrl);
 
-    // brand_extract is the source of truth for name + logo — overwrite
-    // whatever placeholder is on the row. If extraction returned a blank
-    // name, keep the placeholder rather than wiping it.
     const setPatch: Record<string, unknown> = {
-      research: parsed,
+      // The single source of truth — the markdown style guide verbatim.
+      guidelinesMarkdown: markdown,
+      // Mirrored fields used by the brand chip / downstream code that
+      // shouldn't parse the markdown on every read.
+      logoUrl,
+      // Clear the legacy JSON dossier — anything new reads
+      // guidelinesMarkdown instead. (We keep the column for older brands
+      // until the boot-time backfill regenerates them, but a freshly
+      // generated brand has no need to keep both.)
+      research: null,
       researchStatus: "complete",
       researchError: null,
-      logoUrl,
     };
     if (extractedName) setPatch.name = extractedName;
 
@@ -474,7 +504,7 @@ async function runBrandResearch(brandId: string, brandUrl: string): Promise<void
       action: BRAND_RESEARCH_ACTION,
       kind: "text",
       inputs: { brandId, url: brandUrl },
-      output: { brand: parsed },
+      output: { markdown },
       model: result.model,
       promptVersion: prompt.version,
       tokensIn: result.tokensIn,
@@ -484,8 +514,9 @@ async function runBrandResearch(brandId: string, brandUrl: string): Promise<void
     });
 
     console.log(
-      `[brands] research complete for ${brandId} in ${Date.now() - started}ms — ` +
-      `$${result.costUsd.toFixed(4)}, ${result.tokensIn} in / ${result.tokensOut} out`
+      `[brands] guidelines generated for ${brandId} in ${Date.now() - started}ms — ` +
+      `$${result.costUsd.toFixed(4)}, ${result.tokensIn} in / ${result.tokensOut} out, ` +
+      `markdown=${markdown.length} chars, colors=${parsed.colors.length}, fonts=${parsed.fonts.length}`,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -495,7 +526,7 @@ async function runBrandResearch(brandId: string, brandUrl: string): Promise<void
       .set({
         researchStatus: "failed",
         researchError: err instanceof PromptNotConfiguredError
-          ? "Brand research prompt not configured. Create prompts/brand_extract.md."
+          ? "Brand guidelines prompt not configured. Create prompts/brand_guidelines.md."
           : msg,
       })
       .where(eq(schema.brands.id, brandId));
