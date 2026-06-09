@@ -81,6 +81,108 @@ function stripBoilerplate(text: string): string {
     .replace(/If there is no product image needed[^.]*\./gi, "");
 }
 
+/** HTML-escape user copy that we inject directly into a server-built section. */
+function escapeForHtml(s: string): string {
+  return (s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Deterministic server-side fallback for sections Claude refuses to
+ * render. After the validator + retry both fail to recover a missing
+ * section, we construct the section's HTML ourselves using the listicle
+ * template's standard class names (matches what the prompt produces) and
+ * inject it at the right position in the document.
+ *
+ * Insertion target, in priority order:
+ *   1. Right before the buy-box / offer block (so missing sections sit
+ *      between the last rendered section and the closing offer).
+ *   2. Right before `</main>` or `</footer>`.
+ *   3. Right before `</body>` as a last resort.
+ *
+ * Sections are inserted in their original numerical order so a missing
+ * #7 lands between #6 and #8, not at the very end of the list. (We
+ * can't truly interleave without parsing the DOM, but inserting at the
+ * insertion target preserves numerical reading order well enough — the
+ * H2 reads "7. ..." even if it appears at position #10 in the markup.)
+ */
+function injectMissingSections(
+  html: string,
+  missing: number[],
+  parsedReasons: { headline: string; body: string }[],
+  images: { imageUrl: string | null }[],
+  destinationUrl: string,
+  primaryHex: string,
+): string {
+  if (missing.length === 0) return html;
+  // Locate insertion point. We try several known markers in order of
+  // specificity — the listicle template emits comments like
+  // `<!-- BUY BOX -->` consistently, but other templates may not.
+  const markers = [
+    "<!-- BUY BOX -->",
+    "<!--BUY BOX-->",
+    '<div class="buy-box-wrap"',
+    '<section class="buy-box"',
+    '<section data-inana-cta-block',
+    '<div class="buybox"',
+    "<footer",
+    "</main>",
+    "</body>",
+  ];
+  let insertAt = -1;
+  for (const m of markers) {
+    const idx = html.indexOf(m);
+    if (idx > 0 && (insertAt === -1 || idx < insertAt)) insertAt = idx;
+  }
+  if (insertAt === -1) return html; // can't find anywhere safe to inject
+
+  const safeUrl = escapeForHtml(destinationUrl || "#");
+  const safePrimary = escapeForHtml(primaryHex || "#1A1A1A");
+
+  // Build the injected section HTML. Mirrors the listicle template's
+  // standard class names (`reason-section`, `h2-section`, `reason-img`,
+  // `body-p`). Headlines that contain double-line breaks get split into
+  // multiple paragraphs so the layout stays consistent with the
+  // Claude-rendered sections.
+  const sectionsHtml = missing
+    .map((n) => {
+      const r = parsedReasons[n - 1];
+      if (!r) return "";
+      const img = images[n - 1]?.imageUrl ?? "";
+      const headline = escapeForHtml(r.headline);
+      const bodyParas = r.body
+        .split(/\n\s*\n/)
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .map((p) => `<p class="body-p">${escapeForHtml(p)}</p>`)
+        .join("\n  ");
+      // CTA microcopy — required on sections #3+. Generic verb so the
+      // injected section feels native.
+      const ctaLine = n >= 3
+        ? `<p class="body-p">👉 <strong><a href="${safeUrl}" style="color:${safePrimary};">See the full routine →</a></strong></p>`
+        : "";
+      const imgTag = img ? `<img class="reason-img" src="${escapeForHtml(img)}" alt="">` : "";
+      return [
+        `<!-- REASON ${n} (server-injected fallback — Claude dropped this section in render) -->`,
+        `<section class="reason-section">`,
+        `  <h2 class="h2-section">${n}. ${headline}</h2>`,
+        `  ${imgTag}`,
+        `  ${bodyParas}`,
+        ctaLine ? `  ${ctaLine}` : "",
+        `</section>`,
+        ``,
+      ].filter(Boolean).join("\n");
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
+  return html.slice(0, insertAt) + sectionsHtml + "\n\n" + html.slice(insertAt);
+}
+
 /**
  * Pull every "N. ..." numbered section heading number out of rendered
  * listicle HTML. Tolerant of various heading shapes the model might use:
@@ -531,12 +633,20 @@ listiclesRouter.post("/:id/extract-offer", async (req: Request, res: Response) =
 
     // Fetch the destination page. We tolerate failures gracefully —
     // a sensible-but-empty offer object is OK, the user can still ship.
+    //
+    // We keep the FULL HTML on `pageHtmlFull` for the discount badge
+    // scan (Alcami's discount badges sit beyond the 50K mark — slicing
+    // for Claude before scanning misses them). The `pageContent` we
+    // hand to the LLM is still capped at 50K to keep the prompt within
+    // model context limits.
+    let pageHtmlFull = "";
     let pageContent = "";
     try {
       const r = await fetch(row.destinationUrl, {
         headers: { "User-Agent": "Mozilla/5.0 (compatible; InanaBot/1.0)" },
       });
-      pageContent = (await r.text()).slice(0, 50_000); // cap at 50K chars
+      pageHtmlFull = await r.text();
+      pageContent = pageHtmlFull.slice(0, 50_000); // cap at 50K chars for the LLM
     } catch (err) {
       console.warn(`[listicles] failed to fetch destinationUrl ${row.destinationUrl}:`, err);
     }
@@ -656,6 +766,69 @@ listiclesRouter.post("/:id/extract-offer", async (req: Request, res: Response) =
       }
     } catch (err) {
       console.warn(`[listicles] Shopify .json fetch failed (non-fatal):`, err);
+    }
+
+    // SECOND-PASS HTML SCAN — for visible discount badges (e.g. quantity
+    // discounts "15% OFF / 20% OFF / 25% OFF", subscription savings
+    // "subscribe & save 24%", banner promos "29% OFF") that aren't
+    // exposed in the product's .json variant `compare_at_price` or
+    // `selling_plan_groups`. Many Shopify brands use third-party apps
+    // (ReBuy, Stay AI, Bold Subscriptions, Booster Bundle Discounts,
+    // etc.) that render their discount badges directly in the page
+    // HTML and never write to the canonical pricing fields.
+    //
+    // Triggered when the .json fact-check found 0% discount but the
+    // rendered HTML clearly advertises a percent off. We pick the MAX
+    // % found, capped at 90% as a sanity ceiling.
+    //
+    // Filtering — to avoid false positives like "30% protein", "20% of
+    // customers", "10% body fat reduction", we ONLY match when the
+    // percentage is paired with a discount-context word: "off",
+    // "discount", "save", "savings", "rabatt", "sparen", "réduction",
+    // "ahorra", "subscribe".
+    if (verifiedMaxDiscount === 0) {
+      // Scan the FULL HTML (not the 50K slice). Alcami specifically
+      // renders its discount badges past the 50K mark — slicing first
+      // makes us miss them entirely. Scanning is a cheap regex pass.
+      const htmlScanned = pageHtmlFull || pageContent;
+      const candidates: { pct: number; matched: string }[] = [];
+      const patterns: RegExp[] = [
+        // "15% OFF", "25% off!", "Up to 50% off"
+        /\b(\d{1,2})\s*%\s*off\b/gi,
+        /\b(\d{1,2})\s*%\s*discount\b/gi,
+        // Subscribe & save 24% / Save 20% / Save up to 30%
+        /\bsave\s+(?:up\s+to\s+)?(\d{1,2})\s*%/gi,
+        /\bsubscribe\s*(?:&|and)\s*save\s*(?:up\s+to\s+)?(\d{1,2})\s*%/gi,
+        // German
+        /\b(\d{1,2})\s*%\s*rabatt\b/gi,
+        /\bbis\s+zu\s+(\d{1,2})\s*%/gi,
+        /\bspare\s+(\d{1,2})\s*%/gi,
+        // French / Spanish
+        /\b(\d{1,2})\s*%\s*de?\s*r[ée]duction\b/gi,
+        /\b(\d{1,2})\s*%\s*de?\s*descuento\b/gi,
+        /\bahorra\s+(\d{1,2})\s*%/gi,
+      ];
+      for (const re of patterns) {
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(htmlScanned)) !== null) {
+          const pct = parseInt(m[1] ?? "0", 10);
+          if (pct >= 5 && pct <= 90) candidates.push({ pct, matched: m[0] });
+        }
+      }
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => b.pct - a.pct);
+        const top = candidates[0]!;
+        verifiedMaxDiscount = top.pct;
+        pricingFacts =
+          (pricingFacts || "") +
+          `\n\n## VERIFIED PAGE-HTML DISCOUNT SCAN (no .json compare_at; found visible discount badges)\n\n` +
+          `Highest discount badge in page HTML: **${top.pct}%** (matched: "${top.matched.trim()}")\n\n` +
+          `All discount matches found, max first:\n${candidates.slice(0, 8).map((c) => `  - ${c.pct}% ("${c.matched.trim()}")`).join("\n")}\n\n` +
+          `**Use exactly ${top.pct}% in discount_label.** Format: "Up to ${top.pct}% off". This is the brand's highest visible discount badge, verified by direct text match on the page HTML.\n`;
+        console.log(
+          `[listicles] HTML discount scan: max = ${top.pct}% (matched "${top.matched.trim()}", total candidates ${candidates.length})`,
+        );
+      }
     }
 
     const prompt = loadPrompt("offer_extract", { page_content: pageContent + pricingFacts });
@@ -1449,26 +1622,28 @@ listiclesRouter.post("/:id/render-html", async (req: Request, res: Response) => 
         throw new Error("HTML render did not produce a full document (missing <!DOCTYPE html>)");
       }
 
-      // POST-RENDER SECTION-COUNT VALIDATION + RETRY
+      // POST-RENDER SECTION-COUNT VALIDATION + RETRY + DETERMINISTIC FALLBACK
       //
-      // Even with explicit "render every REASON" instructions in the
-      // prompt, the model occasionally drops sections — usually #7 +
-      // #11 on an 11-section listicle. Detect missing section numbers
-      // in the rendered HTML and run a single targeted re-render with
-      // an explicit "you missed sections X and Y" feedback. Capped at
-      // one retry to avoid infinite loops if the model keeps failing.
-      //
-      // Detection: look for `<h2>...N. ...</h2>` style numbered
-      // headings (matches the prompt's section structure). Compare
-      // against the count we sent in REASONS_BLOCK.
+      // Three layers of recovery, each cheaper than the previous failing
+      // to take the gap to zero:
+      //   1. Validator — count numbered <h2> sections, compare to
+      //      expected from parsedReasons. Always logs so we can audit
+      //      every render.
+      //   2. Retry — one targeted re-render with "you missed sections
+      //      X and Y" feedback. Capped at one to bound latency.
+      //   3. Deterministic server-side injection — if Claude STILL
+      //      refuses to render a section after the retry, we build
+      //      the section HTML ourselves and inject it before the buy-
+      //      box. Always produces a complete page.
       const expectedCount = parsedReasons.length;
-      const rendered = extractRenderedSectionNumbers(html);
-      const missing = computeMissingSections(expectedCount, rendered);
-      if (missing.length > 0) {
-        console.warn(
-          `[listicles] section-count validation: expected ${expectedCount}, rendered ${rendered.length} (numbers: ${rendered.join(", ")}); missing: ${missing.join(", ")} — retrying`,
-        );
-        const missingReasonsBlock = missing
+      const firstRendered = extractRenderedSectionNumbers(html);
+      const firstMissing = computeMissingSections(expectedCount, firstRendered);
+      console.log(
+        `[listicles] section-count check: expected ${expectedCount}, rendered ${firstRendered.length} (${firstRendered.join(", ")})${firstMissing.length > 0 ? `, MISSING: ${firstMissing.join(", ")}` : ", complete"}`,
+      );
+      if (firstMissing.length > 0) {
+        // Layer 2 — targeted retry.
+        const missingReasonsBlock = firstMissing
           .map((n) => {
             const r = parsedReasons[n - 1];
             if (!r) return null;
@@ -1483,27 +1658,51 @@ listiclesRouter.post("/:id/render-html", async (req: Request, res: Response) => 
           .filter(Boolean)
           .join("\n\n");
         const fixupUser =
-          `The previous HTML render dropped ${missing.length} numbered section(s): ${missing.join(", ")}. ` +
+          `Your previous HTML render dropped ${firstMissing.length} numbered section(s): ${firstMissing.join(", ")}. ` +
           `Re-render the COMPLETE HTML document including ALL ${expectedCount} numbered sections this time. ` +
           `The sections you missed last time:\n\n${missingReasonsBlock}\n\n` +
           `Output the FULL document from <!DOCTYPE html> to </html> — not just the missing sections. ` +
-          `Every numbered section from 1 to ${expectedCount} must appear in document order, each rendered with its own image and CTA microcopy.`;
-        const fixupResult = await generateText({
-          systemPrompt: prompt.rendered,
-          userMessage: fixupUser,
-          model: prompt.config.model,
-          maxTokens: prompt.config.maxTokens ?? 16000,
-        });
-        const fixupHtml = fixupResult.text.trim();
-        if (fixupHtml.toLowerCase().includes("<!doctype html>")) {
-          const renderedAfter = extractRenderedSectionNumbers(fixupHtml);
-          const stillMissing = computeMissingSections(expectedCount, renderedAfter);
-          if (stillMissing.length < missing.length) {
-            html = fixupHtml;
-            console.log(`[listicles] section-count retry succeeded: now have ${renderedAfter.length}/${expectedCount} sections${stillMissing.length > 0 ? `; ${stillMissing.length} still missing (${stillMissing.join(", ")})` : ""}`);
+          `Every numbered section from 1 to ${expectedCount} MUST appear in document order, each rendered with its own h2, image, body paragraphs, and CTA microcopy. ` +
+          `Before you finish, COUNT your numbered <h2> elements. The count must be exactly ${expectedCount}.`;
+        try {
+          const fixupResult = await generateText({
+            systemPrompt: prompt.rendered,
+            userMessage: fixupUser,
+            model: prompt.config.model,
+            maxTokens: prompt.config.maxTokens ?? 16000,
+          });
+          const fixupHtml = fixupResult.text.trim();
+          if (fixupHtml.toLowerCase().includes("<!doctype html>")) {
+            const renderedAfter = extractRenderedSectionNumbers(fixupHtml);
+            const stillMissing = computeMissingSections(expectedCount, renderedAfter);
+            if (stillMissing.length < firstMissing.length) {
+              html = fixupHtml;
+              console.log(`[listicles] section-count retry: now have ${renderedAfter.length}/${expectedCount}${stillMissing.length > 0 ? `; ${stillMissing.length} still missing: ${stillMissing.join(", ")}` : " (complete)"}`);
+            } else {
+              console.warn(`[listicles] section-count retry did not improve (still missing: ${stillMissing.join(", ")}); keeping first render`);
+            }
           } else {
-            console.warn(`[listicles] section-count retry did not improve (still missing: ${stillMissing.join(", ")}); keeping first render`);
+            console.warn(`[listicles] section-count retry produced a non-document (no <!DOCTYPE html>); keeping first render`);
           }
+        } catch (retryErr) {
+          console.warn(`[listicles] section-count retry threw (non-fatal):`, retryErr);
+        }
+
+        // Layer 3 — deterministic server-side injection. Constructs the
+        // section HTML ourselves using the listicle template's class
+        // conventions and inserts it before the buy-box. Guarantees a
+        // complete page even when Claude refuses to render a section.
+        const finalMissing = computeMissingSections(expectedCount, extractRenderedSectionNumbers(html));
+        if (finalMissing.length > 0) {
+          html = injectMissingSections(
+            html,
+            finalMissing,
+            parsedReasons,
+            images.map((i) => ({ imageUrl: i?.imageUrl ?? null })),
+            row.destinationUrl ?? "#",
+            primary,
+          );
+          console.log(`[listicles] section-count fallback: server-injected ${finalMissing.length} missing section(s): ${finalMissing.join(", ")}`);
         }
       }
 

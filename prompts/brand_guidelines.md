@@ -39,7 +39,24 @@ The user will pass you a single input variable: `{{url}}` — the brand's primar
 - Use the **exact section structure** below — eight numbered top-level H2 sections, each with the labelled subsections shown. Downstream parsers depend on these headings being present and spelled exactly as shown.
 - For typography + color tables, fill in REAL values from the site. Never use placeholder text like `[Name]`, `[Brief description]`, or `#XXXXXX` in the final output — those are scaffolding for you to replace.
 - Embed real hex codes verbatim. Always uppercase: `#FF7849`, not `#ff7849`.
-- For fonts, write the EXACT family name as shown in the CSS (e.g. `Cormorant Garamond`, `Inter`, `GT Sectra`). The font name MUST be a single short identifier — no parentheses, no commas, no descriptive blobs. If you cannot resolve the exact family name (Adobe Fonts is opaque, the brand uses a custom self-hosted file with an obfuscated CSS name like `apercu-web`, etc.), output **one of these safe Google Fonts alternatives** instead, picked to match the feel you observed: `Inter`, `DM Sans`, `Manrope`, `Lora`, `Playfair Display`, `Cormorant Garamond`, `Fraunces`, `Libre Caslon Text`, `Libre Franklin`, `Noto Sans`. Annotate the choice with `_(brand uses a custom font we couldn't ID — substituted closest Google Font)_` on the same line. **NEVER output a font name containing parentheses or describing the font instead of naming it** — downstream renderers parse the family name verbatim into `font-family:`.
+- For fonts, write the EXACT family name as shown in the CSS (e.g. `Cormorant Garamond`, `Inter`, `GT Sectra`). The font name MUST be a single short identifier — no parentheses, no commas, no descriptive blobs.
+
+  **Font selection priority — work this list IN ORDER, stop at the first hit:**
+
+  1. **A Google Fonts family the brand actively loads on its own site.** Look for `<link href="https://fonts.googleapis.com/css2?family=NAME...">` in the page HTML. Each `family=NAME` is a confirmed Google Fonts dependency the brand has chosen to use. **Prefer these above all else** — they are the brand's real Google-Fonts-compatible families. If you find multiple (e.g. Alcami loads `Libre Baskerville`, `Albert Sans`, `Outfit`, `Cabin`), pick the **most editorial / display-feeling one** for Primary Font and the **most utilitarian / body-feeling one** for Secondary Font. Do not annotate — these are exact matches, not substitutions.
+
+  2. **A paid / Adobe / custom-hosted font name you can clearly identify** (Apercu, Domaine Display, GT Walsheim, Söhne, etc.). Write the exact family name verbatim. Annotate the line with `_(commercial font — render renderer will load via paid CDN if licensed, otherwise fall back to substitute)_`.
+
+  3. **Last resort — closest Google Fonts substitute.** Only when steps 1+2 both fail. Pick from this list, matching the visual feel you observed:
+     - For **high-contrast display serifs** (Didone family — Domaine Display, Bodoni, Caslon Display): `Playfair Display`, `Bodoni Moda`, `DM Serif Display`
+     - For **low-contrast humanist serifs** (Garamond family — Cormorant, EB Garamond, Sabon): `Cormorant Garamond`, `EB Garamond`, `Lora`
+     - For **modern transitional / utility serifs** (Caslon, Crimson, Fraunces feel): `Fraunces`, `Libre Caslon Text`, `Libre Baskerville`
+     - For **geometric sans-serifs** (Garet, Avenir, Futura, Spacetype): `Manrope`, `DM Sans`, `Outfit`
+     - For **humanist sans** (Apercu, Söhne, GT Walsheim, Inter): `Inter`, `Albert Sans`, `Libre Franklin`
+     - For **utility / neutral sans**: `Noto Sans`, `Inter`
+     Annotate the line with `_(brand uses a custom font we couldn't ID — substituted closest Google Font: <reason for choice>)_`. The reason must reference what you observed (e.g. "high-contrast serif feel", "geometric sans with wide aperture").
+
+  **NEVER output a font name containing parentheses or describing the font instead of naming it** — downstream renderers parse the family name verbatim into `font-family:`. Defaulting blindly to `Cormorant Garamond` + `Inter` without going through steps 1+2 first is a defect — every brand that loads its own Google Fonts deserves to be matched to those fonts.
 - Logo image: emit a markdown image (`![alt](url)`) with the absolute logo URL you extracted. If you genuinely cannot find a downloadable logo asset, write `_Logo not extractable — placeholder needed._` in the Primary Logo subsection.
 
 ---
