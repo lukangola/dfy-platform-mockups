@@ -160,7 +160,9 @@ export function createBrand(args: {
   factSheet?: string;
   productName?: string;
   productImageUrl: string;
-  productBackImageUrl: string;
+  // Back image is optional — front shot alone is enough for every
+  // downstream generator. Server stores NULL when omitted.
+  productBackImageUrl?: string;
 }): Promise<{ brand: Brand; product: Product }> {
   return post<{ brand: Brand; product: Product }>("/api/brands", args);
 }

@@ -314,8 +314,11 @@ export default function ProductsPage() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
-            style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)" }}
+            // z-[60] sits above the BrandSwitcher dropdown + sidebar
+            // tooltips (both z-50) so the modal can't get visually
+            // sandwiched under sibling chrome.
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+            style={{ background: "rgba(0,0,0,0.78)", backdropFilter: "blur(8px)" }}
             onClick={() => { if (!submitting) { resetAddForm(); setShowAddForm(false); } }}
           >
             <motion.div

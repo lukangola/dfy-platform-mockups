@@ -145,7 +145,7 @@ brandsRouter.patch("/:id", requireAuth, async (req: Request, res: Response) => {
  *     factSheet?: string,
  *     productName?: string,
  *     productImageUrl: string,       // mandatory — clean front shot
- *     productBackImageUrl: string,   // mandatory — clean back shot
+ *     productBackImageUrl?: string,  // optional — clean back shot
  *   }
  *
  * Creates the brand, creates its first product, returns both.
@@ -193,7 +193,10 @@ brandsRouter.post("/", requireAdmin, async (req: Request, res: Response) => {
     }
   }
   if (!productImageUrl) return sendError(res, 400, "productImageUrl (front) is required");
-  if (!productBackImageUrl) return sendError(res, 400, "productBackImageUrl is required");
+  // Back image is optional — many products are shot as single-hero only.
+  // When absent we store NULL on the product row and skip the back-image
+  // seed in initialCandidates below; the front shot alone is enough for
+  // every downstream generator's product-fidelity check.
 
   // Placeholder name derived from the hostname until brand_extract fills it in.
   const placeholderName = brandUrlParsed.hostname.replace(/^www\./, "");
@@ -234,11 +237,14 @@ brandsRouter.post("/", requireAdmin, async (req: Request, res: Response) => {
     }
     if (!productName) productName = factSheet ? factSheet.slice(0, 60) : placeholderName;
 
-    // Seed imageCandidates with the mandatory front+back uploads (highest score
-    // so they sort first in the candidate gallery).
+    // Seed imageCandidates with the user uploads (highest score so they
+    // sort first in the candidate gallery). Back image is only added
+    // when present — undefined back ⇒ no second seed row.
     const initialCandidates = [
       { url: productImageUrl, width: null, height: null, source: "user-upload", score: 6000 },
-      { url: productBackImageUrl, width: null, height: null, source: "user-upload-back", score: 5900 },
+      ...(productBackImageUrl
+        ? [{ url: productBackImageUrl, width: null, height: null, source: "user-upload-back", score: 5900 }]
+        : []),
       ...scrapeCandidates,
     ];
 
@@ -251,7 +257,9 @@ brandsRouter.post("/", requireAdmin, async (req: Request, res: Response) => {
         productUrl: productUrl || null,
         factSheet: factSheet || null,
         productImageUrl,
-        productBackImageUrl,
+        // Empty string ⇒ NULL so the column accurately reflects "no back
+        // shot uploaded" instead of pretending an empty string is a URL.
+        productBackImageUrl: productBackImageUrl || null,
         researchStatus: "pending",
         research: { imageCandidates: initialCandidates },
       })

@@ -2,11 +2,13 @@
  * New-brand creation form.
  *
  * Required inputs:
- *   - Brand name
  *   - Brand URL (drives brand_extract research)
  *   - Either a product URL OR a pasted fact sheet (drives product_research)
- *   - Mandatory clean front + back product images (uploaded to fal.storage
- *     before we submit, so the server just stores the URLs).
+ *   - A clean front product image (uploaded to fal.storage before submit)
+ *
+ * Optional inputs:
+ *   - Back product image — improves downstream image generators when
+ *     present, but the brand can be created without it.
  *
  * On submit the dialog hits POST /api/brands, which creates the brand + its
  * first product and fires both research pipelines in parallel. We hand the
@@ -55,12 +57,15 @@ export default function CreateBrandDialog({ open, onClose }: Props) {
     onClose();
   }
 
+  // Back image is optional — many brands have a single canonical product
+  // shot and the user shouldn't be blocked from creating a workspace just
+  // because they don't have a back photo handy. Front is still required:
+  // it's the hero shot every downstream image/video generator anchors on.
   const canSubmit =
     !submitting &&
     brandUrl.trim() &&
     (productInputMode === "url" ? productUrl.trim() : factSheet.trim()) &&
     front.uploadedUrl &&
-    back.uploadedUrl &&
     !front.uploading &&
     !back.uploading;
 
@@ -75,7 +80,10 @@ export default function CreateBrandDialog({ open, onClose }: Props) {
         factSheet: productInputMode === "factSheet" ? factSheet.trim() : undefined,
         productName: productName.trim() || undefined,
         productImageUrl: front.uploadedUrl!,
-        productBackImageUrl: back.uploadedUrl!,
+        // Back is optional — pass undefined when the slot is empty so the
+        // server can store NULL on the product row instead of an empty
+        // string masquerading as a URL.
+        productBackImageUrl: back.uploadedUrl ?? undefined,
       });
       toast("Brand created — name & logo extracting in the background");
       resetAndClose();
@@ -88,8 +96,12 @@ export default function CreateBrandDialog({ open, onClose }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}
+      // z-[60] sits above the BrandSwitcher dropdown (z-50) and the
+      // sidebar tooltips (also z-50) so the modal can't get visually
+      // sandwiched under sibling chrome. Backdrop is solid enough that
+      // nothing behind shows through.
+      className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+      style={{ background: "rgba(0,0,0,0.78)", backdropFilter: "blur(6px)" }}
       onClick={(e) => {
         if (e.target === e.currentTarget) resetAndClose();
       }}
@@ -196,28 +208,29 @@ export default function CreateBrandDialog({ open, onClose }: Props) {
             </label>
           </section>
 
-          {/* Mandatory front + back images */}
+          {/* Front (required) + Back (optional) product images */}
           <section className="space-y-3">
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-mono uppercase tracking-wider text-white/40">
-                Clean product shots <span className="text-amber-400">— required</span>
+                Clean product shots
               </span>
               <div className="flex-1 h-px bg-white/[0.06]" />
             </div>
             <p className="text-[11px] text-white/40 leading-relaxed">
-              Upload a clean front and back shot of the product on a plain background. These become the
-              canonical references for every downstream image/video generator.
+              The front shot is the canonical hero — every downstream image/video generator anchors
+              on it. The back shot is optional but improves accuracy when present (extra label
+              detail, ingredients, claims).
             </p>
 
             <div className="grid grid-cols-2 gap-3">
               <ImageUploadSlot
-                label="Front"
+                label="Front — required"
                 slot={front}
                 onChange={(file) => void handleImageFile(file, setFront)}
                 onClear={() => setFront(emptyImageSlot())}
               />
               <ImageUploadSlot
-                label="Back"
+                label="Back — optional"
                 slot={back}
                 onChange={(file) => void handleImageFile(file, setBack)}
                 onClear={() => setBack(emptyImageSlot())}

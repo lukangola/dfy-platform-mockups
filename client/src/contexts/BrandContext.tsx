@@ -36,7 +36,9 @@ type BrandContextValue = {
     factSheet?: string;
     productName?: string;
     productImageUrl: string;
-    productBackImageUrl: string;
+    // Back image is optional — the front shot is enough for every
+    // downstream generator. When omitted the server stores NULL.
+    productBackImageUrl?: string;
   }) => Promise<{ brand: Brand; product: Product }>;
 };
 
