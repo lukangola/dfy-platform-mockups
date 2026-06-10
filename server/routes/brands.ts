@@ -17,8 +17,8 @@
 import { and, desc, eq, inArray, sql as sqlTag } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
-import { requireAuth } from "../lib/auth.js";
-import { canSeeBrand, grantBrandsToUser, visibleBrandIds } from "../lib/brandAccess.js";
+import { requireAdmin, requireAuth } from "../lib/auth.js";
+import { canSeeBrand, visibleBrandIds } from "../lib/brandAccess.js";
 import { ensureLogoIsPng } from "../lib/logoConvert.js";
 import { db, schema } from "../lib/db.js";
 import { parseBrandGuidelines } from "../lib/brandGuidelinesParse.js";
@@ -150,8 +150,16 @@ brandsRouter.patch("/:id", requireAuth, async (req: Request, res: Response) => {
  *
  * Creates the brand, creates its first product, returns both.
  * Brand research (brand_extract) and product research run async in parallel.
+ *
+ * Admin-only. Non-admin members must never be able to create workspaces —
+ * a workspace they spawn would have no `brand_members` row for the admin
+ * (admins implicitly see every brand on their team, so the row check is
+ * skipped anyway, but the intent is to keep workspace creation a managed
+ * action). Defense in depth: the BrandSwitcher hides the "Add new brand"
+ * button when `role !== "admin"`, but the API must enforce this too so
+ * a member can't bypass the UI by hitting the endpoint directly.
  */
-brandsRouter.post("/", requireAuth, async (req: Request, res: Response) => {
+brandsRouter.post("/", requireAdmin, async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as {
     brandUrl?: string;
     productUrl?: string;
@@ -206,14 +214,11 @@ brandsRouter.post("/", requireAuth, async (req: Request, res: Response) => {
       })
       .returning();
 
-    // Auto-grant access to (a) the creator and (b) every admin on the
-    // team — admins don't strictly need a row (the role check bypasses
-    // this table), but other MEMBERS who happen to be the creator do.
-    // We only persist a row for the creator if they're NOT an admin;
-    // admins get implicit access via canSeeBrand's role short-circuit.
-    if (req.auth!.role !== "admin") {
-      await grantBrandsToUser({ userId: user.id, brandIds: [brand.id], createdBy: user.id });
-    }
+    // No brand_members grant needed for the creator — the route is
+    // requireAdmin-gated, so the creator is always an admin and admins
+    // implicitly see every brand on their team via canSeeBrand's role
+    // short-circuit. Members get access only when the admin explicitly
+    // assigns them via PUT /api/team/members/:userId/brands.
 
     // Derive product name: explicit > scrape > factSheet slice > fallback.
     let productName = body.productName?.trim() || "";
@@ -275,8 +280,13 @@ brandsRouter.post("/", requireAuth, async (req: Request, res: Response) => {
  * brand row. Production safety net: counts are surfaced in the
  * non-cascade response so an operator can see exactly what would be
  * removed before flipping the flag.
+ *
+ * Admin-only — destructive workspace operation. The same intent that
+ * gates POST /api/brands behind requireAdmin gates this: workspace
+ * lifecycle is a managed action, not something a member should be
+ * able to trigger by hitting the endpoint directly (or by mistake).
  */
-brandsRouter.delete("/:id", requireAuth, async (req: Request, res: Response) => {
+brandsRouter.delete("/:id", requireAdmin, async (req: Request, res: Response) => {
   try {
     const id = req.params.id;
     const cascade = String(req.query.cascade ?? "").toLowerCase() === "true";
