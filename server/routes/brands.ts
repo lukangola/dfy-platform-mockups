@@ -439,6 +439,56 @@ brandsRouter.post("/:id/research", requireAuth, async (req: Request, res: Respon
 });
 
 /**
+ * Recover the markdown document from a model response that may be lightly
+ * "dressed up" despite the prompt's strict output rules.
+ *
+ * Two real failure modes we've seen with server-side web tools + adaptive
+ * thinking, both of which leave a perfectly good document behind a few
+ * stray characters at the very start:
+ *
+ *   1. The whole document wrapped in a ```markdown … ``` code fence. The
+ *      prompt forbids it, but Opus still does it sometimes (confirmed on
+ *      shopetalon.com). The text then starts with "```markdown" not "#".
+ *   2. Interim tool-use narration ("Let me check the product page…") emitted
+ *      as a separate text block before the final document. generateText
+ *      concatenates every text block, so the combined output can start with
+ *      that preamble.
+ *
+ * Strip a wrapping fence, then — if it still doesn't start at an H1 — slice
+ * from the first markdown H1 (preferring the canonical "… Brand Guidelines"
+ * title line). Returns the cleaned markdown, which the caller still validates
+ * starts with `#` so a genuine refusal / empty response still fails loudly.
+ */
+export function normalizeGuidelinesMarkdown(raw: string): string {
+  let md = raw.replace(/^\s+|\s+$/g, "");
+
+  // 1. Strip a wrapping code fence around the entire document.
+  if (md.startsWith("```")) {
+    md = md
+      .replace(/^```[^\n]*\n/, "") // opening fence line (```markdown, ```md, ```)
+      .replace(/\n```\s*$/, "")    // closing fence
+      .trim();
+  }
+
+  // 2. Prefer the canonical "<Brand> Brand Guidelines" H1 title wherever it
+  //    sits. This both strips leading narration AND beats a stray preamble
+  //    heading (e.g. "# Research notes") that would otherwise win. The
+  //    template title always ends in "Brand Guidelines".
+  const titled = md.match(/^#[ \t]+.*Brand Guidelines\b.*$/im);
+  if (titled && titled.index !== undefined) return md.slice(titled.index).trim();
+
+  // 3. Already at some H1 — accept it (covers a model that deviated from the
+  //    exact title wording but still emitted a structured document).
+  if (md.startsWith("#")) return md;
+
+  // 4. Last resort — slice from the first H1 anywhere in the text.
+  const anyH1 = md.match(/^#[ \t]+\S.*$/m);
+  if (anyH1 && anyH1.index !== undefined) return md.slice(anyH1.index).trim();
+
+  return md;
+}
+
+/**
  * Runs the brand_guidelines prompt (adapted from the Brand Guidelines
  * Generator skill) against the brand URL. The prompt's output is the raw
  * 8-section markdown style guide — that's the single source of truth.
@@ -467,11 +517,11 @@ export async function runBrandResearch(brandId: string, brandUrl: string): Promi
     });
 
     // The skill is configured `expectsJson: false`. The raw response IS
-    // the markdown document — no JSON parsing, no fence stripping. We
-    // trim trailing whitespace defensively and verify the document
-    // starts at an H1 (the prompt is strict that the first character
-    // must be `#`).
-    const markdown = result.text.replace(/^\s+|\s+$/g, "");
+    // the markdown document. We defensively normalise it first —
+    // stripping an accidental wrapping ```markdown fence and any interim
+    // tool-use narration — then verify it starts at an H1. A genuine
+    // refusal / empty response has no H1 and still fails loudly here.
+    const markdown = normalizeGuidelinesMarkdown(result.text);
     if (!markdown.startsWith("#")) {
       console.error(
         `[brands] ${BRAND_RESEARCH_ACTION} output didn't start with an H1 for ${brandUrl}.\n` +
