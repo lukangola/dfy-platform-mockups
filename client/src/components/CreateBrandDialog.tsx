@@ -15,6 +15,7 @@
  * fresh brand back to BrandContext which auto-switches the workspace to it.
  */
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { AlertCircle, Loader2, Plus, X } from "lucide-react";
 import { useBrand } from "@/contexts/BrandContext";
 import { toast } from "sonner";
@@ -94,7 +95,14 @@ export default function CreateBrandDialog({ open, onClose }: Props) {
     }
   }
 
-  return (
+  // Render through a portal to document.body. This dialog is mounted deep
+  // inside the sidebar (BrandSwitcher → motion.aside), and framer-motion
+  // gives that <aside> its own stacking context / containing block. A
+  // position:fixed child can't escape that with z-index alone — the page's
+  // <main> is a later DOM sibling of the sidebar, so the app grid paints on
+  // top of the entire sidebar subtree, bleeding through the modal. Portaling
+  // to <body> lifts the overlay out of the trap so it covers everything.
+  return createPortal(
     <div
       // z-[60] sits above the BrandSwitcher dropdown (z-50) and the
       // sidebar tooltips (also z-50) so the modal can't get visually
@@ -272,7 +280,8 @@ export default function CreateBrandDialog({ open, onClose }: Props) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 

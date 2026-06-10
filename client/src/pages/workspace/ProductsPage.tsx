@@ -3,6 +3,7 @@
  * Grid of product cards fetched from /api/products with async research status.
  */
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -307,8 +308,12 @@ export default function ProductsPage() {
         )}
       </div>
 
-      {/* Add Product Modal */}
-      <AnimatePresence>
+      {/* Add Product Modal — portaled to <body> so the fixed overlay escapes
+          any ancestor stacking context (e.g. transformed page wrappers) and
+          reliably covers the whole viewport instead of being painted over by
+          sibling content. */}
+      {createPortal(
+        <AnimatePresence>
         {showAddForm && (
           <motion.div
             initial={{ opacity: 0 }}
@@ -493,7 +498,9 @@ export default function ProductsPage() {
             </motion.div>
           </motion.div>
         )}
-      </AnimatePresence>
+        </AnimatePresence>,
+        document.body
+      )}
     </div>
   );
 }
