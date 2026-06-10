@@ -902,6 +902,16 @@ listiclesRouter.post("/:id/generate-copy", async (req: Request, res: Response) =
     const row = await loadListicle(req.params.id);
     if (!row) return sendError(res, 404, "Listicle not found");
 
+    // Optional feedback for the "regenerate with feedback" path. When
+    // present, we pass the user's notes + the current copy as a
+    // previous-draft block into the prompt so the model can revise the
+    // existing copy rather than start from scratch. Empty string =
+    // first-time generation (or a clean from-scratch regen). Same
+    // convention as the b-roll / image-feedback flows.
+    const feedbackInput = typeof (req.body as { feedback?: unknown })?.feedback === "string"
+      ? ((req.body as { feedback: string }).feedback).trim()
+      : "";
+
     // Look up product + brand + angle for prompt variables. The angle is
     // free-form (string) so users can supply a custom name if the brand
     // doesn't have a structured angle that matches.
@@ -997,7 +1007,14 @@ listiclesRouter.post("/:id/generate-copy", async (req: Request, res: Response) =
       destination_url: row.destinationUrl?.trim() || "#",
       language: row.language,
       guidance: row.guidance?.trim() || "(no extra guidance)",
-      feedback: "(no prior draft to revise)",
+      // When feedback is supplied, we ALSO inject the current
+      // copyMarkdown as the "previous draft" so the model has the
+      // exact text it should revise. The prompt's feedback block
+      // says: "apply this on top of everything above — keep the rest
+      // of the listicle intact and only adjust what's called out".
+      feedback: feedbackInput && row.copyMarkdown
+        ? `${feedbackInput}\n\n--- Previous draft to revise ---\n\n${row.copyMarkdown.trim()}`
+        : "(no prior draft to revise)",
       // Winning-ad variables — "no" when not in that flow so the prompt's
       // conditional routing rules stay dormant.
       winning_ad_present: isWinningAd ? "yes" : "no",
@@ -1012,9 +1029,72 @@ listiclesRouter.post("/:id/generate-copy", async (req: Request, res: Response) =
       model: prompt.config.model,
       maxTokens: prompt.config.maxTokens ?? 8000,
     });
+    let copyMd = result.text;
 
-    await touch(row.id, { copyMarkdown: result.text, status: "drafting" });
-    res.json({ copyMarkdown: result.text });
+    // SECTION-COUNT VALIDATION + RETRY (copy step).
+    //
+    // The prompt instructs the model to write exactly 11 numbered
+    // sections, with the H1 reading "11 Reasons...". The model
+    // occasionally writes the H1 correctly (advertising 11) but
+    // produces only 10 sections in the body — leaving the downstream
+    // HTML render's section-count validator with `expected=10`
+    // (because it counts sections in the markdown). Result: a lander
+    // whose H1 promises 11 reasons but only has 10 sections.
+    //
+    // Fix: count sections in the markdown right here, BEFORE we
+    // persist. If short, retry ONCE with explicit feedback naming the
+    // missing section numbers. Bounded by one retry to keep latency
+    // sane — the deterministic HTML-render fallback (server-side
+    // section injection) is the final safety net.
+    const EXPECTED_SECTIONS = 11;
+    const countSections = (md: string): number =>
+      (md.match(/^[#]{3,4}\s+\d+\./gm) ?? []).length;
+    const initialCount = countSections(copyMd);
+    if (initialCount < EXPECTED_SECTIONS) {
+      const presentNums: number[] = [];
+      const numRe = /^[#]{3,4}\s+(\d+)\./gm;
+      let nm: RegExpExecArray | null;
+      while ((nm = numRe.exec(copyMd)) !== null) {
+        const n = parseInt(nm[1] ?? "0", 10);
+        if (n > 0) presentNums.push(n);
+      }
+      const missingNums: number[] = [];
+      for (let n = 1; n <= EXPECTED_SECTIONS; n++) {
+        if (!presentNums.includes(n)) missingNums.push(n);
+      }
+      console.warn(
+        `[listicles] generate-copy: wrote ${initialCount}/${EXPECTED_SECTIONS} sections (numbers: ${presentNums.join(", ")}); missing: ${missingNums.join(", ")} — retrying`,
+      );
+      try {
+        const fixupResult = await generateText({
+          systemPrompt: prompt.rendered,
+          userMessage:
+            `Your previous draft wrote only ${initialCount} numbered sections out of the required ${EXPECTED_SECTIONS}. ` +
+            `Missing section number(s): ${missingNums.join(", ")}. ` +
+            `Re-write the COMPLETE listicle with ALL ${EXPECTED_SECTIONS} numbered sections this time. ` +
+            `Each missing section needs its own ### heading with its number, body copy, and (for #3+) the 👉 CTA microcopy line. ` +
+            `The H1 already says "${EXPECTED_SECTIONS} Reasons" — the body must match that count. ` +
+            `Output the FULL markdown from the pre-headline callout through the offer block, not just the missing sections. ` +
+            `Before you finish, COUNT your "### N." headings — must be exactly ${EXPECTED_SECTIONS}.`,
+          model: prompt.config.model,
+          maxTokens: prompt.config.maxTokens ?? 8000,
+        });
+        const fixupCount = countSections(fixupResult.text);
+        if (fixupCount > initialCount) {
+          copyMd = fixupResult.text;
+          console.log(`[listicles] generate-copy retry: now have ${fixupCount}/${EXPECTED_SECTIONS} sections`);
+        } else {
+          console.warn(`[listicles] generate-copy retry did not improve (still ${fixupCount}/${EXPECTED_SECTIONS}); keeping first draft`);
+        }
+      } catch (retryErr) {
+        console.warn(`[listicles] generate-copy retry threw (non-fatal):`, retryErr);
+      }
+    } else {
+      console.log(`[listicles] generate-copy: wrote ${initialCount}/${EXPECTED_SECTIONS} sections (complete)`);
+    }
+
+    await touch(row.id, { copyMarkdown: copyMd, status: "drafting" });
+    res.json({ copyMarkdown: copyMd });
   } catch (err) {
     console.error("[listicles] generate-copy failed:", err);
     sendError(res, 500, err instanceof Error ? err.message : String(err));
@@ -1451,7 +1531,11 @@ listiclesRouter.post("/:id/render-html", async (req: Request, res: Response) => 
 
     // Parse the listicle markdown into structured reasons. Re-uses the
     // same section regex from generate-image-prompts so the order matches.
-    const sectionRe = /(^[ \t]*#{3,4}[ \t]+\d+\.\s+(.+?)$)([\s\S]*?)(?=^[ \t]*#{3,4}[ \t]+\d+\.|^[ \t]*##\s|\Z)/gm;
+    // NOTE: end-of-input is matched by `(?![\s\S])`, NOT `\Z` — JavaScript
+    // regex does not support `\Z` (it would be treated as a literal `Z`),
+    // and using it silently drops the last section because the lookahead
+    // never matches at end-of-string.
+    const sectionRe = /(^[ \t]*#{3,4}[ \t]+\d+\.\s+(.+?)$)([\s\S]*?)(?=^[ \t]*#{3,4}[ \t]+\d+\.|^[ \t]*##\s|(?![\s\S]))/gm;
     const parsedReasons: { headline: string; body: string }[] = [];
     let m;
     while ((m = sectionRe.exec(row.copyMarkdown)) !== null) {
@@ -1491,9 +1575,23 @@ listiclesRouter.post("/:id/render-html", async (req: Request, res: Response) => 
 
     // Extract the H1 + hook line from the listicle copy if possible.
     const h1Match = row.copyMarkdown.match(/^#\s+(.+?)$/m);
-    const hookMatch = row.copyMarkdown.match(/^([^#\n][^\n]+!)$/m); // first sentence-with-! style hook
+    // Pre-headline callout — the italic+bold "Read this BEFORE..." line
+    // at the top of the copy markdown. Strip the italic / bold markdown
+    // markers so the rendered hook callout shows clean text + lets the
+    // HTML prompt apply its own bolding to "BEFORE".
+    const hookMatch = row.copyMarkdown.match(/^[\s>]*\*+(.+?)\*+\s*$/m);
     const mainHeadline = h1Match?.[1]?.trim() ?? `${parsedReasons.length} reasons to try ${product.name}`;
-    const hookLine = hookMatch?.[1]?.trim() ?? `Read this BEFORE you ${row.angleName ? "decide on your next " + row.angleName.toLowerCase() : "make your next purchase"}.`;
+    // Punchy fallback when no pre-headline callout was found. Tied to
+    // the product category, not the angle (the angle name is often a
+    // verbose problem description that reads awkwardly in a BEFORE
+    // hook — "Read this BEFORE you address your nervous system
+    // dysregulation" → no). Defaults to the product category:
+    //   "Read this BEFORE you buy another <category>."
+    const categoryHint = (product.category && !/^uncategorized$/i.test(product.category) ? product.category : "product").toLowerCase();
+    const hookLine = (() => {
+      if (hookMatch?.[1]) return hookMatch[1].replace(/\*+/g, "").trim();
+      return `Read this BEFORE you buy another ${categoryHint}.`;
+    })();
 
     // Build the two-line announcement strings — Javvy pattern:
     //   Line 1 = campaign-style label (the visible top line like
@@ -1761,6 +1859,61 @@ listiclesRouter.post("/:id/deploy", async (req: Request, res: Response) => {
       error: null,
     };
     await touch(row.id, updates);
+
+    // Auto-save to Brand Assets so the deployed lander shows up in
+    // the brand's asset library alongside videos / images. The asset
+    // row's `url` is the publishedUrl (the live lander); the metadata
+    // block carries every other URL (preview, editor, slug, listicle
+    // id) so the Assets-page detail panel can render them as click-
+    // through links without needing to re-query the listicles table.
+    //
+    // Idempotent: deleting the existing asset row first means a
+    // re-deploy (e.g. after a render fix) replaces the entry rather
+    // than creating a second row pointing at the same listicle.
+    try {
+      // Find any prior asset for this listicle and delete (re-deploys).
+      const existingAssets = await db
+        .select()
+        .from(schema.brandAssets)
+        .where(and(
+          eq(schema.brandAssets.brandId, row.brandId),
+          eq(schema.brandAssets.kind, "landing_page"),
+        ));
+      for (const a of existingAssets) {
+        const meta = (a.metadata ?? {}) as { listicleId?: string };
+        if (meta.listicleId === row.id) {
+          await db.delete(schema.brandAssets).where(eq(schema.brandAssets.id, a.id));
+        }
+      }
+      const titleBase = `${product?.name ?? "Listicle"} — ${row.angleName ?? "general"}`;
+      await db.insert(schema.brandAssets).values({
+        brandId: row.brandId,
+        productId: row.productId,
+        kind: "landing_page",
+        url: published.publishedUrl,
+        thumbnailUrl: null,
+        title: titleBase,
+        sourceApp: "listicle_builder",
+        userId: req.auth?.user.id ?? null,
+        metadata: {
+          listicleId: row.id,
+          publishedUrl: published.publishedUrl,
+          previewUrl: created.previewUrl,
+          editorUrl,
+          slug: published.finalSlug,
+          // H1 + product name make the side panel useful as a card
+          // even without a thumbnail (we don't render the lander to
+          // an image — too heavy for every deploy).
+          headline: extractH1FromMarkdown(row.copyMarkdown ?? "") ?? titleBase,
+          deployedAt: new Date().toISOString(),
+        },
+      });
+    } catch (assetErr) {
+      // Non-fatal — the deploy succeeded, we just couldn't save the
+      // asset entry. User can re-deploy to retry the save.
+      console.warn(`[listicles] auto-save to brand_assets failed (non-fatal):`, assetErr);
+    }
+
     res.json({
       publishedUrl: published.publishedUrl,
       previewUrl: created.previewUrl,
@@ -1774,3 +1927,9 @@ listiclesRouter.post("/:id/deploy", async (req: Request, res: Response) => {
     sendError(res, 500, msg);
   }
 });
+
+/** Tiny helper — pull the listicle's H1 ("# 11 Reasons Why ...") for the asset title. */
+function extractH1FromMarkdown(md: string): string | null {
+  const m = md.match(/^#\s+(.+?)$/m);
+  return m ? m[1]!.trim() : null;
+}

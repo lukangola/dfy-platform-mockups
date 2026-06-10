@@ -833,7 +833,7 @@ export async function generateSingleSceneImagePrompts(args: {
 
 // ---------- Brand Assets ----------
 
-export type BrandAssetKind = "image" | "video" | "document";
+export type BrandAssetKind = "image" | "video" | "document" | "landing_page";
 
 export type BrandAsset = {
   id: string;
@@ -1220,8 +1220,11 @@ export function extractListicleOffer(id: string): Promise<{ offer: Record<string
   return post<{ offer: Record<string, unknown> }>(`/api/listicles/${id}/extract-offer`, {});
 }
 
-export function generateListicleCopy(id: string): Promise<{ copyMarkdown: string }> {
-  return post<{ copyMarkdown: string }>(`/api/listicles/${id}/generate-copy`, {});
+export function generateListicleCopy(
+  id: string,
+  args: { feedback?: string } = {},
+): Promise<{ copyMarkdown: string }> {
+  return post<{ copyMarkdown: string }>(`/api/listicles/${id}/generate-copy`, args);
 }
 
 export function generateListicleImagePrompts(id: string): Promise<{ images: ListicleImageRow[] }> {

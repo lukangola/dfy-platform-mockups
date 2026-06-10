@@ -18,12 +18,35 @@ Mirror this structure exactly. It is the proven listicle layout from the
 canonical reference at https://try.javvycoffee.com/ps/. Do NOT include a
 comparison table — we explicitly remove it from our adaptation.
 
-1. **Pre-headline callout** — italic + bold, ONE LINE, sits ABOVE the H1.
-   Same shape as the canonical reference: *"Read this **BEFORE** your
-   next coffee run!"* / *"Read this **BEFORE** you book another
-   appointment!"*. The italic surrounds the whole line; the urgent
-   directive ("BEFORE…") is bolded inside the italic. This is a tease,
-   not a sales pitch.
+1. **Pre-headline callout** — italic + bold, ONE LINE. This is the
+   article's **hook line**. It is rendered ONCE on the landing page —
+   in a cream-tinted callout box BELOW the byline. The downstream
+   renderer does NOT also repeat it above the H1. So write it as a
+   single punchy line that works on its own.
+
+   Required shape: an **urgent "BEFORE" tease** that names a CONCRETE
+   action / habit / decision the reader is about to take — never an
+   abstract problem name. Match the canonical reference's energy:
+
+   - ✅ *"Read this **BEFORE** your next morning coffee."*
+   - ✅ *"Read this **BEFORE** you book another acupuncture session."*
+   - ✅ *"Read this **BEFORE** you reach for the spironolactone."*
+   - ✅ *"Read this **BEFORE** you buy another collagen supplement."*
+
+   **NOT this** — formulaic, abstract, awkward:
+   - ❌ *"Read this **BEFORE** you decide on your next chronic anxiety."*
+   - ❌ *"Read this **BEFORE** your next nervous system dysregulation."*
+   - ❌ *"Read this **BEFORE** you address your hormonal acne."*
+
+   The pattern: `Read this **BEFORE** <concrete physical action the
+   reader will literally take this week>!`. If you have to write "you
+   address your X" / "you decide on your next X" / "your next X
+   issue" — STOP. Replace with a real, observable behaviour (drinking,
+   buying, applying, booking, reaching, scrolling).
+
+   The italic surrounds the whole line; the urgent directive ("BEFORE…")
+   is bolded inside the italic. ONE sentence. No second line. Ends with
+   `!` (this is what the downstream extractor matches).
 
 2. **H1 — The numbered headline.** A bold, opinionated headline. **DO NOT
    include the brand name or the exact product name in the H1.** Instead,

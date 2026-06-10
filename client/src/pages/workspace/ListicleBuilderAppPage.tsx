@@ -117,6 +117,13 @@ export default function ListicleBuilderAppPage() {
   // Copy editing
   const [editingCopy, setEditingCopy] = useState(false);
   const [copyDraft, setCopyDraft] = useState("");
+  // "Regenerate with feedback" — the user opens a textarea, types
+  // specific notes ("punch the angle harder on section 3", "drop the
+  // medical jargon", etc.), and submits. The server passes the
+  // feedback + the current draft into the listicle_copy prompt so the
+  // model REVISES the existing copy rather than starting from scratch.
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [feedbackDraft, setFeedbackDraft] = useState("");
 
   // Images UX
   const [imageFeedbackOpen, setImageFeedbackOpen] = useState<Set<string>>(new Set());
@@ -357,14 +364,19 @@ export default function ListicleBuilderAppPage() {
     }
   }
 
-  async function regenerateCopy() {
+  async function regenerateCopy(feedback?: string) {
     if (!listicle) return;
     setGenerating(true);
     setPipelineError(null);
     try {
-      const { copyMarkdown } = await generateListicleCopy(listicle.id);
+      const { copyMarkdown } = await generateListicleCopy(listicle.id, feedback ? { feedback } : {});
       await refreshListicle(listicle.id);
       setCopyDraft(copyMarkdown);
+      // Close the feedback panel after a successful revise.
+      if (feedback) {
+        setFeedbackOpen(false);
+        setFeedbackDraft("");
+      }
     } catch (err) {
       setPipelineError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1032,9 +1044,24 @@ export default function ListicleBuilderAppPage() {
                           <Pencil size={11} /> Edit
                         </button>
                         {mode === "generate" && (
-                          <button onClick={() => void regenerateCopy()} disabled={generating} className="px-3 py-2 rounded text-[11px] font-mono uppercase tracking-wider bg-white/[0.04] text-white/60 border border-white/[0.08] hover:bg-white/[0.08] hover:text-white/80 transition-all flex items-center gap-1.5 disabled:opacity-30">
-                            {generating ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Regenerate
-                          </button>
+                          <>
+                            <button onClick={() => void regenerateCopy()} disabled={generating} className="px-3 py-2 rounded text-[11px] font-mono uppercase tracking-wider bg-white/[0.04] text-white/60 border border-white/[0.08] hover:bg-white/[0.08] hover:text-white/80 transition-all flex items-center gap-1.5 disabled:opacity-30">
+                              {generating ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Regenerate
+                            </button>
+                            {listicle.copyMarkdown && (
+                              <button
+                                onClick={() => setFeedbackOpen((v) => !v)}
+                                disabled={generating}
+                                className={`px-3 py-2 rounded text-[11px] font-mono uppercase tracking-wider border transition-all flex items-center gap-1.5 disabled:opacity-30 ${
+                                  feedbackOpen
+                                    ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                                    : "bg-white/[0.04] text-white/60 border-white/[0.08] hover:bg-white/[0.08] hover:text-white/80"
+                                }`}
+                              >
+                                <MessageSquare size={11} /> {feedbackOpen ? "Hide feedback" : "Regenerate w/ feedback"}
+                              </button>
+                            )}
+                          </>
                         )}
                         <button onClick={() => void advanceToImages()} disabled={generating || !listicle.copyMarkdown} className="px-4 py-2 rounded text-xs font-mono uppercase tracking-wider bg-orange-500/15 text-orange-300 border border-orange-500/40 hover:bg-orange-500/25 transition-all flex items-center gap-1.5 disabled:opacity-30">
                           {generating ? <Loader2 size={11} className="animate-spin" /> : <ArrowRight size={11} />} Approve & continue
@@ -1054,6 +1081,47 @@ export default function ListicleBuilderAppPage() {
                 </div>
 
                 {pipelineError && <ErrorRow message={pipelineError} />}
+
+                {/* Regenerate-with-feedback panel. Opens above the copy
+                    preview so the user can read the draft and write
+                    notes side-by-side. Sending re-runs generate-copy
+                    with the feedback + the current draft as a previous-
+                    draft block, so the model revises rather than
+                    restarts. */}
+                {feedbackOpen && !editingCopy && listicle.copyMarkdown && (
+                  <div className="max-w-3xl mx-auto mb-6 rounded-lg border border-amber-500/30 bg-amber-500/[0.05] p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="text-[10px] font-mono text-amber-300/80 uppercase tracking-widest flex items-center gap-1.5">
+                        <MessageSquare size={11} /> Feedback for revision
+                      </div>
+                      <button
+                        onClick={() => { setFeedbackOpen(false); setFeedbackDraft(""); }}
+                        className="text-[10px] font-mono text-white/40 hover:text-white/70 transition-colors uppercase tracking-wider"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    <textarea
+                      value={feedbackDraft}
+                      onChange={(e) => setFeedbackDraft(e.target.value)}
+                      placeholder="What should change? e.g. 'Section 3 feels generic — tie it back to the jawline-cyst angle harder. Cut the medical jargon in section 7. Punchier H1.'"
+                      rows={4}
+                      className="w-full bg-black/30 border border-amber-500/20 rounded-md px-3 py-2 text-[13px] text-white/85 outline-none font-mono leading-relaxed resize-y placeholder:text-white/30"
+                    />
+                    <div className="flex items-center justify-between mt-2">
+                      <span className="text-[10px] font-mono text-white/30">
+                        Sends your notes + the current draft back to Claude. Keeps everything you don't call out.
+                      </span>
+                      <button
+                        onClick={() => void regenerateCopy(feedbackDraft.trim())}
+                        disabled={generating || feedbackDraft.trim().length === 0}
+                        className="px-3 py-1.5 rounded text-[11px] font-mono uppercase tracking-wider bg-amber-500/20 text-amber-200 border border-amber-500/40 hover:bg-amber-500/30 transition-all flex items-center gap-1.5 disabled:opacity-30"
+                      >
+                        {generating ? <Loader2 size={11} className="animate-spin" /> : <Send size={11} />} Regenerate
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {editingCopy ? (
                   <textarea
@@ -1257,7 +1325,7 @@ export default function ListicleBuilderAppPage() {
                       className="px-4 py-2 rounded text-xs font-mono uppercase tracking-wider bg-orange-500/15 text-orange-300 border border-orange-500/40 hover:bg-orange-500/25 transition-all flex items-center gap-1.5 disabled:opacity-30 disabled:cursor-not-allowed"
                     >
                       {deploying ? <Loader2 size={11} className="animate-spin" /> : <Send size={11} />}
-                      {listicle.status === "deployed" ? "Deployed" : (deploying ? "Deploying..." : "Deploy to LanderLab")}
+                      {listicle.status === "deployed" ? "Deployed" : (deploying ? "Deploying..." : "Deploy & save to Assets")}
                     </button>
                   </div>
                 </div>

@@ -11,6 +11,7 @@ import { motion } from "framer-motion";
 import {
   FolderOpen, Image as ImageIcon, Video, Download, Search, FileText,
   Package, Calendar, ExternalLink, ChevronDown, Trash2, Loader2, AlertTriangle, User,
+  Globe, Copy, X, Edit3,
 } from "lucide-react";
 import {
   listBrandAssets, deleteBrandAsset, listProducts,
@@ -19,13 +20,14 @@ import {
 import { useBrand } from "@/contexts/BrandContext";
 import { downloadViaBlob } from "@/lib/download";
 
-type KindFilter = "all" | "image" | "video" | "document";
+type KindFilter = "all" | "image" | "video" | "document" | "landing_page";
 
 const SOURCE_APP_LABELS: Record<string, string> = {
   broll: "B-Roll",
   message_testing: "Message Testing",
   static_ads: "Static Ads",
   copy_engine: "Copy Engine",
+  listicle_builder: "Listicle Builder",
 };
 
 function sourceAppLabel(src: string): string {
@@ -134,6 +136,7 @@ export default function AssetsPage() {
     image: assets.filter((a) => a.kind === "image").length,
     video: assets.filter((a) => a.kind === "video").length,
     document: assets.filter((a) => a.kind === "document").length,
+    landing_page: assets.filter((a) => a.kind === "landing_page").length,
   };
 
   const uniqueProducts = useMemo(() => {
@@ -174,10 +177,26 @@ export default function AssetsPage() {
     }
   };
 
-  const KIND_INFO: Record<"image" | "video" | "document", { label: string; color: string; Icon: typeof ImageIcon }> = {
+  const KIND_INFO: Record<"image" | "video" | "document" | "landing_page", { label: string; color: string; Icon: typeof ImageIcon }> = {
     image: { label: "Image", color: "#00D4FF", Icon: ImageIcon },
     video: { label: "Video", color: "#8B5CF6", Icon: Video },
     document: { label: "Document", color: "#F43F5E", Icon: FileText },
+    landing_page: { label: "Landing Page", color: "#F59E0B", Icon: Globe },
+  };
+
+  // Side-panel state — opens when the user clicks a landing_page asset
+  // (or any asset they want to see metadata for). Carries the asset
+  // being inspected; closing sets back to null.
+  const [openAsset, setOpenAsset] = useState<BrandAsset | null>(null);
+  const [copiedLink, setCopiedLink] = useState<string | null>(null);
+  const copyLink = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedLink(url);
+      setTimeout(() => setCopiedLink(null), 1500);
+    } catch {
+      // best-effort
+    }
   };
 
   return (
@@ -218,9 +237,9 @@ export default function AssetsPage() {
         </div>
       )}
 
-      {/* Stats Bar */}
-      <div className="grid grid-cols-4 gap-3 mb-6">
-        {(["all", "image", "video", "document"] as const).map((kind) => {
+      {/* Stats Bar — one chip per asset kind, "all" first. */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
+        {(["all", "image", "video", "document", "landing_page"] as const).map((kind) => {
           const isActive = kindFilter === kind;
           const info =
             kind === "all"
@@ -348,13 +367,15 @@ export default function AssetsPage() {
             const KindIcon = kindInfo.Icon;
             const productName = asset.productId ? productsById.get(asset.productId)?.name ?? null : null;
             const thumb = asset.thumbnailUrl || (asset.kind === "image" ? asset.url : null);
+            const isLandingPage = asset.kind === "landing_page";
             return (
               <motion.div
                 key={asset.id}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: i * 0.02 }}
-                className="rounded-xl border border-white/[0.06] overflow-hidden group hover:border-white/[0.12] transition-all"
+                onClick={isLandingPage ? () => setOpenAsset(asset) : undefined}
+                className={`rounded-xl border border-white/[0.06] overflow-hidden group hover:border-white/[0.12] transition-all ${isLandingPage ? "cursor-pointer hover:border-amber-500/40 hover:shadow-lg hover:shadow-amber-500/5" : ""}`}
                 style={{ background: "#13161F" }}
               >
                 <div className={`relative aspect-square ${asset.kind === "video" ? "bg-black" : "bg-white/[0.02]"} overflow-hidden`}>
@@ -389,6 +410,29 @@ export default function AssetsPage() {
                           : "(empty document)"}
                       </div>
                     </div>
+                  ) : asset.kind === "landing_page" ? (
+                    /* Landing-page card — real screenshot of the
+                       published URL via WordPress mShots. No API key,
+                       no infra: just an <img> pointing at the public
+                       page. First load shows a placeholder while
+                       mShots captures; subsequent loads hit the
+                       cached image. Clicking the card opens the
+                       side panel with all three URLs. */
+                    <div className="w-full h-full overflow-hidden bg-[#FBF5EB]">
+                      <img
+                        src={`https://s.wordpress.com/mshots/v1/${encodeURIComponent(asset.url)}?w=800&h=800&vpw=1280&vph=1280`}
+                        alt={asset.title}
+                        loading="lazy"
+                        className="w-full h-full object-cover object-top group-hover:scale-105 transition-transform duration-500"
+                      />
+                      {/* Hover overlay — makes the click target
+                          obvious on top of the screenshot. */}
+                      <div className="absolute inset-0 bg-black/55 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
+                        <div className="px-3 py-2 rounded-lg bg-amber-500/95 text-[#1A1A1A] text-[10px] font-mono uppercase tracking-wider font-semibold flex items-center gap-1.5">
+                          <Globe size={11} /> View links
+                        </div>
+                      </div>
+                    </div>
                   ) : thumb ? (
                     <img
                       src={thumb}
@@ -401,27 +445,34 @@ export default function AssetsPage() {
                     </div>
                   )}
 
-                  {/* Kind Badge */}
-                  <div className="absolute top-2 left-2 pointer-events-none">
-                    <span
-                      className="text-[9px] px-2 py-0.5 rounded font-mono uppercase tracking-wider flex items-center gap-1"
-                      style={{
-                        background: `${kindInfo.color}20`,
-                        color: kindInfo.color,
-                        border: `1px solid ${kindInfo.color}30`,
-                      }}
-                    >
-                      <KindIcon size={8} />
-                      {kindInfo.label}
-                    </span>
-                  </div>
-
-                  {/* Source App Badge */}
-                  <div className="absolute top-2 right-2 pointer-events-none">
-                    <span className="text-[9px] px-2 py-0.5 rounded font-mono uppercase tracking-wider bg-black/50 text-white/70 border border-white/10">
-                      {sourceAppLabel(asset.sourceApp)}
-                    </span>
-                  </div>
+                  {/* Kind + Source App badges — hidden for landing_page
+                      cards because the mock chrome + announcement bar
+                      stacked at the top would fight the badges, and the
+                      design is self-evidently a landing page. The
+                      kind+source info gets re-added inline in the
+                      footer below for landing_page rows. */}
+                  {!isLandingPage ? (
+                    <>
+                      <div className="absolute top-2 left-2 pointer-events-none">
+                        <span
+                          className="text-[9px] px-2 py-0.5 rounded font-mono uppercase tracking-wider flex items-center gap-1"
+                          style={{
+                            background: `${kindInfo.color}20`,
+                            color: kindInfo.color,
+                            border: `1px solid ${kindInfo.color}30`,
+                          }}
+                        >
+                          <KindIcon size={8} />
+                          {kindInfo.label}
+                        </span>
+                      </div>
+                      <div className="absolute top-2 right-2 pointer-events-none">
+                        <span className="text-[9px] px-2 py-0.5 rounded font-mono uppercase tracking-wider bg-black/50 text-white/70 border border-white/10">
+                          {sourceAppLabel(asset.sourceApp)}
+                        </span>
+                      </div>
+                    </>
+                  ) : null}
 
                   {asset.kind === "video" ? (
                     /* Video: action pill floats top-center, native controls stay clickable at the bottom */
@@ -494,6 +545,23 @@ export default function AssetsPage() {
                     </span>
                   </div>
                   <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                    {/* Inline kind chip for landing_page rows — the
+                        floating top-left badge is hidden for these so
+                        it doesn't fight the browser-chrome mock, so
+                        surface it here instead. */}
+                    {isLandingPage ? (
+                      <span
+                        className="text-[9px] px-1.5 py-0.5 rounded font-mono uppercase tracking-wider flex items-center gap-1"
+                        style={{
+                          background: `${kindInfo.color}20`,
+                          color: kindInfo.color,
+                          border: `1px solid ${kindInfo.color}30`,
+                        }}
+                      >
+                        <KindIcon size={8} />
+                        {kindInfo.label}
+                      </span>
+                    ) : null}
                     <span className="text-[9px] font-mono text-white/20 flex items-center gap-1">
                       <Calendar size={8} /> {formatRelativeDate(asset.createdAt)}
                     </span>
@@ -524,6 +592,132 @@ export default function AssetsPage() {
               ? "Generate and approve content in any app, then save it to brand assets."
               : "Try adjusting your filters"}
           </div>
+        </div>
+      )}
+
+      {/* Side panel — opens when the user clicks a landing-page card.
+          Shows headline + every URL flavour the deploy step produced
+          (published, preview, editor) so the user has one place to
+          jump back to their deployed lander. */}
+      {openAsset && openAsset.kind === "landing_page" && (
+        <div
+          className="fixed inset-0 z-50 flex justify-end"
+          style={{ background: "rgba(0,0,0,0.6)" }}
+          onClick={() => setOpenAsset(null)}
+        >
+          <motion.aside
+            initial={{ x: "100%" }}
+            animate={{ x: 0 }}
+            exit={{ x: "100%" }}
+            transition={{ type: "spring", stiffness: 260, damping: 32 }}
+            className="w-full max-w-md h-full overflow-y-auto"
+            style={{ background: "#13161F", borderLeft: "1px solid rgba(255,255,255,0.08)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6 space-y-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-[10px] font-mono text-amber-300/70 uppercase tracking-widest flex items-center gap-1.5">
+                    <Globe size={11} /> Landing Page
+                  </div>
+                  <h2 className="text-[15px] font-medium text-white/90 mt-2 leading-snug">
+                    {typeof openAsset.metadata?.headline === "string"
+                      ? (openAsset.metadata.headline as string)
+                      : openAsset.title}
+                  </h2>
+                  <div className="text-[11px] font-mono text-white/40 mt-1">
+                    Deployed {typeof openAsset.metadata?.deployedAt === "string"
+                      ? formatRelativeDate(openAsset.metadata.deployedAt as string)
+                      : formatRelativeDate(openAsset.createdAt)}
+                  </div>
+                </div>
+                <button
+                  onClick={() => setOpenAsset(null)}
+                  className="w-7 h-7 rounded-md bg-white/[0.04] border border-white/[0.08] flex items-center justify-center text-white/50 hover:text-white/90 hover:bg-white/[0.08] transition-colors"
+                  aria-label="Close"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+
+              {/* Links section */}
+              <div className="space-y-3">
+                {[
+                  { label: "Published URL", icon: Globe, url: openAsset.url, accent: "amber" as const, description: "The live URL — share this." },
+                  ...(typeof openAsset.metadata?.previewUrl === "string"
+                    ? [{ label: "Preview URL", icon: ExternalLink, url: openAsset.metadata.previewUrl as string, accent: "cyan" as const, description: "Preview the variant without going live." }]
+                    : []),
+                  ...(typeof openAsset.metadata?.editorUrl === "string"
+                    ? [{ label: "Edit in LanderLab", icon: Edit3, url: openAsset.metadata.editorUrl as string, accent: "violet" as const, description: "Open the variant in LanderLab's editor." }]
+                    : []),
+                ].map((link) => {
+                  const accentClasses = {
+                    amber: "border-amber-500/30 bg-amber-500/[0.05]",
+                    cyan: "border-cyan-500/30 bg-cyan-500/[0.05]",
+                    violet: "border-violet-500/30 bg-violet-500/[0.05]",
+                  }[link.accent];
+                  const LinkIcon = link.icon;
+                  return (
+                    <div key={link.label} className={`rounded-lg border p-3 ${accentClasses}`}>
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <LinkIcon size={12} className="text-white/60" />
+                        <span className="text-[10px] font-mono text-white/60 uppercase tracking-widest">{link.label}</span>
+                      </div>
+                      <div className="text-[11px] font-mono text-white/85 break-all mb-2 leading-relaxed">{link.url}</div>
+                      <div className="text-[10px] font-mono text-white/30 mb-2">{link.description}</div>
+                      <div className="flex items-center gap-2">
+                        <a
+                          href={link.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex-1 px-3 py-1.5 rounded text-[11px] font-mono uppercase tracking-wider bg-white/[0.05] text-white/80 border border-white/[0.10] hover:bg-white/[0.10] transition-colors flex items-center justify-center gap-1.5"
+                        >
+                          <ExternalLink size={11} /> Open
+                        </a>
+                        <button
+                          onClick={() => void copyLink(link.url)}
+                          className="px-3 py-1.5 rounded text-[11px] font-mono uppercase tracking-wider bg-white/[0.03] text-white/60 border border-white/[0.08] hover:bg-white/[0.08] transition-colors flex items-center gap-1.5"
+                        >
+                          <Copy size={11} /> {copiedLink === link.url ? "Copied!" : "Copy"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Slug + product context */}
+              <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 space-y-2 text-[11px] font-mono">
+                {typeof openAsset.metadata?.slug === "string" && (
+                  <div className="flex justify-between text-white/50">
+                    <span className="uppercase tracking-wider text-white/30">Slug</span>
+                    <span className="text-white/70">{openAsset.metadata.slug as string}</span>
+                  </div>
+                )}
+                {openAsset.productId && productsById.get(openAsset.productId) && (
+                  <div className="flex justify-between text-white/50">
+                    <span className="uppercase tracking-wider text-white/30">Product</span>
+                    <span className="text-white/70">{productsById.get(openAsset.productId)?.name}</span>
+                  </div>
+                )}
+                {openAsset.creatorName && (
+                  <div className="flex justify-between text-white/50">
+                    <span className="uppercase tracking-wider text-white/30">Saved by</span>
+                    <span className="text-white/70">{openAsset.creatorName}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Delete */}
+              <button
+                onClick={() => { void handleDelete(openAsset.id); setOpenAsset(null); }}
+                disabled={deletingId === openAsset.id}
+                className="w-full px-3 py-2 rounded text-[11px] font-mono uppercase tracking-wider bg-rose-500/10 text-rose-300 border border-rose-500/30 hover:bg-rose-500/20 transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                {deletingId === openAsset.id ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />} Remove from Brand Assets
+              </button>
+            </div>
+          </motion.aside>
         </div>
       )}
     </div>

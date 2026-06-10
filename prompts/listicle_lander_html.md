@@ -197,6 +197,19 @@ MOBILE — line 1 must fit on a SINGLE line at 414px viewport width:
 
 SECTION 2 — ARTICLE HEADER
 (inside the 768px centered column, content left-aligned)
+
+**CRITICAL — NO PRE-HEADLINE CALLOUT ABOVE THE H1.** The source listicle
+markdown begins with an italic + bold "Read this **BEFORE**..." callout
+on its very first line. **Do NOT render that line above the H1 in the
+HTML.** The announcement bar is the ONLY thing between the top of the
+page and the H1. The "Read this BEFORE..." line is supplied separately
+as {{HOOK_LINE}} below and is rendered ONCE in SECTION 3 (the hook
+callout below the byline). Rendering it twice produces a visible
+duplicate — strip it from the article header.
+
+The H1 starts immediately after the announcement bar (with a ~32px gap).
+Nothing else above it.
+
 - **H1 headline — match Javvy exactly:**
   - Content: "{{MAIN_HEADLINE}}"
   - **font-size: 2.75rem (44px) on desktop**, 2.5rem (40px) on tablet,

@@ -93,7 +93,7 @@ export const brandAssets = pgTable("brand_assets", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
   brandId: uuid("brand_id").notNull(),
-  kind: text("kind").notNull(), // "image" | "video"
+  kind: text("kind").notNull(), // "image" | "video" | "document" | "landing_page"
   url: text("url").notNull(),
   thumbnailUrl: text("thumbnail_url"),
   title: text("title").notNull(),
