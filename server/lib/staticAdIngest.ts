@@ -10,6 +10,7 @@ import path from "node:path";
 import { eq } from "drizzle-orm";
 import { db, schema } from "./db.js";
 import { uploadToFalStorage } from "./fal.js";
+import { buildStaticAdThumbnailFromBuffer } from "./staticAdThumbnails.js";
 
 const LIBRARY_DIR = path.resolve(process.cwd(), "client/public/static-ads/library");
 
@@ -71,12 +72,22 @@ export async function ingestStaticAdLibrary(): Promise<string[]> {
     try {
       const buf = await fs.readFile(img.abs);
       const imageUrl = await uploadToFalStorage(buf, mimeFor(img.ext), img.filename);
+      // Build a small webp thumb so the grid load doesn't have to pull the
+      // full-fidelity source. Thumb generation is best-effort — on failure we
+      // log and leave thumbnailUrl null so the frontend falls back to imageUrl.
+      let thumbnailUrl: string | null = null;
+      try {
+        thumbnailUrl = await buildStaticAdThumbnailFromBuffer(buf, img.filename);
+      } catch (thumbErr) {
+        console.warn(`[static-ads] thumbnail build failed for ${sourcePath} (non-fatal):`, thumbErr);
+      }
 
       if (existing.length > 0) {
         await db
           .update(schema.staticAdReferences)
           .set({
             imageUrl,
+            thumbnailUrl,
             sourceSignature: signature,
             deconstructionStatus: "pending",
             deconstructionError: null,
@@ -91,6 +102,7 @@ export async function ingestStaticAdLibrary(): Promise<string[]> {
             title: humanizeFilename(img.filename) || img.filename,
             niche: DEFAULT_NICHE,
             imageUrl,
+            thumbnailUrl,
             sourcePath,
             sourceSignature: signature,
             deconstructionStatus: "pending",

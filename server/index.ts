@@ -24,7 +24,7 @@ import { messageTestingRouter } from "./routes/messageTesting.js";
 import { productsRouter, sweepOrphanedMechanismExtractions } from "./routes/products.js";
 import { staticAdsRouter } from "./routes/staticAds.js";
 import { staticAdsIterationsRouter } from "./routes/staticAdsIterations.js";
-import { runDeconstruction, runNicheClassification, staticAdReferencesRouter } from "./routes/staticAdReferences.js";
+import { backfillMissingThumbnails, runDeconstruction, runNicheClassification, staticAdReferencesRouter } from "./routes/staticAdReferences.js";
 import { uploadsRouter } from "./routes/uploads.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -177,25 +177,50 @@ async function startServer() {
         console.log(`[static-ads] retrying ${failed.length} failed deconstruction(s)`);
         for (const row of failed) void runDeconstruction(row.id);
       }
+
+      // Auto-backfill grid thumbnails for any reference still missing one.
+      // Idempotent + bandwidth-bounded (concurrency 4). The original
+      // imageUrl stays unchanged — the thumb is a separate fal asset that
+      // the references list endpoint surfaces to the frontend grid so it
+      // doesn't have to download multi-MB source PNGs.
+      void backfillMissingThumbnails();
     } catch (err) {
       console.error("[static-ads] boot ingest failed:", err);
     }
   })();
 
-  // Create the brand_members table if it doesn't exist yet, then seed it
-  // for existing non-admin members so the new per-workspace access feature
-  // ships without silently locking anyone out. Both steps idempotent:
-  //   - CREATE TABLE IF NOT EXISTS makes the schema migration safe to
-  //     re-run on every boot (avoids needing a separate drizzle migration
-  //     for this one-table addition).
-  //   - The INSERT uses ON CONFLICT (brand_id, user_id) DO NOTHING so
-  //     re-runs don't double-grant.
+  // Ensure the brand_members schema exists on every boot. The CREATE TABLE
+  // / CREATE INDEX statements are idempotent (IF NOT EXISTS guards), so
+  // they're safe to re-run forever and they let fresh deploys come up
+  // without depending on a drizzle migration having already applied.
   //
-  // Backfill policy: every (member, brand) pair on the same team gets a
-  // grant row. Admins are intentionally omitted — they implicitly see
-  // every brand via the role check in canSeeBrand(). After this initial
-  // seed, the admin uses SettingsPage → Manage workspaces to tighten
-  // access on a per-user basis.
+  // ⚠️ DO NOT ADD A BOOT-TIME INSERT INTO brand_members HERE. ⚠️
+  //
+  // History — a security incident: a previous version of this block had an
+  // INSERT INTO brand_members (...) SELECT FROM team_members JOIN brands ...
+  // ON CONFLICT (brand_id, user_id) DO NOTHING, intended as a one-shot
+  // migration when per-brand access first shipped.
+  //
+  // The bug: ON CONFLICT only suppresses *duplicate* (brand_id, user_id)
+  // pairs. When an admin created a NEW brand, the (new_brand_id,
+  // existing_user_id) pair had never existed, so it was NOT a conflict.
+  // Every existing non-admin member silently got grants to the new brand
+  // on the next deploy — wiping out the admin's carefully scoped access
+  // rules and giving everyone access to everything.
+  //
+  // The correct grant paths, which DO NOT depend on boot-time logic, are:
+  //   1. server/routes/brands.ts POST /api/brands → grants the creator
+  //      (when they're a member). Admins skip the row (role check
+  //      bypasses brand_members anyway).
+  //   2. server/routes/team.ts PUT /api/team/members/:userId/brands →
+  //      the admin explicitly assigns brand access via SettingsPage
+  //      → Manage workspaces. This is the ONLY way a non-creator,
+  //      non-admin gets brand access.
+  //
+  // If you ever need to backfill existing data again, write a one-shot
+  // script that runs out-of-band (e.g. via `pnpm tsx scripts/...`) and
+  // is removed after it runs. NEVER put data-seeding logic at the boot
+  // entry point — it will silently re-fire on every deploy.
   void (async () => {
     try {
       await db.execute(sqlTag`
@@ -211,20 +236,8 @@ async function startServer() {
         CREATE UNIQUE INDEX IF NOT EXISTS brand_members_brand_user_uniq
         ON brand_members (brand_id, user_id);
       `);
-      const result = await db.execute(sqlTag`
-        INSERT INTO brand_members (brand_id, user_id, created_by)
-        SELECT b.id, tm.user_id, NULL
-        FROM team_members tm
-        JOIN brands b ON b.team_id = tm.team_id
-        WHERE tm.role = 'member'
-        ON CONFLICT (brand_id, user_id) DO NOTHING
-      `);
-      const inserted = (result as { rowCount?: number }).rowCount ?? 0;
-      if (inserted > 0) {
-        console.log(`[brand-members] seeded ${inserted} grant(s) for existing members`);
-      }
     } catch (err) {
-      console.error("[brand-members] backfill failed (non-fatal):", err);
+      console.error("[brand-members] schema bootstrap failed (non-fatal):", err);
     }
   })();
 

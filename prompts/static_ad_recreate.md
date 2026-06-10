@@ -8,6 +8,23 @@ You are adapting a reference static ad to a new product. Preserve the reference'
 
 ---
 
+LANGUAGE — HARD RULE, OVERRIDES THE REFERENCE
+
+OUTPUT LANGUAGE: **{{language}}**
+
+Every single piece of visible copy in the final image — headline, sub-headline, bullets, callouts, badges, button labels, footer, disclaimers, watermarks, on-pack copy you re-render, hand-written-style annotations, EVERYTHING — must be written in **{{language}}**.
+
+The REFERENCE AD may be in a different language (often German, French, English, Spanish, etc.). The REFERENCE AD STRUCTURAL ANALYSIS below contains literal copy strings from the original — those are STRUCTURAL EXAMPLES to show you the layout pattern, NOT text to copy. Treat every copy snippet in the deconstruction as if it were in a placeholder language; rewrite it in {{language}}.
+
+Hard rules:
+
+1. No copy in any language other than **{{language}}** may appear in the final image. Not in headlines, not in fine print, not in URLs or hashtags, not in mock product labels you add on top of the real product label.
+2. If the reference's headline is German "Aktiviere Deine Energie", and {{language}} is English, the rewrite is an English headline that follows the SAME shape ("Activate Your Energy") — not the German original, not a German-English mix.
+3. Brand name, product name, and the real product's existing on-pack label stay as they are (those are product identity, not ad copy). Everything else is in {{language}}.
+4. If you're tempted to keep a phrase "because it sounds catchy in the source language", DON'T. Rewrite it in {{language}}.
+
+---
+
 COPY RULE — PRESERVE THE REFERENCE'S CLAIM, TRANSLATE IT THROUGH THE ANGLE
 
 Every reference ad has its own distinct claim, hook, and message approach — that uniqueness is exactly why we chose it. Your job is NOT to replace every reference's headline with a generic pitch for the angle. Your job is to rewrite THIS reference's specific claim for THIS product, targeted at the audience defined by the angle.
@@ -32,15 +49,43 @@ A reader who matches the angle's audience should feel "this is for me" — but a
 
 ---
 
-BRAND + VISUAL RULES
+BRAND VISUAL IDENTITY — HARD RULE, OVERRIDES THE REFERENCE'S COLORS + FONTS
 
-Apply the BRAND tone, colour palette, and visual identity — but honor the reference ad's style first. Use the brand colour palette only where it fits naturally; do not flood the composition with it.
+The reference ad dictates LAYOUT (where things go, how they stack, copy slot sizes, hierarchy, spacing, photographic mood). The BRAND dictates VISUAL IDENTITY (which colors fill those slots, which fonts render the copy, which logo appears). These are separate responsibilities — do not let the reference's colors or fonts leak into the final output.
+
+USE THESE BRAND TOKENS — they are concrete and authoritative. Do NOT substitute the reference ad's hex codes or font families for them:
+
+- **Primary / CTA color** → `{{PRIMARY_HEX}}`
+  Use this color for the primary action button background, primary headline accent, and any "primary brand color" surface the reference uses. If the reference's CTA was forest green and {{PRIMARY_HEX}} is terracotta, the rewrite's CTA is terracotta.
+- **Page / background color** → `{{BG_HEX}}`
+  Use this as the main canvas / page background where the reference shows a solid color. Override the reference's background even if the reference looks "fine" in its original color.
+- **Body / paragraph text color** → `{{BODY_TEXT_HEX}}`
+  Use this for body copy, sub-headlines, and supporting text. Override the reference's text color even when the reference uses pure black.
+- **Heading / display font** → `{{FONT_HEADING}}`
+  Render headlines, sub-headlines, and any display-weight type in this family. If the reference uses a chunky condensed sans and {{FONT_HEADING}} is an elegant serif, the rewrite uses the serif — preserve the reference's SCALE and WEIGHT relationships, but in the brand's family.
+- **Body / paragraph font** → `{{FONT_BODY}}`
+  Render body copy, bullets, fine print, and footers in this family.
+
+Hard rules:
+
+1. NEVER copy the reference ad's exact hex codes. The reference is a structural blueprint, not a color palette source. Sample the brand tokens above instead.
+2. NEVER copy the reference ad's font family. Preserve the reference's typographic SCALE (how big the headline is relative to body, weight contrast, alignment) — but render it in {{FONT_HEADING}} / {{FONT_BODY}}.
+3. The brand's color tokens are not optional. If the reference uses purple and the brand is amber, the rewrite uses amber — even if purple "would look good".
+4. If a brand token is marked "(not specified)", fall back to a color or font derived from the BRAND block lower in this prompt — but still do not copy the reference's identity. The reference's identity is never the right answer.
+
+When the brand has multiple palette colors, default to using {{PRIMARY_HEX}} for the primary brand surface and {{BG_HEX}} for the background; reach for the other palette colors only for secondary accents (badges, dividers, illustrative details) where the reference has multiple accent surfaces.
+
+The brand wordmark (logo) shown in the BRAND block, where present, replaces any logo / brand mark slot the reference ad uses. The reference's logo does not appear in the final output.
+
+---
+
+GENERAL VISUAL + COPY RULES
 
 Communicate product benefits in simple, consumer-friendly language. No jargon unless the angle's audience specifically uses it.
 
-Do NOT change the reference ad's layout, hierarchy, composition, typography scale, or visual structure. Only swap in the new product (from the PRODUCT IMAGE) and rewrite the copy for the angle.
+Do NOT change the reference ad's layout, hierarchy, composition, typography scale, or visual structure. Only swap in the new product (from the PRODUCT IMAGE), the brand's visual identity (colors + fonts above), and rewrite the copy for the angle.
 
-All copy must be written in the LANGUAGE specified.
+All copy must be written in the LANGUAGE specified above — see the LANGUAGE — HARD RULE section. The reference ad's source language does NOT override the LANGUAGE directive under any circumstance.
 
 ---
 
@@ -94,7 +139,9 @@ FINAL CHECK (before you output the image)
 - The copy overall uses the ANGLE's vocabulary and speaks to its audience, but does not reduce every reference to the same headline.
 - Bullets / supporting copy occupy the reference's copy slots with content relevant to this product + angle.
 - Layout, composition, and hierarchy match the REFERENCE AD exactly.
+- Colors are the BRAND tokens — primary surface is `{{PRIMARY_HEX}}`, background is `{{BG_HEX}}`, body text is `{{BODY_TEXT_HEX}}`. The reference ad's exact hex codes do NOT appear in the output.
+- Fonts are the BRAND families — headlines in `{{FONT_HEADING}}`, body copy in `{{FONT_BODY}}`. The reference ad's font family does NOT appear in the output (its scale and weight relationships are preserved, but rendered in the brand family).
 - The product shown is the PRODUCT IMAGE hero, rendered with the correct packaging / label details from the CONTENT IMAGE reference.
 - The product's aspect ratio, silhouette, and proportions match PRODUCT IMAGE exactly — the packaging has NOT been squashed, stretched, widened, narrowed, or otherwise re-proportioned to fit the reference ad's product slot.
 - The product's label layout, logo placement, colours, and materials match PRODUCT IMAGE exactly — the packaging has NOT been redesigned or reinterpreted.
-- All copy is in the specified LANGUAGE.
+- All copy is in **{{language}}** — every headline, sub-headline, bullet, badge, button, footer, and overlay. Zero words from the reference ad's source language survive in the final composition (the only exception is the real product's existing on-pack branding, which is product identity, not ad copy).

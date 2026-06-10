@@ -342,7 +342,16 @@ export default function StaticAdsAppPage() {
   // Fire one recreate call per selected reference in parallel. Update the
   // matching recreation entry as each fetch resolves or rejects so the Step 2
   // grid fills in progressively.
-  const runRecreate = async (reference: StaticAdReference, feedback?: string) => {
+  //
+  // When `previousOutputUrl` is set, the server enters feedback-edit mode:
+  // the previous output is the input image and the feedback text drives the
+  // edit. This is how the Regenerate-with-feedback button avoids rolling
+  // the dice from scratch every time the user types a note.
+  const runRecreate = async (
+    reference: StaticAdReference,
+    feedback?: string,
+    previousOutputUrl?: string,
+  ) => {
     if (!selectedProductId || !activeAngle) return;
     try {
       const result = await recreateStaticAd({
@@ -352,6 +361,7 @@ export default function StaticAdsAppPage() {
         referenceId: reference.id,
         brand: brand ?? null,
         feedback,
+        previousOutputUrl,
       });
       setRecreations((prev) =>
         prev.map((r) =>
@@ -406,6 +416,13 @@ export default function StaticAdsAppPage() {
   const handleRegenerate = (referenceId: string, feedback?: string) => {
     const entry = recreations.find((r) => r.referenceId === referenceId);
     if (!entry) return;
+    // Capture the previous output URL BEFORE we flip the entry to "generating"
+    // and clear `url`. When feedback is present we pass it through so the
+    // server edits the previous output instead of re-running the whole
+    // pipeline from the reference. No feedback ⇒ no previousOutputUrl ⇒
+    // server falls back to a fresh recreate (the "retry" semantics users
+    // expect when they just click Regenerate without typing anything).
+    const previousOutputUrl = feedback?.trim() ? entry.url : undefined;
     setRecreations((prev) =>
       prev.map((r) =>
         r.referenceId === referenceId
@@ -426,7 +443,7 @@ export default function StaticAdsAppPage() {
         return next;
       });
     }
-    void runRecreate(entry.reference, feedback);
+    void runRecreate(entry.reference, feedback, previousOutputUrl);
   };
 
   const toggleFeedback = (referenceId: string) => {
@@ -1169,8 +1186,15 @@ export default function StaticAdsAppPage() {
 
                             <div className="aspect-square overflow-hidden bg-white/[0.02]">
                               <img
-                                src={ref.imageUrl}
+                                // Use the small webp thumbnail when the
+                                // server has generated one — it's ~10x
+                                // smaller than the original. Falls back to
+                                // the source imageUrl for legacy refs that
+                                // haven't been backfilled yet.
+                                src={ref.thumbnailUrl ?? ref.imageUrl}
                                 alt={ref.title}
+                                loading="lazy"
+                                decoding="async"
                                 className={`w-full h-full object-cover transition-all ${isSelected ? "brightness-100" : "brightness-75 group-hover:brightness-90"}`}
                               />
                             </div>

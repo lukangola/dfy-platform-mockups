@@ -1014,6 +1014,16 @@ export function recreateStaticAd(args: {
   referenceId: string;
   brand?: StaticAdRecreationBrand | null;
   feedback?: string;
+  /**
+   * URL of the most-recent generated output for this reference. When set
+   * alongside `feedback`, the server switches into feedback-edit mode:
+   * instead of re-running the full recreate pipeline from the reference ad,
+   * it edits the previous output using nano-banana-pro/edit with the
+   * feedback text as the primary instruction. Cuts cost + latency roughly
+   * in half and produces results that feel like an iteration on the user's
+   * approved direction rather than a fresh roll of the dice.
+   */
+  previousOutputUrl?: string;
 }): Promise<StaticAdRecreationResult> {
   return post<StaticAdRecreationResult>("/api/static-ads/recreate", args);
 }

@@ -10,7 +10,7 @@
  * Each reference has a JSON deconstruction produced by the `static_ad_deconstruct`
  * master prompt (vision input). The deconstruction is fired async on create.
  */
-import { desc, eq, inArray } from "drizzle-orm";
+import { desc, eq, inArray, isNull } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
 import { db, schema } from "../lib/db.js";
@@ -18,6 +18,7 @@ import { uploadToFalStorage } from "../lib/fal.js";
 import { extractJsonObject } from "../lib/jsonExtract.js";
 import { loadPrompt, PromptNotConfiguredError } from "../lib/prompts.js";
 import { ingestStaticAdLibrary } from "../lib/staticAdIngest.js";
+import { buildStaticAdThumbnail } from "../lib/staticAdThumbnails.js";
 
 export const staticAdReferencesRouter: Router = Router();
 
@@ -146,6 +147,31 @@ staticAdReferencesRouter.post("/backfill-niches", async (_req: Request, res: Res
 });
 
 /**
+ * POST /api/static-ad-references/backfill-thumbnails
+ * Generates the small grid thumbnail for every row whose thumbnailUrl is
+ * still NULL. Runs in the background and reports queued count immediately.
+ * Sharp is CPU-bound + the upload is I/O — we cap concurrency at 4 to keep
+ * the API responsive while we churn through dozens of refs.
+ */
+staticAdReferencesRouter.post("/backfill-thumbnails", async (_req: Request, res: Response) => {
+  try {
+    const rows = await db
+      .select({
+        id: schema.staticAdReferences.id,
+        imageUrl: schema.staticAdReferences.imageUrl,
+        sourcePath: schema.staticAdReferences.sourcePath,
+      })
+      .from(schema.staticAdReferences)
+      .where(isNull(schema.staticAdReferences.thumbnailUrl));
+    void runThumbnailBackfill(rows);
+    res.json({ ok: true, queued: rows.length, ids: rows.map((r) => r.id) });
+  } catch (err) {
+    console.error("[static-ad-refs] backfill-thumbnails failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
  * POST /api/static-ad-references/retry-failed
  * Re-runs deconstruction on every row whose last attempt failed (typically
  * from 429 rate-limit errors on boot). Queues through the concurrency gate
@@ -167,8 +193,20 @@ staticAdReferencesRouter.post("/retry-failed", async (_req: Request, res: Respon
 
 staticAdReferencesRouter.get("/", async (_req: Request, res: Response) => {
   try {
+    // Explicit column projection — the `deconstruction` JSON column can be
+    // 5–20KB per row; multiplied across 50+ references that's a noticeable
+    // payload that the grid never reads (it only needs id, title, niche,
+    // image, status). Fetch the full deconstruction on demand via GET /:id.
     const rows = await db
-      .select()
+      .select({
+        id: schema.staticAdReferences.id,
+        createdAt: schema.staticAdReferences.createdAt,
+        title: schema.staticAdReferences.title,
+        niche: schema.staticAdReferences.niche,
+        imageUrl: schema.staticAdReferences.imageUrl,
+        thumbnailUrl: schema.staticAdReferences.thumbnailUrl,
+        deconstructionStatus: schema.staticAdReferences.deconstructionStatus,
+      })
       .from(schema.staticAdReferences)
       .orderBy(desc(schema.staticAdReferences.createdAt));
     res.json({ references: rows });
@@ -206,18 +244,39 @@ staticAdReferencesRouter.post("/", async (req: Request, res: Response) => {
 
     let imageUrl: string;
     let title: string;
+    // Filename used as the basename for the thumb upload (e.g. `foo.png` →
+    // `foo-thumb.webp`). When we accept a remote imageUrl we derive it from
+    // the URL's last path segment.
+    let baseFilename: string;
 
     if (body.imageUrl && typeof body.imageUrl === "string") {
       imageUrl = body.imageUrl.trim();
       title = (body.title ?? "").trim() || `${niche} reference`;
+      try {
+        const u = new URL(imageUrl);
+        baseFilename = (u.pathname.split("/").pop() || `ref-${Date.now()}.png`) || `ref-${Date.now()}.png`;
+      } catch {
+        baseFilename = `ref-${Date.now()}.png`;
+      }
     } else if (body.dataUrl && typeof body.dataUrl === "string") {
       const decoded = decodeDataUrl(body.dataUrl);
       if (!decoded) return sendError(res, 400, "dataUrl is not a valid base64 data URL");
       const filename = body.filename?.trim() || `upload-${Date.now()}.png`;
       imageUrl = await uploadToFalStorage(decoded.buffer, decoded.mime, filename);
       title = (body.title ?? "").trim() || filename.replace(/\.[^.]+$/, "");
+      baseFilename = filename;
     } else {
       return sendError(res, 400, "Provide either imageUrl or dataUrl");
+    }
+
+    // Build the thumbnail eagerly so the row lands with both URLs and the
+    // grid never has to scramble. Failure is non-fatal — the row still gets
+    // created, frontend just falls back to imageUrl.
+    let thumbnailUrl: string | null = null;
+    try {
+      thumbnailUrl = await buildStaticAdThumbnail(imageUrl, baseFilename);
+    } catch (thumbErr) {
+      console.warn(`[static-ad-refs] thumbnail build failed for new reference (non-fatal):`, thumbErr);
     }
 
     const [row] = await db
@@ -226,6 +285,7 @@ staticAdReferencesRouter.post("/", async (req: Request, res: Response) => {
         title,
         niche,
         imageUrl,
+        thumbnailUrl,
         deconstructionStatus: "pending",
       })
       .returning();
@@ -497,4 +557,61 @@ export async function runNicheClassification(id: string): Promise<void> {
   } catch (err) {
     console.error(`[static-ads] niche classification failed for ${id}:`, err);
   }
+}
+
+/**
+ * Background worker that walks a batch of references missing thumbnails
+ * and builds one for each. Concurrency capped to keep memory + bandwidth
+ * usage bounded — sharp resize buffers can be tens of MB peak for large
+ * source images. Boot-time auto-backfill calls this on startup.
+ */
+export async function runThumbnailBackfill(
+  rows: { id: string; imageUrl: string; sourcePath: string | null }[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  const concurrency = 4;
+  let cursor = 0;
+  let built = 0;
+  let failed = 0;
+  console.log(`[static-ads] thumbnail backfill: queued ${rows.length} reference(s)`);
+
+  async function worker() {
+    while (true) {
+      const idx = cursor++;
+      if (idx >= rows.length) return;
+      const row = rows[idx];
+      try {
+        const base = row.sourcePath || `ref-${row.id.slice(0, 8)}.png`;
+        const thumbnailUrl = await buildStaticAdThumbnail(row.imageUrl, base);
+        await db
+          .update(schema.staticAdReferences)
+          .set({ thumbnailUrl })
+          .where(eq(schema.staticAdReferences.id, row.id));
+        built++;
+      } catch (err) {
+        failed++;
+        console.warn(`[static-ads] thumbnail backfill failed for ${row.id}:`, err);
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  console.log(`[static-ads] thumbnail backfill done — built ${built}, failed ${failed}`);
+}
+
+/**
+ * Boot-time entry point — finds every reference with no thumbnail and
+ * builds one. Safe to call repeatedly; rows that already have a thumb are
+ * filtered out by the SQL predicate.
+ */
+export async function backfillMissingThumbnails(): Promise<void> {
+  const rows = await db
+    .select({
+      id: schema.staticAdReferences.id,
+      imageUrl: schema.staticAdReferences.imageUrl,
+      sourcePath: schema.staticAdReferences.sourcePath,
+    })
+    .from(schema.staticAdReferences)
+    .where(isNull(schema.staticAdReferences.thumbnailUrl));
+  await runThumbnailBackfill(rows);
 }
