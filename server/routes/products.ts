@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { desc, eq, sql as sqlTag } from "drizzle-orm";
 import { type NextFunction, type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
+import { harvestRedditStatements, formatCandidates, isApifyConfigured } from "../lib/apify.js";
 import { requireAuth } from "../lib/auth.js";
 import { canSeeBrand, canSeeProduct } from "../lib/brandAccess.js";
 import { db, schema } from "../lib/db.js";
@@ -41,21 +43,68 @@ function sendError(res: Response, status: number, message: string) {
   res.status(status).json({ error: message });
 }
 
+// ── Per-angle sub-artifacts ───────────────────────────────────────────
+// Each strategic angle owns three lazily-generated, cached sub-artifacts in
+// addition to its `block` (the elaborated "Description"):
+//   - statements → authentic customer resonance statements (dfy_resonance.md,
+//                  web-mined from Reddit / reviews / forums / social comments)
+//   - messages   → 10 first-person ad messages (message_testing_copy.md)
+//   - adCopy     → a complete primary ad (primary_ad_copy.md)
+// Generation is per-angle (one Claude call per angle per kind) so each angle's
+// artifact has isolated status/error and can be regenerated independently —
+// the granularity the upcoming client-feedback loop needs.
+type AngleArtifactKind = "statements" | "messages" | "adCopy";
+const ANGLE_ARTIFACT_KINDS: AngleArtifactKind[] = ["statements", "messages", "adCopy"];
+
+type AngleArtifact = {
+  content?: string | null;
+  status?: "running" | "complete" | "failed";
+  error?: string | null;
+  generatedAt?: string;
+};
+
+type StoredAngle = {
+  id?: string;
+  name: string;
+  block: string;
+  artifacts?: Partial<Record<AngleArtifactKind, AngleArtifact>>;
+};
+
+/**
+ * Ensure every angle has a stable `id`. Older products were researched before
+ * angles carried IDs; we backfill lazily wherever angles are read so the
+ * client always has a stable handle to address per-angle artifact generation.
+ * Returns the (possibly) updated array plus whether anything changed, so the
+ * caller can decide to persist.
+ */
+function ensureAngleIds(angles: StoredAngle[]): { angles: StoredAngle[]; changed: boolean } {
+  let changed = false;
+  const next = angles.map((a) => {
+    if (a && typeof a === "object" && !a.id) {
+      changed = true;
+      return { ...a, id: randomUUID() };
+    }
+    return a;
+  });
+  return { angles: next, changed };
+}
+
 /**
  * Parses the ===ANGLE=== / NAME: / BODY: delimited format returned by
  * prompts/extract_angles.md. More robust than asking Haiku to emit JSON with
- * multi-line markdown values.
+ * multi-line markdown values. Every parsed angle gets a stable `id` so the
+ * client can address its per-angle artifacts.
  */
-function parseDelimitedAngles(text: string): { name: string; block: string }[] {
+function parseDelimitedAngles(text: string): { id: string; name: string; block: string }[] {
   const chunks = text.split(/^===ANGLE===\s*$/m).map((c) => c.trim()).filter(Boolean);
-  const angles: { name: string; block: string }[] = [];
+  const angles: { id: string; name: string; block: string }[] = [];
   for (const chunk of chunks) {
     const nameMatch = chunk.match(/^\s*NAME:\s*(.+?)\s*$/m);
     const bodyIdx = chunk.search(/^BODY:\s*$/m);
     if (!nameMatch || bodyIdx === -1) continue;
     const afterBody = chunk.slice(bodyIdx).replace(/^BODY:\s*\n?/, "").trim();
     if (!afterBody) continue;
-    angles.push({ name: nameMatch[1].trim(), block: afterBody });
+    angles.push({ id: randomUUID(), name: nameMatch[1].trim(), block: afterBody });
   }
   return angles;
 }
@@ -110,6 +159,25 @@ productsRouter.get("/:id", async (req: Request, res: Response) => {
     // Idempotent — re-running while extraction is in flight is a no-op.
     const research = (row.research ?? {}) as Record<string, unknown>;
     maybeTriggerMechanismExtraction(row.id, research, row.productImageUrl);
+
+    // Lazy-heal: stamp stable IDs onto any angles that predate the per-angle
+    // artifact feature, so the client always has a handle to trigger
+    // statement/message/ad-copy generation. Persist + reflect in the response.
+    const rawAngles = Array.isArray((research as { angles?: unknown }).angles)
+      ? ((research as { angles: StoredAngle[] }).angles)
+      : null;
+    if (rawAngles) {
+      const { angles: healed, changed } = ensureAngleIds(rawAngles);
+      if (changed) {
+        const updatedResearch = { ...research, angles: healed };
+        await db
+          .update(schema.products)
+          .set({ research: updatedResearch })
+          .where(eq(schema.products.id, row.id));
+        row.research = updatedResearch as typeof row.research;
+      }
+    }
+
     res.json({ product: row });
   } catch (err) {
     console.error("[products] get failed:", err);
@@ -537,6 +605,65 @@ productsRouter.post("/:id/angles", async (req: Request, res: Response) => {
       return sendError(res, 424, err.message);
     }
     console.error("[products] add angle failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
+ * POST /api/products/:id/angles/:angleId/artifact
+ * Body: { kind: "statements" | "messages" | "adCopy" }
+ *
+ * Lazily generates ONE sub-artifact for ONE angle and caches it on
+ * research.angles[i].artifacts[kind]. Returns immediately after flipping the
+ * artifact's status to "running"; the client polls GET /api/products/:id to
+ * watch it flip to "complete"/"failed" (same pattern as mechanism + reference
+ * sheet). Per-angle so a single failure or regenerate never touches siblings.
+ */
+productsRouter.post("/:id/angles/:angleId/artifact", async (req: Request, res: Response) => {
+  try {
+    const kind = ((req.body ?? {}) as { kind?: string }).kind ?? "";
+    if (!ANGLE_ARTIFACT_KINDS.includes(kind as AngleArtifactKind)) {
+      return sendError(res, 400, `kind must be one of: ${ANGLE_ARTIFACT_KINDS.join(", ")}`);
+    }
+
+    const [row] = await db
+      .select()
+      .from(schema.products)
+      .where(eq(schema.products.id, req.params.id))
+      .limit(1);
+    if (!row) return sendError(res, 404, "Product not found");
+
+    const research = (row.research ?? {}) as Record<string, unknown>;
+    const rawAngles = Array.isArray((research as { angles?: unknown }).angles)
+      ? ((research as { angles: StoredAngle[] }).angles)
+      : [];
+    if (rawAngles.length === 0) {
+      return sendError(res, 424, "No strategic angles available yet — extract angles first.");
+    }
+    const { angles } = ensureAngleIds(rawAngles);
+    const idx = angles.findIndex((a) => a.id === req.params.angleId);
+    if (idx === -1) return sendError(res, 404, "Angle not found");
+
+    // Flip this one artifact to "running" (preserving any IDs we just healed)
+    // so the polling client immediately shows a spinner.
+    const target = angles[idx];
+    const artifacts = { ...(target.artifacts ?? {}) };
+    artifacts[kind as AngleArtifactKind] = {
+      ...(artifacts[kind as AngleArtifactKind] ?? {}),
+      status: "running",
+      error: null,
+    };
+    angles[idx] = { ...target, artifacts };
+
+    await db
+      .update(schema.products)
+      .set({ research: { ...research, angles } })
+      .where(eq(schema.products.id, row.id));
+
+    void runAngleArtifact(row.id, req.params.angleId, kind as AngleArtifactKind);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[products] angle artifact trigger failed:", err);
     sendError(res, 500, err instanceof Error ? err.message : String(err));
   }
 });
@@ -1047,6 +1174,23 @@ export async function runResearch(productId: string) {
     researchData.mechanismStatus = "running";
     researchData.referenceSheetStatus = "running";
 
+    // Auto-trigger per-angle artifacts for newly researched products: pre-stamp
+    // every angle's statements/messages/adCopy as "running" so the UI shows
+    // spinners (and the manual Generate buttons stay disabled, preventing a
+    // double-fire) the instant research completes. The actual generation runs
+    // fire-and-forget below, after this state is persisted.
+    if (Array.isArray(researchData.angles)) {
+      researchData.angles = (researchData.angles as StoredAngle[]).map((a) => ({
+        ...a,
+        artifacts: {
+          ...(a.artifacts ?? {}),
+          statements: { ...(a.artifacts?.statements ?? {}), status: "running" as const },
+          messages: { ...(a.artifacts?.messages ?? {}), status: "running" as const },
+          adCopy: { ...(a.artifacts?.adCopy ?? {}), status: "running" as const },
+        },
+      }));
+    }
+
     await db
       .update(schema.products)
       .set({
@@ -1076,6 +1220,13 @@ export async function runResearch(productId: string) {
     // Fire-and-forget the post-processing pipeline. Reference sheet runs first,
     // then chains to mechanism extraction using the sheet + product photo as input.
     void runReferenceSheetGeneration(productId);
+
+    // Auto-generate all per-angle artifacts for this new product (statements →
+    // messages → ad copy, per angle). Existing products are never auto-run — a
+    // redeploy triggers nothing — so this only ever fires once, on first research.
+    if (Array.isArray(researchData.angles)) {
+      void autoGenerateAngleArtifacts(productId, researchData.angles as StoredAngle[]);
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[products] research failed for ${productId}:`, err);
@@ -1099,6 +1250,458 @@ export async function runResearch(productId: string) {
       error: msg,
       durationMs: Date.now() - started,
     });
+  }
+}
+
+/**
+ * Fire-and-forget: generate every per-angle artifact for a freshly researched
+ * product so the operator opens a finished research document instead of a wall
+ * of "Generate" buttons. Only NEW products reach this (it's called from
+ * runResearch); existing products are never auto-regenerated — those stay
+ * manual via the per-angle artifact endpoint, so a redeploy costs nothing.
+ *
+ * Sequential on purpose:
+ *  - statements must finish (and persist) before messages, so messages reuse the
+ *    mined statements instead of re-mining them (a double Apify + curate cost).
+ *  - adCopy is independent of statements but kept serial to avoid racing the
+ *    research read-modify-write and to keep Apify/LLM load predictable.
+ * runAngleArtifact swallows its own errors (writes a "failed" status), so one
+ * angle or kind failing never aborts the rest of the batch.
+ */
+async function autoGenerateAngleArtifacts(
+  productId: string,
+  angles: StoredAngle[],
+): Promise<void> {
+  for (const angle of angles) {
+    if (!angle?.id) continue;
+    await runAngleArtifact(productId, angle.id, "statements");
+    await runAngleArtifact(productId, angle.id, "messages");
+    await runAngleArtifact(productId, angle.id, "adCopy");
+  }
+}
+
+/**
+ * Short product descriptor handed to the copy/ad-copy prompts as the
+ * `{{product}}` variable — enough to ground the product's identity without
+ * the full research markdown.
+ */
+function productDescriptor(row: typeof schema.products.$inferSelect): string {
+  const parts = [row.name || "(unknown product)"];
+  if (row.category) parts.push(`Category: ${row.category}`);
+  if (row.productUrl) parts.push(`URL: ${row.productUrl}`);
+  return parts.join("\n");
+}
+
+/**
+ * Read-modify-write a single angle's artifact slot. Re-reads fresh research
+ * right before writing so a concurrent generation of a *different* artifact
+ * on the same product doesn't get clobbered. Merges into whatever is already
+ * stored for this kind (so a "running" → "complete" transition keeps fields).
+ */
+async function writeAngleArtifact(
+  productId: string,
+  angleId: string,
+  kind: AngleArtifactKind,
+  artifact: AngleArtifact,
+): Promise<void> {
+  const [row] = await db
+    .select()
+    .from(schema.products)
+    .where(eq(schema.products.id, productId))
+    .limit(1);
+  if (!row) return;
+  const research = (row.research ?? {}) as Record<string, unknown>;
+  const angles = (Array.isArray((research as { angles?: unknown }).angles)
+    ? (research as { angles: StoredAngle[] }).angles
+    : []) as StoredAngle[];
+  const idx = angles.findIndex((a) => a.id === angleId);
+  if (idx === -1) return;
+  const prev = angles[idx];
+  const prevArtifacts = prev.artifacts ?? {};
+  const merged: AngleArtifact = { ...(prevArtifacts[kind] ?? {}), ...artifact };
+  const next = [...angles];
+  next[idx] = { ...prev, artifacts: { ...prevArtifacts, [kind]: merged } };
+  await db
+    .update(schema.products)
+    .set({ research: { ...research, angles: next } })
+    .where(eq(schema.products.id, productId));
+}
+
+/**
+ * Async runner — generates ONE sub-artifact for ONE angle and caches it.
+ *
+ * Each kind maps to a dedicated master prompt, run with the single angle as
+ * its only input so the whole model output IS that angle's artifact (no
+ * fragile cross-angle parsing):
+ *   - statements → dfy_resonance.md      (web-mines authentic customer voice)
+ *   - messages   → message_testing_copy.md (10 first-person ad messages)
+ *   - adCopy     → primary_ad_copy.md    (one complete primary ad)
+ *
+ * On success: caches content + status "complete". On failure: status "failed"
+ * with the error string, leaving siblings untouched.
+ */
+// Mine the real customer-resonance statements for one angle via dfy_resonance
+// (live web research). Logs a generations row and persists the result to the
+// angle's `statements` artifact. Returns the mined content. Used both by the
+// standalone "statements" artifact and as the mandatory upstream step for
+// "messages" — messages are a rewrite of these mined statements, so they cannot
+// be produced without them.
+// Keep only the actual statement bullets from a model's text output, dropping
+// any narration/preamble lines. The output must be purely statements + links.
+function bulletsOnly(text: string): string {
+  return text
+    .split("\n")
+    .filter((l) => /^\s*[-*•]\s+/.test(l))
+    .join("\n")
+    .trim();
+}
+
+// The primary_ad_copy prompt always emits the Angle Name as the ad's first line
+// (it's a separator in the multi-ad report flow). For a single-angle ad that's
+// redundant — the angle title is already shown above the copy — so drop the
+// leading line when it restates the angle name. We match by TOKEN OVERLAP rather
+// than exact/prefix compare, because the model freely rewords the title (e.g.
+// inserts "The", reorders words): if ≥50% of the angle name's significant words
+// appear in the first line, it's a restatement → strip it. A real hook (which
+// shares few of the angle's distinctive nouns) stays intact.
+function stripLeadingAngleName(text: string, angleName: string): string {
+  const lines = text.split("\n");
+  let i = 0;
+  while (i < lines.length && !lines[i].trim()) i++;
+  if (i >= lines.length) return text.trim();
+
+  const tokenize = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/&/g, " and ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+  const stop = new Set(["the", "a", "an", "and", "of", "to", "for", "your", "you", "but", "with"]);
+  const firstToks = new Set(tokenize(lines[i]));
+  const nameToks = tokenize(angleName).filter((t) => t.length >= 3 && !stop.has(t));
+  if (nameToks.length === 0) return text.trim();
+  const overlap = nameToks.filter((t) => firstToks.has(t)).length / nameToks.length;
+
+  if (overlap >= 0.5) {
+    lines.splice(0, i + 1);
+    while (lines.length && !lines[0].trim()) lines.shift();
+    return lines.join("\n").trim();
+  }
+  return text.trim();
+}
+
+// Token/cost accounting carried out of a mining strategy, so the caller can log
+// one generations row regardless of how many model calls the strategy made.
+type MinedStatements = {
+  content: string;
+  model: string;
+  promptVersion: string;
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number;
+  durationMs: number;
+  source: "apify_reddit" | "web_search";
+};
+
+// Primary path: harvest REAL Reddit posts/comments via Apify, then let Claude
+// curate the best resonance statements from that real pool. Every source link
+// is a genuine Reddit permalink (no fabrication, no bot-walls). Throws if the
+// harvest yields nothing usable, so the caller can fall back to web_search.
+async function mineViaApify(
+  row: typeof schema.products.$inferSelect,
+  angle: StoredAngle,
+): Promise<MinedStatements> {
+  const angleContext = `**${angle.name}**\n\n${angle.block}`;
+  const productUrl = row.productUrl ?? "(no product URL provided — context only)";
+
+  // 1) Plan the Reddit search — relevant subreddits + pain-language terms +
+  //    anchor terms for the relevance gate (cheap Haiku call).
+  const qPrompt = loadPrompt("dfy_resonance_queries", { angle: angleContext });
+  const qResult = await generateText({
+    systemPrompt: qPrompt.rendered,
+    userMessage: "Plan the Reddit search for this angle now.",
+    model: qPrompt.config.model,
+    maxTokens: qPrompt.config.maxTokens,
+  });
+  let plan: { subreddits?: string[]; searchTerms?: string[]; anchorTerms?: string[] } = {};
+  try {
+    const cleaned = qResult.text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+    const parsed = JSON.parse(cleaned);
+    if (parsed && typeof parsed === "object") plan = parsed as typeof plan;
+  } catch {
+    /* fall through to heuristic below */
+  }
+  const searchTerms = plan.searchTerms?.length ? plan.searchTerms : [angle.name];
+
+  // 2) Harvest the real Reddit pool (subreddit-scoped + anchor-filtered).
+  const statements = await harvestRedditStatements(
+    { subreddits: plan.subreddits, searchTerms, anchorTerms: plan.anchorTerms },
+    { maxItems: 80 },
+  );
+  if (statements.length === 0) {
+    throw new Error("Apify Reddit harvest returned no candidates");
+  }
+
+  // 3) Curate the best resonance statements from real data.
+  const cPrompt = loadPrompt("dfy_resonance_curate", {
+    url: productUrl,
+    angle: angleContext,
+    candidates: formatCandidates(statements),
+  });
+  const cResult = await generateText({
+    systemPrompt: cPrompt.rendered,
+    userMessage: "Select and format the strongest resonance statements from the pool now.",
+    model: cPrompt.config.model,
+    maxTokens: cPrompt.config.maxTokens,
+    thinking: cPrompt.config.thinking,
+  });
+  const content = bulletsOnly(cResult.text.trim());
+  if (!content) {
+    throw new Error(
+      `curator returned no usable statements (stop: ${cResult.stopReason}, candidates: ${statements.length})`,
+    );
+  }
+  return {
+    content,
+    model: cResult.model,
+    promptVersion: cPrompt.version,
+    tokensIn: qResult.tokensIn + cResult.tokensIn,
+    tokensOut: qResult.tokensOut + cResult.tokensOut,
+    costUsd: qResult.costUsd + cResult.costUsd,
+    durationMs: qResult.durationMs + cResult.durationMs,
+    source: "apify_reddit",
+  };
+}
+
+// Fallback path: Anthropic web_search miner. Lower fidelity (can't open Reddit),
+// but works with no extra config. Used when APIFY_TOKEN is unset or the Apify
+// harvest fails.
+async function mineViaWebSearch(
+  row: typeof schema.products.$inferSelect,
+  angle: StoredAngle,
+): Promise<MinedStatements> {
+  const productUrl = row.productUrl ?? "";
+  const angleContext = `**${angle.name}**\n\n${angle.block}`;
+  const prompt = loadPrompt("dfy_resonance", {
+    url:
+      productUrl ||
+      "(no product URL provided — mine statements using the angle context below and the product's real mechanisms)",
+    angles: angleContext,
+  });
+  const result = await generateText({
+    systemPrompt: prompt.rendered,
+    userMessage: "Mine the authentic customer resonance statements for this angle now.",
+    model: prompt.config.model,
+    maxTokens: prompt.config.maxTokens,
+    tools: prompt.config.tools,
+    thinking: prompt.config.thinking,
+    webSearchMaxUses: prompt.config.webSearchMaxUses,
+    webFetchMaxUses: prompt.config.webFetchMaxUses,
+    webFetchMaxContentTokens: prompt.config.webFetchMaxContentTokens,
+  });
+  const content = bulletsOnly(result.text.trim());
+  if (!content) {
+    throw new Error(
+      `statements generator returned no usable statements (stop: ${result.stopReason}, out_tokens: ${result.tokensOut}). ` +
+        `The web research finished but produced no statement bullets — please Retry.`,
+    );
+  }
+  return {
+    content,
+    model: result.model,
+    promptVersion: prompt.version,
+    tokensIn: result.tokensIn,
+    tokensOut: result.tokensOut,
+    costUsd: result.costUsd,
+    durationMs: result.durationMs,
+    source: "web_search",
+  };
+}
+
+async function mineAngleStatements(
+  row: typeof schema.products.$inferSelect,
+  angle: StoredAngle,
+  productId: string,
+  angleId: string,
+): Promise<string> {
+  await writeAngleArtifact(productId, angleId, "statements", {
+    status: "running",
+    error: null,
+  });
+  try {
+    let mined: MinedStatements;
+    if (isApifyConfigured()) {
+      try {
+        mined = await mineViaApify(row, angle);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[resonance] Apify path failed (${msg}) — falling back to web_search`);
+        mined = await mineViaWebSearch(row, angle);
+      }
+    } else {
+      mined = await mineViaWebSearch(row, angle);
+    }
+
+    await db.insert(schema.generations).values({
+      action: "angle_statements",
+      kind: "text",
+      inputs: { productId, angleId, artifactKind: "statements", source: mined.source },
+      output: { content: mined.content },
+      model: mined.model,
+      promptVersion: mined.promptVersion,
+      tokensIn: mined.tokensIn,
+      tokensOut: mined.tokensOut,
+      costUsd: String(mined.costUsd),
+      durationMs: mined.durationMs,
+    });
+
+    await writeAngleArtifact(productId, angleId, "statements", {
+      content: mined.content,
+      status: "complete",
+      error: null,
+      generatedAt: new Date().toISOString(),
+    });
+    return mined.content;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await writeAngleArtifact(productId, angleId, "statements", { status: "failed", error: msg });
+    throw err;
+  }
+}
+
+export async function runAngleArtifact(
+  productId: string,
+  angleId: string,
+  kind: AngleArtifactKind,
+): Promise<void> {
+  const started = Date.now();
+  try {
+    const [row] = await db
+      .select()
+      .from(schema.products)
+      .where(eq(schema.products.id, productId))
+      .limit(1);
+    if (!row) return;
+    const research = (row.research ?? {}) as Record<string, unknown>;
+    const angles = (Array.isArray((research as { angles?: unknown }).angles)
+      ? (research as { angles: StoredAngle[] }).angles
+      : []) as StoredAngle[];
+    const angle = angles.find((a) => a.id === angleId);
+    if (!angle) throw new Error("Angle not found for artifact generation");
+
+    // Statements: mine and we're done — this is its own terminal step.
+    if (kind === "statements") {
+      await mineAngleStatements(row, angle, productId, angleId);
+      console.log(
+        `[products] angle artifact statements complete for ${productId}/${angleId} in ${Date.now() - started}ms`,
+      );
+      return;
+    }
+
+    const angleContext = `**${angle.name}**\n\n${angle.block}`;
+
+    let action: string;
+    let prompt: ReturnType<typeof loadPrompt>;
+    let result: Awaited<ReturnType<typeof generateText>>;
+
+    if (kind === "messages") {
+      // Messages are a rewrite of the REAL mined statements — not the angle
+      // block. They cannot exist without statements, so this is a combined
+      // step: reuse already-mined statements if present, otherwise mine them
+      // now (which also populates the statements artifact), then rewrite.
+      let statements = (angle.artifacts?.statements?.content ?? "").trim();
+      if (!statements) {
+        statements = await mineAngleStatements(row, angle, productId, angleId);
+      }
+      action = "angle_messages";
+      prompt = loadPrompt("dfy_message_rewrite", {
+        product: productDescriptor(row),
+        angle: angleContext,
+        statements,
+      });
+      result = await generateText({
+        systemPrompt: prompt.rendered,
+        userMessage:
+          "Rewrite these real mined customer statements into clean, usable first-person messages now.",
+        model: prompt.config.model,
+        maxTokens: prompt.config.maxTokens,
+        tools: prompt.config.tools,
+        thinking: prompt.config.thinking,
+      });
+    } else {
+      action = "angle_adcopy";
+      // primary_ad_copy reads product info out of the report, so compose a
+      // minimal one-angle report: product line + this angle's block. That
+      // yields exactly one ad instead of one-per-angle.
+      const report = `Product: ${row.name || "(unknown product)"}${
+        row.category ? `\nCategory: ${row.category}` : ""
+      }\n\n${angle.block}`;
+      prompt = loadPrompt("primary_ad_copy", {
+        product: productDescriptor(row),
+        offer: "",
+        report,
+      });
+      result = await generateText({
+        systemPrompt: prompt.rendered,
+        userMessage: "Write the primary ad for this angle now.",
+        model: prompt.config.model,
+        maxTokens: prompt.config.maxTokens,
+        tools: prompt.config.tools,
+      });
+    }
+
+    let content = result.text.trim();
+    if (kind === "messages") {
+      // Safety net: the rewrite prompt is told to emit only raw message lines,
+      // one per line. Strip any stray "Angle: …" label / code-fence lines, drop
+      // blank lines, and HARD-CAP to 10 messages — so the output is always ≤10
+      // usable lines no matter how many the model returns.
+      content = content
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l && !/^\s*(angle\s*:|```)/i.test(l))
+        .slice(0, 10)
+        .join("\n");
+    } else if (kind === "adCopy") {
+      // Drop the redundant leading angle-name title so the ad starts on its hook.
+      content = stripLeadingAngleName(content, angle.name);
+    }
+    if (!content) throw new Error(`${kind} generator returned empty output`);
+
+    await db.insert(schema.generations).values({
+      action,
+      kind: "text",
+      inputs: { productId, angleId, artifactKind: kind },
+      output: { content },
+      model: result.model,
+      promptVersion: prompt.version,
+      tokensIn: result.tokensIn,
+      tokensOut: result.tokensOut,
+      costUsd: String(result.costUsd),
+      durationMs: result.durationMs,
+    });
+
+    await writeAngleArtifact(productId, angleId, kind, {
+      content,
+      status: "complete",
+      error: null,
+      generatedAt: new Date().toISOString(),
+    });
+
+    console.log(
+      `[products] angle artifact ${kind} complete for ${productId}/${angleId} in ${Date.now() - started}ms`,
+    );
+  } catch (err) {
+    const msg =
+      err instanceof PromptNotConfiguredError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    console.error(`[products] angle artifact ${kind} failed for ${productId}/${angleId}:`, err);
+    await writeAngleArtifact(productId, angleId, kind, { status: "failed", error: msg });
   }
 }
 

@@ -30,14 +30,31 @@ function calcCost(model: string, tokensIn: number, tokensOut: number): number {
 }
 
 // Server-side tool builders — Anthropic runs these, not us.
-function buildServerTools(names: string[] | undefined): Anthropic.ToolUnion[] | undefined {
+// `max_uses` caps how many times each tool may run per request. Defaults to 5,
+// but research-heavy prompts (e.g. resonance mining across many forums) can
+// raise it via prompt frontmatter so they don't exhaust the budget early.
+function buildServerTools(
+  names: string[] | undefined,
+  opts?: { webSearchMaxUses?: number; webFetchMaxUses?: number; webFetchMaxContentTokens?: number },
+): Anthropic.ToolUnion[] | undefined {
   if (!names || names.length === 0) return undefined;
+  const webSearchMaxUses = opts?.webSearchMaxUses ?? 5;
+  const webFetchMaxUses = opts?.webFetchMaxUses ?? 5;
   const tools: Anthropic.ToolUnion[] = [];
   for (const n of names) {
     if (n === "web_search") {
-      tools.push({ type: "web_search_20250305", name: "web_search", max_uses: 5 } as unknown as Anthropic.ToolUnion);
+      tools.push({ type: "web_search_20250305", name: "web_search", max_uses: webSearchMaxUses } as unknown as Anthropic.ToolUnion);
     } else if (n === "web_fetch") {
-      tools.push({ type: "web_fetch_20250910", name: "web_fetch", max_uses: 5 } as unknown as Anthropic.ToolUnion);
+      // max_content_tokens caps how much of each fetched page is pulled into the
+      // response. Without it, a few large pages blow the whole max_tokens budget
+      // before the model can write its final answer (→ empty output). Only set
+      // it when a prompt asks for it, to preserve existing prompts' behaviour.
+      tools.push({
+        type: "web_fetch_20250910",
+        name: "web_fetch",
+        max_uses: webFetchMaxUses,
+        ...(opts?.webFetchMaxContentTokens ? { max_content_tokens: opts.webFetchMaxContentTokens } : {}),
+      } as unknown as Anthropic.ToolUnion);
     } else if (n === "code_execution") {
       tools.push({ type: "code_execution_20250825", name: "code_execution" } as unknown as Anthropic.ToolUnion);
     }
@@ -103,7 +120,11 @@ export async function generateText(args: {
   model?: string;
   maxTokens?: number;
   tools?: string[];
+  webSearchMaxUses?: number;
+  webFetchMaxUses?: number;
+  webFetchMaxContentTokens?: number;
   imageUrls?: string[];
+  thinking?: boolean; // default on (when the model supports it). Pass `false` to disable — required for server-tool-heavy prompts where Opus 4.7's interleaved thinking ends the turn on a thinking block and emits no final text.
 }): Promise<TextGenResult> {
   if (!env.ANTHROPIC_API_KEY) {
     throw new Error("ANTHROPIC_API_KEY not set. Paste your key in .env.local.");
@@ -111,10 +132,17 @@ export async function generateText(args: {
 
   const model = args.model ?? DEFAULT_MODEL;
   const started = Date.now();
-  const serverTools = buildServerTools(args.tools);
+  const serverTools = buildServerTools(args.tools, {
+    webSearchMaxUses: args.webSearchMaxUses,
+    webFetchMaxUses: args.webFetchMaxUses,
+    webFetchMaxContentTokens: args.webFetchMaxContentTokens,
+  });
 
   // Adaptive thinking works on Opus 4.6/4.7 and Sonnet 4.6. Haiku rejects it.
-  const supportsAdaptiveThinking = /opus-4-(6|7)|sonnet-4-6/.test(model);
+  // A prompt can opt out via `thinking: false` — needed for server-tool-heavy
+  // prompts (e.g. resonance mining) where interleaved thinking on Opus 4.7 makes
+  // the model end its turn on an empty thinking block and never emit final text.
+  const supportsAdaptiveThinking = /opus-4-(6|7)|sonnet-4-6/.test(model) && args.thinking !== false;
 
   // web_fetch is currently beta and needs a header.
   const betas: string[] = [];
@@ -193,6 +221,16 @@ export async function generateText(args: {
     .map((b) => b.text ?? "")
     .join("\n")
     .trim();
+
+  // Diagnostics: empty text usually means the response hit max_tokens during
+  // tool use (server tool results count against the budget) and never reached
+  // the final answer. Log the stop reason + block makeup so this is debuggable.
+  if (!text) {
+    const blockTypes = res.content.map((b) => b.type);
+    console.warn(
+      `[anthropic] empty text output (model=${model}, stop_reason=${res.stop_reason}, max_tokens=${args.maxTokens ?? 8192}, out_tokens=${res.usage.output_tokens}, blocks=[${blockTypes.join(",")}])`,
+    );
+  }
 
   const tokensIn = res.usage.input_tokens + (res.usage.cache_read_input_tokens ?? 0);
   const tokensOut = res.usage.output_tokens;

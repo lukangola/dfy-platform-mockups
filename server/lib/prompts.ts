@@ -16,7 +16,11 @@ export type PromptConfig = {
   tools?: string[]; // e.g. ["web_search", "web_fetch"]
   model?: string;
   maxTokens?: number;
+  thinking?: boolean; // default on (for models that support it). Set `thinking: false` to disable — required for server-tool-heavy prompts (e.g. resonance mining) where interleaved thinking on Opus 4.7 makes the model end its turn on a thinking block and emit no final text.
   expectsJson?: boolean; // if true, the client should JSON.parse(text)
+  webSearchMaxUses?: number; // cap on web_search calls (default 5) — raise for research-heavy prompts
+  webFetchMaxUses?: number; // cap on web_fetch calls (default 5)
+  webFetchMaxContentTokens?: number; // cap content pulled per fetched page, so a few big pages don't blow max_tokens
 };
 
 type PromptCacheEntry = {

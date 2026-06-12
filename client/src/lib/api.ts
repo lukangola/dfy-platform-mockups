@@ -216,7 +216,30 @@ export function uploadBrandLogoRaw(
 
 // ---------- Products ----------
 
-export type ProductAngle = { name: string; block: string };
+/**
+ * The three lazily-generated sub-artifacts each angle owns, in addition to its
+ * `block` (the elaborated description):
+ *   - statements → authentic customer resonance statements (web-mined)
+ *   - messages   → 10 first-person ad messages
+ *   - adCopy     → a complete primary ad
+ */
+export type AngleArtifactKind = "statements" | "messages" | "adCopy";
+
+export type AngleArtifact = {
+  content?: string | null;
+  status?: SubJobStatus; // running | complete | failed; absent = not generated
+  error?: string | null;
+  generatedAt?: string;
+};
+
+export type ProductAngle = {
+  // `id` is backfilled lazily server-side; older cached angles may briefly
+  // lack it until the next GET heals + persists it.
+  id?: string;
+  name: string;
+  block: string;
+  artifacts?: Partial<Record<AngleArtifactKind, AngleArtifact>>;
+};
 
 export type ProductImageCandidate = {
   url: string;
@@ -352,6 +375,24 @@ export function addProductAngle(
   return post<{ angle: ProductAngle; angles: ProductAngle[] }>(
     `/api/products/${productId}/angles`,
     { description },
+  );
+}
+
+/**
+ * Kicks off lazy generation of one sub-artifact (statements / messages /
+ * adCopy) for one angle. Returns immediately — the server flips the artifact's
+ * status to "running" and generates async; poll getProduct() to watch it
+ * become "complete"/"failed" and read the cached content off
+ * research.angles[i].artifacts[kind].
+ */
+export function generateAngleArtifact(
+  productId: string,
+  angleId: string,
+  kind: AngleArtifactKind,
+): Promise<{ ok: true }> {
+  return post<{ ok: true }>(
+    `/api/products/${productId}/angles/${encodeURIComponent(angleId)}/artifact`,
+    { kind },
   );
 }
 

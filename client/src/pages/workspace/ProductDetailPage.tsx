@@ -13,14 +13,15 @@ import {
   ArrowLeft, ExternalLink, CheckCircle2, Loader2, Clock,
   Video, ChevronRight, ChevronDown, Package, AlertTriangle, RefreshCw,
   Upload, Link2, Check, ImageIcon, LayoutGrid, FileText, Target, Trash2,
-  Plus, X, MessageSquare, Pencil, Save,
+  Plus, X, MessageSquare, Pencil, Save, Quote, Megaphone,
 } from "lucide-react";
 import {
   getProduct, retriggerResearch, uploadProductImage,
   setProductMainImage, addProductImageCandidate, deleteProductImageCandidate,
   generateReferenceSheet, deleteProduct, addProductAngle,
-  updateProductMechanism, patchProduct,
+  updateProductMechanism, patchProduct, generateAngleArtifact,
   type Product, type ProductImageCandidate, type ProductMechanism,
+  type ProductAngle, type AngleArtifactKind,
 } from "@/lib/api";
 
 type Status = Product["researchStatus"];
@@ -152,6 +153,162 @@ function CollapsibleSection({
   );
 }
 
+// The research master prompt often bakes a "Real-World Customer Statements
+// (Verbatim)" bullet list into each angle's body. Those statements have no
+// source attribution and now live in their own dedicated, source-linked
+// "Real-life avatar statements" sub-accordion — so strip them out of the
+// Description so the Description shows only the strategic angle prose.
+// Removes a header line matching /customer statements/ plus the blank lines
+// and list items that immediately follow it (the statements can sit anywhere
+// in the block, not only at the end).
+function stripCustomerStatements(block: string): string {
+  const lines = block.split("\n");
+  const out: string[] = [];
+  let i = 0;
+  const isHeaderLine = (line: string) =>
+    /customer statements/i.test(line) && !/^\s*[-*•]\s+/.test(line);
+  const isListOrBlank = (line: string) =>
+    line.trim() === "" || /^\s*([-*•]|\d+[.)])\s+/.test(line);
+  while (i < lines.length) {
+    if (isHeaderLine(lines[i])) {
+      i++; // drop the header
+      while (i < lines.length && isListOrBlank(lines[i])) i++; // drop its bullets
+      continue;
+    }
+    out.push(lines[i]);
+    i++;
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// Per-angle sub-artifact presentation. `render` decides whether the cached
+// content is markdown (statements come back as bold-headed bullet lists) or
+// plain text with hard line breaks (messages + ad copy — one item per line,
+// which a markdown renderer would otherwise collapse into a run-on paragraph).
+const ARTIFACT_META: Record<
+  AngleArtifactKind,
+  {
+    label: string;
+    icon: React.ElementType;
+    subtitle: string;
+    running: string;
+    render: "markdown" | "text";
+  }
+> = {
+  statements: {
+    label: "Real-life avatar statements",
+    icon: Quote,
+    subtitle:
+      "Real people voicing this angle's pain in the wild — mined verbatim from Reddit, forums, and social comments (not product reviews). Each links to its source.",
+    running: "Mining real resonance statements from forums & social (web research)…",
+    render: "markdown",
+  },
+  messages: {
+    label: "Rewritten messages",
+    icon: MessageSquare,
+    subtitle:
+      "Usable first-person messages rewritten from the real mined statements above. Generating this will mine the statements first if you haven't yet.",
+    running: "Mining statements (if needed), then rewriting messages…",
+    render: "text",
+  },
+  adCopy: {
+    label: "Angle ad copy",
+    icon: Megaphone,
+    subtitle: "A complete primary ad — hook, benefit bullets, and CTA — written for this angle.",
+    running: "Writing ad copy…",
+    render: "text",
+  },
+};
+
+/**
+ * One sub-accordion under an angle for a single generated artifact. Shows the
+ * cached content if present, a spinner while running, an error + retry on
+ * failure, or a Generate button when not yet generated.
+ */
+function AngleArtifactSection({
+  angle,
+  kind,
+  busy,
+  localError,
+  onGenerate,
+}: {
+  angle: ProductAngle;
+  kind: AngleArtifactKind;
+  busy: boolean;
+  localError?: string | null;
+  onGenerate: (angleId: string, kind: AngleArtifactKind) => void;
+}) {
+  const meta = ARTIFACT_META[kind];
+  const art = angle.artifacts?.[kind];
+  const status = art?.status;
+  const running = status === "running" || busy;
+  const content = art?.content?.trim() || "";
+  const error = localError ?? (status === "failed" ? art?.error : null);
+  const canGenerate = Boolean(angle.id) && !running;
+
+  const GenerateButton = ({ label }: { label: string }) => (
+    <button
+      onClick={() => angle.id && onGenerate(angle.id, kind)}
+      disabled={!canGenerate}
+      className="flex items-center gap-2 px-3 py-2 rounded-lg text-[10px] font-mono uppercase tracking-wider font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+      style={{ background: "linear-gradient(135deg, #00D4FF 0%, #0099CC 100%)", color: "#0D0F12" }}
+    >
+      <meta.icon size={11} />
+      {label}
+    </button>
+  );
+
+  return (
+    <CollapsibleSection
+      title={meta.label}
+      icon={meta.icon}
+      subtitle={meta.subtitle}
+      badge={
+        content && status === "complete" ? (
+          <CheckCircle2 size={11} className="text-emerald-400" />
+        ) : null
+      }
+    >
+      {running ? (
+        <div className="flex items-center gap-2 text-[11px] font-mono text-amber-300/80 py-2">
+          <Loader2 size={12} className="animate-spin" />
+          {meta.running}
+        </div>
+      ) : error ? (
+        <div className="space-y-3">
+          <div className="text-[10px] font-mono text-rose-300 border border-rose-500/30 bg-rose-500/10 rounded-lg px-3 py-2 whitespace-pre-wrap">
+            {error}
+          </div>
+          <GenerateButton label="Retry" />
+        </div>
+      ) : content ? (
+        <div className="space-y-3">
+          {meta.render === "markdown" ? (
+            <article className="prose-report max-w-none">
+              <Streamdown>{content}</Streamdown>
+            </article>
+          ) : (
+            <div className="whitespace-pre-wrap text-sm text-white/80 leading-relaxed">{content}</div>
+          )}
+          <button
+            onClick={() => angle.id && onGenerate(angle.id, kind)}
+            disabled={!canGenerate}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-mono text-white/60 border border-white/[0.08] hover:text-cyan-400 hover:border-cyan-500/40 transition-all disabled:opacity-40"
+          >
+            <RefreshCw size={11} />
+            Regenerate
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <p className="text-[10px] font-mono text-white/40">Not generated yet.</p>
+          <GenerateButton label="Generate" />
+        </div>
+      )}
+    </CollapsibleSection>
+  );
+}
+
 export default function ProductDetailPage({ productId }: { productId: string }) {
   const [product, setProduct] = useState<Product | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -178,6 +335,38 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
   const [imgUrlInput, setImgUrlInput] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // Per-angle artifact generation. Each angle owns 3 lazily-generated
+  // sub-artifacts (statements / messages / ad copy). A click flips the
+  // server-side status to "running"; polling then surfaces completion.
+  const [generatingKeys, setGeneratingKeys] = useState<Set<string>>(new Set());
+  const [artifactErrors, setArtifactErrors] = useState<Record<string, string>>({});
+
+  async function handleGenerateArtifact(angleId: string, kind: AngleArtifactKind) {
+    const key = `${angleId}:${kind}`;
+    if (generatingKeys.has(key)) return;
+    setGeneratingKeys((prev) => new Set(prev).add(key));
+    setArtifactErrors((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    try {
+      await generateAngleArtifact(productId, angleId, kind);
+      await refresh();
+    } catch (err) {
+      setArtifactErrors((prev) => ({
+        ...prev,
+        [key]: err instanceof Error ? err.message : String(err),
+      }));
+    } finally {
+      setGeneratingKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  }
+
   async function refresh() {
     try {
       const { product } = await getProduct(productId);
@@ -194,12 +383,24 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
 
   const mechanismStatus = product?.research?.mechanismStatus;
   const referenceSheetStatus = product?.research?.referenceSheetStatus;
+  // Keep polling while any angle's sub-artifact is mid-generation so the
+  // spinner flips to content without a manual refresh.
+  const anyAngleArtifactRunning = useMemo(
+    () =>
+      (product?.research?.angles ?? []).some(
+        (a) => a.artifacts && Object.values(a.artifacts).some((art) => art?.status === "running"),
+      ),
+    [product],
+  );
 
   useEffect(() => {
     if (!product) return;
     const researchBusy =
       product.researchStatus === "pending" || product.researchStatus === "researching";
-    const subJobsBusy = mechanismStatus === "running" || referenceSheetStatus === "running";
+    const subJobsBusy =
+      mechanismStatus === "running" ||
+      referenceSheetStatus === "running" ||
+      anyAngleArtifactRunning;
 
     if (researchBusy) {
       if (progressStartRef.current == null) progressStartRef.current = Date.now();
@@ -220,7 +421,7 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
       clearInterval(poll);
       clearInterval(tick);
     };
-  }, [product?.researchStatus, mechanismStatus, referenceSheetStatus, productId]);
+  }, [product?.researchStatus, mechanismStatus, referenceSheetStatus, anyAngleArtifactRunning, productId]);
 
   // Build the gallery: start with whatever the URL-scraper / fact-sheet
   // pipeline put in research.imageCandidates, then make sure the three
@@ -1011,13 +1212,35 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
                     <div className="space-y-2">
                       {research.angles.map((angle, i) => (
                         <CollapsibleSection
-                          key={`${i}-${angle.name}`}
+                          key={angle.id ?? `${i}-${angle.name}`}
                           title={`Angle ${i + 1} · ${angle.name}`}
                           icon={Target}
                         >
-                          <article className="prose-report max-w-none">
-                            <Streamdown>{angle.block}</Streamdown>
-                          </article>
+                          <div className="space-y-2">
+                            {/* Description — the elaborated angle block */}
+                            <CollapsibleSection
+                              title="Description"
+                              icon={FileText}
+                              subtitle="The fully elaborated strategic angle — audience, pains, root cause, mechanism, framing."
+                              defaultOpen
+                            >
+                              <article className="prose-report max-w-none">
+                                <Streamdown>{stripCustomerStatements(angle.block)}</Streamdown>
+                              </article>
+                            </CollapsibleSection>
+
+                            {/* Lazily-generated, cached per-angle artifacts */}
+                            {(["statements", "messages", "adCopy"] as AngleArtifactKind[]).map((kind) => (
+                              <AngleArtifactSection
+                                key={kind}
+                                angle={angle}
+                                kind={kind}
+                                busy={angle.id ? generatingKeys.has(`${angle.id}:${kind}`) : false}
+                                localError={angle.id ? artifactErrors[`${angle.id}:${kind}`] : null}
+                                onGenerate={handleGenerateArtifact}
+                              />
+                            ))}
+                          </div>
                         </CollapsibleSection>
                       ))}
                     </div>
