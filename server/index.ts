@@ -22,6 +22,7 @@ import { teamRouter } from "./routes/team.js";
 import { isNull } from "drizzle-orm";
 import { messageTestingRouter } from "./routes/messageTesting.js";
 import { productsRouter, sweepOrphanedMechanismExtractions } from "./routes/products.js";
+import { shareRouter } from "./routes/share.js";
 import { staticAdsRouter } from "./routes/staticAds.js";
 import { staticAdsIterationsRouter } from "./routes/staticAdsIterations.js";
 import { backfillMissingThumbnails, runDeconstruction, runNicheClassification, staticAdReferencesRouter } from "./routes/staticAdReferences.js";
@@ -116,6 +117,10 @@ async function startServer() {
   app.use("/api/generate", generateRouter);
   app.use("/api/brands", brandsRouter);
   app.use("/api/products", productsRouter);
+  // PUBLIC, un-authenticated: read-only client share links. Mounted as its own
+  // router (not under /api/products) so it never inherits productsRouter's
+  // cookie-session auth/brand gating — access is by share token only.
+  app.use("/api/share", shareRouter);
   app.use("/api/message-testing", messageTestingRouter);
   app.use("/api/brand-assets", brandAssetsRouter);
   app.use("/api/characters", charactersRouter);

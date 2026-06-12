@@ -37,7 +37,7 @@ function sendError(res: Response, status: number, message: string) {
 }
 
 function isRole(value: unknown): value is Role {
-  return value === "admin" || value === "member";
+  return value === "admin" || value === "manager" || value === "member";
 }
 
 function shapeMember(row: {
@@ -199,7 +199,7 @@ teamRouter.delete("/invites/:id", requireAdmin, async (req: Request, res: Respon
 teamRouter.patch("/members/:userId", requireAdmin, async (req: Request, res: Response) => {
   try {
     const body = (req.body ?? {}) as { role?: string };
-    if (!isRole(body.role)) return sendError(res, 400, "role must be 'admin' or 'member'");
+    if (!isRole(body.role)) return sendError(res, 400, "role must be 'admin', 'manager', or 'member'");
     const { team } = req.auth!;
 
     const [target] = await db

@@ -9,10 +9,11 @@ import { Link, useLocation } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Package, Palette, LayoutGrid, ChevronLeft, ChevronRight,
-  Settings, HelpCircle, FolderOpen, Zap, LogOut, Crown, Shield,
+  Settings, HelpCircle, FolderOpen, Zap, LogOut, Crown, Shield, Headset,
 } from "lucide-react";
 import BrandSwitcher from "./BrandSwitcher";
 import { useAuth } from "@/contexts/AuthContext";
+import { useBrand } from "@/contexts/BrandContext";
 
 interface WorkspaceLayoutProps {
   children: React.ReactNode;
@@ -26,10 +27,28 @@ const NAV_ITEMS = [
   { id: "workflows", label: "Workflows", icon: Zap, path: "/workspace/workflows", description: "Automated pipelines" },
 ];
 
+// Client Console is gated: only managers/admins, and only when the
+// active brand is flagged as a Done-For-You client. Inserted right after
+// Products so it sits with the other client-facing surfaces.
+const CLIENT_CONSOLE_ITEM = {
+  id: "console",
+  label: "Client Console",
+  icon: Headset,
+  path: "/workspace/console",
+  description: "Client share + feedback",
+};
+
 export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
   const [location] = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const { user, role, logout } = useAuth();
+  const { activeBrand } = useBrand();
+
+  const showClientConsole =
+    (role === "admin" || role === "manager") && Boolean(activeBrand?.isDfyClient);
+  const navItems = showClientConsole
+    ? [NAV_ITEMS[0], CLIENT_CONSOLE_ITEM, ...NAV_ITEMS.slice(1)]
+    : NAV_ITEMS;
 
   const isActive = (path: string) => location.startsWith(path);
   const settingsActive = location.startsWith("/workspace/settings");
@@ -60,7 +79,7 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
               Navigation
             </div>
           )}
-          {NAV_ITEMS.map((item) => {
+          {navItems.map((item) => {
             const Icon = item.icon;
             const active = isActive(item.path);
             return (

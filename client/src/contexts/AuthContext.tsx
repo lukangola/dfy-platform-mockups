@@ -13,7 +13,7 @@
  */
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
 
-export type AuthRole = "admin" | "member";
+export type AuthRole = "admin" | "manager" | "member";
 
 export type AuthUser = {
   id: string;

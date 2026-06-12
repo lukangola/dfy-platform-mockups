@@ -1,0 +1,1 @@
+ALTER TABLE "share_feedback" ADD COLUMN "suggestion_original" text;

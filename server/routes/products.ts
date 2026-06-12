@@ -1,9 +1,16 @@
-import { randomUUID } from "node:crypto";
-import { desc, eq, sql as sqlTag } from "drizzle-orm";
+import { randomBytes, randomUUID } from "node:crypto";
+import { and, desc, eq, sql as sqlTag } from "drizzle-orm";
 import { type NextFunction, type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
+import {
+  type AngleArtifact,
+  type AngleArtifactKind,
+  type StoredAngle,
+  writeAngleArtifact,
+} from "../lib/angle-artifacts.js";
+import { productDescriptor, stripLeadingAngleName } from "../lib/artifact-revision.js";
 import { harvestRedditStatements, formatCandidates, isApifyConfigured } from "../lib/apify.js";
-import { requireAuth } from "../lib/auth.js";
+import { requireAuth, requireManager } from "../lib/auth.js";
 import { canSeeBrand, canSeeProduct } from "../lib/brandAccess.js";
 import { db, schema } from "../lib/db.js";
 import { extractJsonObject } from "../lib/jsonExtract.js";
@@ -53,22 +60,11 @@ function sendError(res: Response, status: number, message: string) {
 // Generation is per-angle (one Claude call per angle per kind) so each angle's
 // artifact has isolated status/error and can be regenerated independently —
 // the granularity the upcoming client-feedback loop needs.
-type AngleArtifactKind = "statements" | "messages" | "adCopy";
+// Types (AngleArtifactKind, AngleArtifact, StoredAngle) and the
+// read-modify-write helper writeAngleArtifact live in ../lib/angle-artifacts.js
+// so the PUBLIC share route can apply client-accepted revisions to the same
+// per-angle artifact slots without importing this route module.
 const ANGLE_ARTIFACT_KINDS: AngleArtifactKind[] = ["statements", "messages", "adCopy"];
-
-type AngleArtifact = {
-  content?: string | null;
-  status?: "running" | "complete" | "failed";
-  error?: string | null;
-  generatedAt?: string;
-};
-
-type StoredAngle = {
-  id?: string;
-  name: string;
-  block: string;
-  artifacts?: Partial<Record<AngleArtifactKind, AngleArtifact>>;
-};
 
 /**
  * Ensure every angle has a stable `id`. Older products were researched before
@@ -667,6 +663,235 @@ productsRouter.post("/:id/angles/:angleId/artifact", async (req: Request, res: R
     sendError(res, 500, err instanceof Error ? err.message : String(err));
   }
 });
+
+/**
+ * PUT /api/products/:id/angles/:angleId/artifact
+ * Body: { kind: "messages" | "adCopy", content: string }
+ *
+ * Operator MANUAL edit. Overwrites the live cached copy of one angle's message
+ * or ad-copy artifact with text the operator typed by hand, marking it
+ * "complete". Only `messages`/`adCopy` are hand-editable — `statements` is a
+ * web-mined research artifact that must be regenerated, not freehand-edited.
+ */
+productsRouter.put("/:id/angles/:angleId/artifact", async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { kind?: string; content?: string };
+    const kind = body.kind ?? "";
+    if (kind !== "messages" && kind !== "adCopy") {
+      return sendError(res, 400, "Only 'messages' and 'adCopy' artifacts can be edited manually");
+    }
+    const content = typeof body.content === "string" ? body.content : "";
+    if (!content.trim()) return sendError(res, 400, "content is required");
+
+    const [row] = await db
+      .select()
+      .from(schema.products)
+      .where(eq(schema.products.id, req.params.id))
+      .limit(1);
+    if (!row) return sendError(res, 404, "Product not found");
+
+    const research = (row.research ?? {}) as Record<string, unknown>;
+    const angles = Array.isArray((research as { angles?: unknown }).angles)
+      ? ((research as { angles: StoredAngle[] }).angles)
+      : [];
+    const idx = angles.findIndex((a) => a.id === req.params.angleId);
+    if (idx === -1) return sendError(res, 404, "Angle not found");
+
+    await writeAngleArtifact(req.params.id, req.params.angleId, kind, {
+      content,
+      status: "complete",
+      error: null,
+      generatedAt: new Date().toISOString(),
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[products] manual artifact edit failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
+ * DELETE /api/products/:id/angles/:angleId — permanently remove ONE strategic
+ * angle (and all its cached artifacts) from research.angles. Returns the
+ * remaining angles so the client can re-render without a refetch. The operator
+ * UI gates this behind a type-DELETE confirmation; there is no soft-delete.
+ */
+productsRouter.delete("/:id/angles/:angleId", async (req: Request, res: Response) => {
+  try {
+    const [row] = await db
+      .select()
+      .from(schema.products)
+      .where(eq(schema.products.id, req.params.id))
+      .limit(1);
+    if (!row) return sendError(res, 404, "Product not found");
+
+    const research = (row.research ?? {}) as Record<string, unknown>;
+    const angles = Array.isArray((research as { angles?: unknown }).angles)
+      ? ((research as { angles: StoredAngle[] }).angles)
+      : [];
+    const idx = angles.findIndex((a) => a.id === req.params.angleId);
+    if (idx === -1) return sendError(res, 404, "Angle not found");
+
+    const nextAngles = angles.filter((_, i) => i !== idx);
+
+    await db
+      .update(schema.products)
+      .set({ research: { ...research, angles: nextAngles } })
+      .where(eq(schema.products.id, row.id));
+
+    res.json({ angles: nextAngles });
+  } catch (err) {
+    console.error("[products] delete angle failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
+ * POST /api/products/:id/share — mint (or rotate) the read-only client share
+ * token. Generates a fresh 48-hex-char token (192 bits), persists it on
+ * products.share_token, and returns it. Calling again rotates the token, which
+ * instantly invalidates any previously-shared URL. Authed + brand-gated via the
+ * `/:id` middleware above; the PUBLIC consumer is GET /api/share/:token.
+ *
+ * Gated with `requireManager` on top of the brand-access check: minting a
+ * client share link is a Client Console action, so plain members are
+ * rejected with 403 even when they can otherwise see the product.
+ */
+productsRouter.post("/:id/share", requireManager, async (req: Request, res: Response) => {
+  try {
+    const [row] = await db
+      .select()
+      .from(schema.products)
+      .where(eq(schema.products.id, req.params.id))
+      .limit(1);
+    if (!row) return sendError(res, 404, "Product not found");
+
+    const shareToken = randomBytes(24).toString("hex");
+    await db
+      .update(schema.products)
+      .set({ shareToken })
+      .where(eq(schema.products.id, row.id));
+
+    res.json({ shareToken });
+  } catch (err) {
+    console.error("[products] mint share token failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
+ * DELETE /api/products/:id/share — revoke the share link by nulling the token.
+ * The public URL 404s immediately afterward. Idempotent: revoking an already
+ * unshared product is a no-op success. Manager-or-admin only (see POST above).
+ */
+productsRouter.delete("/:id/share", requireManager, async (req: Request, res: Response) => {
+  try {
+    const [row] = await db
+      .select()
+      .from(schema.products)
+      .where(eq(schema.products.id, req.params.id))
+      .limit(1);
+    if (!row) return sendError(res, 404, "Product not found");
+
+    await db
+      .update(schema.products)
+      .set({ shareToken: null })
+      .where(eq(schema.products.id, row.id));
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[products] revoke share token failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
+ * Shared row → API shape for operator feedback. Includes the Phase 4 AI
+ * suggestion fields so the inbox + inline cards can render the proposal state.
+ */
+function toOperatorFeedbackView(r: typeof schema.shareFeedback.$inferSelect) {
+  return {
+    id: r.id,
+    anchorId: r.anchorId,
+    angleId: r.angleId,
+    angleName: r.angleName ?? null,
+    sectionKind: r.sectionKind,
+    verdict: r.verdict,
+    note: r.note ?? null,
+    clientName: r.clientName ?? null,
+    status: r.status,
+    suggestion: r.suggestion ?? null,
+    suggestionStatus: r.suggestionStatus ?? null,
+    suggestionError: r.suggestionError ?? null,
+    suggestionOriginal: r.suggestionOriginal ?? null,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+  };
+}
+
+/**
+ * GET /api/products/:id/feedback — the operator's view of all client feedback
+ * collected through this product's share link(s). Powers both surfaces on the
+ * product page: the triage inbox (grouped by angle) and the inline annotations
+ * (looked up by `anchorId`). Authed + brand-gated via the `/:id` middleware.
+ * Newest first so fresh, still-`open` feedback surfaces at the top of the inbox.
+ */
+productsRouter.get("/:id/feedback", async (req: Request, res: Response) => {
+  try {
+    const rows = await db
+      .select()
+      .from(schema.shareFeedback)
+      .where(eq(schema.shareFeedback.productId, req.params.id))
+      .orderBy(desc(schema.shareFeedback.createdAt));
+
+    res.json({ feedback: rows.map(toOperatorFeedbackView) });
+  } catch (err) {
+    console.error("[products] list feedback failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
+ * PATCH /api/products/:id/feedback/:feedbackId — triage a single feedback item.
+ * Today the only mutable field is `status` (open | resolved). Scoped to this
+ * product so a feedback id from another product can't be flipped. Returns the
+ * updated row.
+ */
+productsRouter.patch("/:id/feedback/:feedbackId", async (req: Request, res: Response) => {
+  try {
+    const status = (req.body ?? {}).status;
+    if (status !== "open" && status !== "resolved") {
+      return sendError(res, 400, "status must be 'open' or 'resolved'");
+    }
+
+    const [row] = await db
+      .update(schema.shareFeedback)
+      .set({ status, updatedAt: sqlTag`now()` })
+      .where(
+        and(
+          eq(schema.shareFeedback.id, req.params.feedbackId),
+          eq(schema.shareFeedback.productId, req.params.id),
+        ),
+      )
+      .returning();
+
+    if (!row) return sendError(res, 404, "Feedback not found");
+
+    res.json({ feedback: toOperatorFeedbackView(row) });
+  } catch (err) {
+    console.error("[products] update feedback status failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+// NOTE: There are intentionally no operator suggestion accept/reject routes.
+// In the client-driven flow the client both generates AND applies the AI
+// revision (see the PUBLIC share route's suggestion/accept handler, which calls
+// writeAngleArtifact directly). The operator only ever *observes* what happened
+// — the applied before→after diff is surfaced read-only via toOperatorFeedbackView
+// (suggestionOriginal → suggestion) and acknowledged with the existing status
+// PATCH ("mark as read" = open → resolved). No operator write path is needed.
 
 /**
  * GET /api/products/:id/mechanism
@@ -1281,53 +1506,6 @@ async function autoGenerateAngleArtifacts(
 }
 
 /**
- * Short product descriptor handed to the copy/ad-copy prompts as the
- * `{{product}}` variable — enough to ground the product's identity without
- * the full research markdown.
- */
-function productDescriptor(row: typeof schema.products.$inferSelect): string {
-  const parts = [row.name || "(unknown product)"];
-  if (row.category) parts.push(`Category: ${row.category}`);
-  if (row.productUrl) parts.push(`URL: ${row.productUrl}`);
-  return parts.join("\n");
-}
-
-/**
- * Read-modify-write a single angle's artifact slot. Re-reads fresh research
- * right before writing so a concurrent generation of a *different* artifact
- * on the same product doesn't get clobbered. Merges into whatever is already
- * stored for this kind (so a "running" → "complete" transition keeps fields).
- */
-async function writeAngleArtifact(
-  productId: string,
-  angleId: string,
-  kind: AngleArtifactKind,
-  artifact: AngleArtifact,
-): Promise<void> {
-  const [row] = await db
-    .select()
-    .from(schema.products)
-    .where(eq(schema.products.id, productId))
-    .limit(1);
-  if (!row) return;
-  const research = (row.research ?? {}) as Record<string, unknown>;
-  const angles = (Array.isArray((research as { angles?: unknown }).angles)
-    ? (research as { angles: StoredAngle[] }).angles
-    : []) as StoredAngle[];
-  const idx = angles.findIndex((a) => a.id === angleId);
-  if (idx === -1) return;
-  const prev = angles[idx];
-  const prevArtifacts = prev.artifacts ?? {};
-  const merged: AngleArtifact = { ...(prevArtifacts[kind] ?? {}), ...artifact };
-  const next = [...angles];
-  next[idx] = { ...prev, artifacts: { ...prevArtifacts, [kind]: merged } };
-  await db
-    .update(schema.products)
-    .set({ research: { ...research, angles: next } })
-    .where(eq(schema.products.id, productId));
-}
-
-/**
  * Async runner — generates ONE sub-artifact for ONE angle and caches it.
  *
  * Each kind maps to a dedicated master prompt, run with the single angle as
@@ -1354,42 +1532,6 @@ function bulletsOnly(text: string): string {
     .filter((l) => /^\s*[-*•]\s+/.test(l))
     .join("\n")
     .trim();
-}
-
-// The primary_ad_copy prompt always emits the Angle Name as the ad's first line
-// (it's a separator in the multi-ad report flow). For a single-angle ad that's
-// redundant — the angle title is already shown above the copy — so drop the
-// leading line when it restates the angle name. We match by TOKEN OVERLAP rather
-// than exact/prefix compare, because the model freely rewords the title (e.g.
-// inserts "The", reorders words): if ≥50% of the angle name's significant words
-// appear in the first line, it's a restatement → strip it. A real hook (which
-// shares few of the angle's distinctive nouns) stays intact.
-function stripLeadingAngleName(text: string, angleName: string): string {
-  const lines = text.split("\n");
-  let i = 0;
-  while (i < lines.length && !lines[i].trim()) i++;
-  if (i >= lines.length) return text.trim();
-
-  const tokenize = (s: string) =>
-    s
-      .toLowerCase()
-      .replace(/&/g, " and ")
-      .replace(/[^a-z0-9]+/g, " ")
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean);
-  const stop = new Set(["the", "a", "an", "and", "of", "to", "for", "your", "you", "but", "with"]);
-  const firstToks = new Set(tokenize(lines[i]));
-  const nameToks = tokenize(angleName).filter((t) => t.length >= 3 && !stop.has(t));
-  if (nameToks.length === 0) return text.trim();
-  const overlap = nameToks.filter((t) => firstToks.has(t)).length / nameToks.length;
-
-  if (overlap >= 0.5) {
-    lines.splice(0, i + 1);
-    while (lines.length && !lines[0].trim()) lines.shift();
-    return lines.join("\n").trim();
-  }
-  return text.trim();
 }
 
 // Token/cost accounting carried out of a mining strategy, so the caller can log

@@ -11,18 +11,24 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Streamdown } from "streamdown";
 import {
   ArrowLeft, ExternalLink, CheckCircle2, Loader2, Clock,
-  Video, ChevronRight, ChevronDown, Package, AlertTriangle, RefreshCw,
+  Video, ChevronRight, Package, AlertTriangle, RefreshCw,
   Upload, Link2, Check, ImageIcon, LayoutGrid, FileText, Target, Trash2,
   Plus, X, MessageSquare, Pencil, Save, Quote, Megaphone,
+  ThumbsUp, AlertCircle,
 } from "lucide-react";
 import {
   getProduct, retriggerResearch, uploadProductImage,
   setProductMainImage, addProductImageCandidate, deleteProductImageCandidate,
-  generateReferenceSheet, deleteProduct, addProductAngle,
+  generateReferenceSheet, deleteProduct, addProductAngle, deleteProductAngle,
   updateProductMechanism, patchProduct, generateAngleArtifact,
+  updateAngleArtifactContent,
+  getProductFeedback, updateFeedbackStatus,
   type Product, type ProductImageCandidate, type ProductMechanism,
   type ProductAngle, type AngleArtifactKind,
+  type OperatorFeedback,
 } from "@/lib/api";
+import { CollapsibleSection } from "@/components/CollapsibleSection";
+import { InlineFeedback } from "@/components/clientFeedback";
 
 type Status = Product["researchStatus"];
 
@@ -80,77 +86,6 @@ function splitResearchMarkdown(md: string): { phase1: string; phase2: string | n
     }
   }
   return { phase1: md, phase2: null };
-}
-
-function CollapsibleSection({
-  title,
-  icon: Icon,
-  subtitle,
-  defaultOpen = false,
-  forceOpen,
-  badge,
-  headerRight,
-  children,
-}: {
-  title: string;
-  icon: React.ElementType;
-  subtitle?: string;
-  defaultOpen?: boolean;
-  /**
-   * When set to true, keeps the section open regardless of the user's toggle.
-   * Useful for pinning the section open while an inline form inside it is
-   * active.
-   */
-  forceOpen?: boolean;
-  badge?: React.ReactNode;
-  headerRight?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  const [userOpen, setUserOpen] = useState(defaultOpen);
-  const open = forceOpen ?? userOpen;
-  const setOpen = (v: boolean | ((prev: boolean) => boolean)) => {
-    if (forceOpen) return; // ignore toggle while pinned open
-    setUserOpen(v);
-  };
-  return (
-    <section
-      className="rounded-xl border border-white/[0.06] overflow-hidden"
-      style={{ background: "#13161F" }}
-    >
-      <div className="flex items-center gap-3 p-5">
-        <button
-          onClick={() => setOpen((v) => !v)}
-          className="flex items-center gap-3 flex-1 min-w-0 text-left group"
-        >
-          <ChevronDown
-            size={14}
-            className={`text-white/40 group-hover:text-white/70 shrink-0 transition-transform ${
-              open ? "rotate-0" : "-rotate-90"
-            }`}
-          />
-          <div className="flex-1 min-w-0">
-            <h2 className="text-sm font-semibold text-white/80 flex items-center gap-2">
-              <Icon size={14} className="text-cyan-400 shrink-0" />
-              <span className="truncate">{title}</span>
-              {badge}
-            </h2>
-            {subtitle && !open && (
-              <p className="text-[10px] font-mono text-white/40 mt-1 truncate">{subtitle}</p>
-            )}
-          </div>
-        </button>
-        {headerRight && <div className="shrink-0">{headerRight}</div>}
-      </div>
-      {open && (
-        <div className="px-5 pb-5 border-t border-white/[0.04]">
-          {subtitle && (
-            <p className="text-[10px] font-mono text-white/40 mt-3 mb-3">{subtitle}</p>
-          )}
-          {children}
-        </div>
-      )}
-    </section>
-  );
 }
 
 // The research master prompt often bakes a "Real-World Customer Statements
@@ -231,12 +166,22 @@ function AngleArtifactSection({
   busy,
   localError,
   onGenerate,
+  onSaveEdit,
+  feedback,
+  resolving,
+  onResolveFeedback,
 }: {
   angle: ProductAngle;
   kind: AngleArtifactKind;
   busy: boolean;
   localError?: string | null;
   onGenerate: (angleId: string, kind: AngleArtifactKind) => void;
+  // Operator manual edit (messages / adCopy only). Persists hand-typed copy to
+  // the live artifact; resolves once the server confirms.
+  onSaveEdit?: (angleId: string, kind: "messages" | "adCopy", content: string) => Promise<void>;
+  feedback?: OperatorFeedback;
+  resolving?: boolean;
+  onResolveFeedback?: (fb: OperatorFeedback) => void;
 }) {
   const meta = ARTIFACT_META[kind];
   const art = angle.artifacts?.[kind];
@@ -245,6 +190,40 @@ function AngleArtifactSection({
   const content = art?.content?.trim() || "";
   const error = localError ?? (status === "failed" ? art?.error : null);
   const canGenerate = Boolean(angle.id) && !running;
+  // Manual edit is offered only for the two hand-editable text artifacts.
+  const editable = (kind === "messages" || kind === "adCopy") && Boolean(onSaveEdit && angle.id);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const startEdit = () => {
+    setDraft(content);
+    setEditError(null);
+    setEditing(true);
+  };
+  const cancelEdit = () => {
+    setEditing(false);
+    setEditError(null);
+  };
+  const saveEdit = async () => {
+    if (!angle.id || !onSaveEdit) return;
+    const trimmed = draft.trim();
+    if (!trimmed) {
+      setEditError("Content can't be empty.");
+      return;
+    }
+    setSavingEdit(true);
+    setEditError(null);
+    try {
+      await onSaveEdit(angle.id, kind as "messages" | "adCopy", trimmed);
+      setEditing(false);
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingEdit(false);
+    }
+  };
 
   const GenerateButton = ({ label }: { label: string }) => (
     <button
@@ -258,17 +237,40 @@ function AngleArtifactSection({
     </button>
   );
 
+  const feedbackOpen = feedback ? feedback.status === "open" : false;
   return (
     <CollapsibleSection
       title={meta.label}
       icon={meta.icon}
       subtitle={meta.subtitle}
       badge={
-        content && status === "complete" ? (
-          <CheckCircle2 size={11} className="text-emerald-400" />
+        (content && status === "complete") || feedbackOpen ? (
+          <span className="inline-flex items-center gap-1.5">
+            {content && status === "complete" && (
+              <CheckCircle2 size={11} className="text-emerald-400" />
+            )}
+            {feedbackOpen &&
+              (feedback!.verdict === "approved" ? (
+                <ThumbsUp size={11} className="text-emerald-400" />
+              ) : (
+                <AlertCircle size={11} className="text-amber-400" />
+              ))}
+          </span>
         ) : null
       }
     >
+      {/* Only surface feedback that still needs action. Once the operator marks
+          it read/resolved it disappears from the section — the resolved copy
+          lives on under "Show resolved" in the Client Feedback inbox. */}
+      {feedback && feedbackOpen && onResolveFeedback && (
+        <div className="mb-3">
+          <InlineFeedback
+            fb={feedback}
+            resolving={Boolean(resolving)}
+            onResolve={onResolveFeedback}
+          />
+        </div>
+      )}
       {running ? (
         <div className="flex items-center gap-2 text-[11px] font-mono text-amber-300/80 py-2">
           <Loader2 size={12} className="animate-spin" />
@@ -281,6 +283,40 @@ function AngleArtifactSection({
           </div>
           <GenerateButton label="Retry" />
         </div>
+      ) : editing ? (
+        <div className="space-y-3">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={Math.min(20, Math.max(6, draft.split("\n").length + 1))}
+            className="w-full rounded-lg border border-cyan-500/30 bg-black/30 px-3 py-2.5 text-sm text-white/85 leading-relaxed font-sans resize-y focus:outline-none focus:border-cyan-400/60"
+            placeholder="Edit the copy…"
+            autoFocus
+          />
+          {editError && (
+            <div className="text-[10px] font-mono text-rose-300 border border-rose-500/30 bg-rose-500/10 rounded-lg px-3 py-2 whitespace-pre-wrap">
+              {editError}
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={saveEdit}
+              disabled={savingEdit}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-mono uppercase tracking-wider font-semibold transition-all disabled:opacity-40"
+              style={{ background: "linear-gradient(135deg, #10b981 0%, #059669 100%)", color: "#0D0F12" }}
+            >
+              {savingEdit ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
+              Save
+            </button>
+            <button
+              onClick={cancelEdit}
+              disabled={savingEdit}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-mono uppercase tracking-wider text-white/55 border border-white/[0.12] hover:text-white/80 hover:border-white/[0.25] transition-all disabled:opacity-40"
+            >
+              <X size={11} /> Cancel
+            </button>
+          </div>
+        </div>
       ) : content ? (
         <div className="space-y-3">
           {meta.render === "markdown" ? (
@@ -290,14 +326,25 @@ function AngleArtifactSection({
           ) : (
             <div className="whitespace-pre-wrap text-sm text-white/80 leading-relaxed">{content}</div>
           )}
-          <button
-            onClick={() => angle.id && onGenerate(angle.id, kind)}
-            disabled={!canGenerate}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-mono text-white/60 border border-white/[0.08] hover:text-cyan-400 hover:border-cyan-500/40 transition-all disabled:opacity-40"
-          >
-            <RefreshCw size={11} />
-            Regenerate
-          </button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => angle.id && onGenerate(angle.id, kind)}
+              disabled={!canGenerate}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-mono text-white/60 border border-white/[0.08] hover:text-cyan-400 hover:border-cyan-500/40 transition-all disabled:opacity-40"
+            >
+              <RefreshCw size={11} />
+              Regenerate
+            </button>
+            {editable && (
+              <button
+                onClick={startEdit}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-mono text-white/60 border border-white/[0.08] hover:text-cyan-400 hover:border-cyan-500/40 transition-all"
+              >
+                <Pencil size={11} />
+                Edit
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <div className="space-y-3">
@@ -367,6 +414,93 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
     }
   }
 
+  // Client share link minting/revoking now lives in the Client Console
+  // (see components/clientFeedback.tsx → ClientShareCard). The product page no
+  // longer owns that control, but it still reads `product.shareToken` to know
+  // whether a share exists and fetches feedback for the inline markers below.
+
+  // Phase 3 — client feedback collected on the public share page. One row per
+  // (token, section). Operator can mark each open ↔ resolved. Fetched on mount
+  // and via the inbox Refresh button (client feedback arrives out-of-band).
+  const [feedback, setFeedback] = useState<OperatorFeedback[]>([]);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
+  const [resolvingId, setResolvingId] = useState<string | null>(null);
+
+  // Angle delete: a type-DELETE confirmation modal, scoped to one angle.
+  const [deleteAngleTarget, setDeleteAngleTarget] = useState<ProductAngle | null>(null);
+  const [deleteAngleConfirm, setDeleteAngleConfirm] = useState("");
+  const [deleteAngleBusy, setDeleteAngleBusy] = useState(false);
+  const [deleteAngleError, setDeleteAngleError] = useState<string | null>(null);
+
+  async function refreshFeedback() {
+    if (feedbackBusy) return;
+    setFeedbackBusy(true);
+    try {
+      const { feedback } = await getProductFeedback(productId);
+      setFeedback(feedback);
+      setFeedbackError(null);
+    } catch (err) {
+      setFeedbackError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFeedbackBusy(false);
+    }
+  }
+
+  async function handleResolveFeedback(fb: OperatorFeedback) {
+    if (resolvingId) return;
+    setResolvingId(fb.id);
+    setFeedbackError(null);
+    const nextStatus = fb.status === "resolved" ? "open" : "resolved";
+    try {
+      const { feedback: updated } = await updateFeedbackStatus(productId, fb.id, nextStatus);
+      setFeedback((prev) => prev.map((f) => (f.id === updated.id ? updated : f)));
+    } catch (err) {
+      setFeedbackError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setResolvingId(null);
+    }
+  }
+
+  // Operator manual edit: persist hand-typed copy to one angle's message/adCopy
+  // artifact, then refresh so the inline view shows the saved text.
+  async function handleSaveArtifactEdit(
+    angleId: string,
+    kind: "messages" | "adCopy",
+    content: string,
+  ) {
+    await updateAngleArtifactContent(productId, angleId, kind, content);
+    await refresh();
+  }
+
+  // Permanently delete one angle. Only fires once the operator has typed DELETE
+  // into the confirmation modal. Updates local state from the returned angles so
+  // the list re-renders without a refetch, then closes the modal.
+  async function handleDeleteAngle() {
+    const target = deleteAngleTarget;
+    if (!target?.id || deleteAngleConfirm.trim() !== "DELETE") return;
+    setDeleteAngleBusy(true);
+    setDeleteAngleError(null);
+    try {
+      await deleteProductAngle(productId, target.id);
+      await refresh();
+      setDeleteAngleTarget(null);
+      setDeleteAngleConfirm("");
+    } catch (err) {
+      setDeleteAngleError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeleteAngleBusy(false);
+    }
+  }
+
+  // Fast anchor → feedback lookup for inline indicators. Anchor scheme mirrors
+  // the share page: `angle-<id>`, `angle-<id>-messages`, `angle-<id>-adCopy`.
+  const feedbackByAnchor = useMemo(() => {
+    const map: Record<string, OperatorFeedback> = {};
+    for (const f of feedback) map[f.anchorId] = f;
+    return map;
+  }, [feedback]);
+
   async function refresh() {
     try {
       const { product } = await getProduct(productId);
@@ -379,6 +513,8 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
 
   useEffect(() => {
     refresh();
+    refreshFeedback();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [productId]);
 
   const mechanismStatus = product?.research?.mechanismStatus;
@@ -878,6 +1014,11 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
 
       {/* Content */}
       <div className="p-6 space-y-6">
+        {/* The Client Share Link control + feedback triage inbox now live in the
+            Client Console (admin/manager only). The product page keeps
+            ONLY the inline per-section feedback markers below, which still rely on
+            the feedback fetched on mount. */}
+
         {/* Product Images gallery */}
         <CollapsibleSection
           title="Product Images"
@@ -1210,13 +1351,60 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
 
                   {research.angles && research.angles.length > 0 ? (
                     <div className="space-y-2">
-                      {research.angles.map((angle, i) => (
+                      {research.angles.map((angle, i) => {
+                        const angleFb = angle.id ? feedbackByAnchor[`angle-${angle.id}`] : undefined;
+                        // Approvals ("looks good") are positive confirmations,
+                        // not pending work — they stay open but must not show up
+                        // as an amber "needs action" feedback count on the angle.
+                        const openForAngle = angle.id
+                          ? feedback.filter(
+                              (f) =>
+                                f.angleId === angle.id &&
+                                f.status === "open" &&
+                                f.verdict !== "approved",
+                            ).length
+                          : 0;
+                        return (
                         <CollapsibleSection
                           key={angle.id ?? `${i}-${angle.name}`}
                           title={`Angle ${i + 1} · ${angle.name}`}
                           icon={Target}
+                          badge={
+                            openForAngle > 0 ? (
+                              <span className="text-[9px] font-mono uppercase tracking-wider px-2 py-0.5 rounded-full border border-amber-500/40 text-amber-300 bg-amber-500/10">
+                                {openForAngle} feedback
+                              </span>
+                            ) : null
+                          }
+                          headerRight={
+                            angle.id ? (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setDeleteAngleTarget(angle);
+                                  setDeleteAngleConfirm("");
+                                  setDeleteAngleError(null);
+                                }}
+                                title="Delete this angle"
+                                className="flex items-center justify-center w-8 h-8 rounded-lg text-white/40 border border-white/[0.08] hover:text-rose-300 hover:border-rose-500/40 transition-all"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            ) : undefined
+                          }
                         >
                           <div className="space-y-2">
+                            {/* Angle-level client feedback (the strategy section) —
+                                only while it still needs action. Resolved items
+                                drop out and live under "Show resolved" in the inbox. */}
+                            {angleFb && angleFb.status === "open" && (
+                              <InlineFeedback
+                                fb={angleFb}
+                                resolving={resolvingId === angleFb.id}
+                                onResolve={handleResolveFeedback}
+                              />
+                            )}
+
                             {/* Description — the elaborated angle block */}
                             <CollapsibleSection
                               title="Description"
@@ -1230,19 +1418,31 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
                             </CollapsibleSection>
 
                             {/* Lazily-generated, cached per-angle artifacts */}
-                            {(["statements", "messages", "adCopy"] as AngleArtifactKind[]).map((kind) => (
-                              <AngleArtifactSection
-                                key={kind}
-                                angle={angle}
-                                kind={kind}
-                                busy={angle.id ? generatingKeys.has(`${angle.id}:${kind}`) : false}
-                                localError={angle.id ? artifactErrors[`${angle.id}:${kind}`] : null}
-                                onGenerate={handleGenerateArtifact}
-                              />
-                            ))}
+                            {(["statements", "messages", "adCopy"] as AngleArtifactKind[]).map((kind) => {
+                              const anchor =
+                                kind === "statements" || !angle.id
+                                  ? null
+                                  : `angle-${angle.id}-${kind}`;
+                              const artFb = anchor ? feedbackByAnchor[anchor] : undefined;
+                              return (
+                                <AngleArtifactSection
+                                  key={kind}
+                                  angle={angle}
+                                  kind={kind}
+                                  busy={angle.id ? generatingKeys.has(`${angle.id}:${kind}`) : false}
+                                  localError={angle.id ? artifactErrors[`${angle.id}:${kind}`] : null}
+                                  onGenerate={handleGenerateArtifact}
+                                  onSaveEdit={handleSaveArtifactEdit}
+                                  feedback={artFb}
+                                  resolving={artFb ? resolvingId === artFb.id : false}
+                                  onResolveFeedback={handleResolveFeedback}
+                                />
+                              );
+                            })}
                           </div>
                         </CollapsibleSection>
-                      ))}
+                        );
+                      })}
                     </div>
                   ) : (
                     <article className="prose-report max-w-none">
@@ -1703,6 +1903,88 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
                     <><Loader2 size={12} className="animate-spin" /> Deleting…</>
                   ) : (
                     <><Trash2 size={12} /> Delete Product</>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Delete-angle confirmation — operator must type DELETE to confirm */}
+      <AnimatePresence>
+        {deleteAngleTarget && (
+          <motion.div
+            key="delete-angle-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+            onClick={() => { if (!deleteAngleBusy) setDeleteAngleTarget(null); }}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md rounded-xl border border-rose-500/25 p-6"
+              style={{ background: "#13161F" }}
+            >
+              <div className="flex items-start gap-3 mb-4">
+                <div className="w-10 h-10 rounded-full bg-rose-500/15 border border-rose-500/30 flex items-center justify-center shrink-0">
+                  <AlertTriangle size={18} className="text-rose-400" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-sm font-semibold text-white/90 mb-1">
+                    Delete this angle?
+                  </h3>
+                  <p className="text-xs text-white/60 leading-relaxed">
+                    {deleteAngleTarget.name
+                      ? <>You're about to permanently delete <span className="text-white/80 font-medium">{deleteAngleTarget.name}</span> and all of its generated artifacts (statements, messages, ad copy). This cannot be undone.</>
+                      : <>You're about to permanently delete this angle and all of its generated artifacts (statements, messages, ad copy). This cannot be undone.</>}
+                  </p>
+                </div>
+              </div>
+              <label className="block text-[11px] font-mono text-white/50 mb-1.5">
+                Type <span className="text-rose-300 font-semibold">DELETE</span> to confirm
+              </label>
+              <input
+                type="text"
+                value={deleteAngleConfirm}
+                onChange={(e) => setDeleteAngleConfirm(e.target.value)}
+                autoFocus
+                placeholder="DELETE"
+                disabled={deleteAngleBusy}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && deleteAngleConfirm.trim() === "DELETE") {
+                    void handleDeleteAngle();
+                  }
+                }}
+                className="w-full rounded-lg bg-black/30 border border-white/[0.1] px-3 py-2 text-xs font-mono text-white/90 placeholder:text-white/25 focus:outline-none focus:border-rose-500/40 transition-all mb-3"
+              />
+              {deleteAngleError && (
+                <div className="text-[11px] text-rose-300 font-mono bg-rose-500/10 border border-rose-500/20 rounded px-3 py-2 mb-3">
+                  {deleteAngleError}
+                </div>
+              )}
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setDeleteAngleTarget(null)}
+                  disabled={deleteAngleBusy}
+                  className="px-3 py-2 rounded-lg text-[11px] font-mono text-white/70 border border-white/[0.1] hover:bg-white/[0.04] transition-all disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => { void handleDeleteAngle(); }}
+                  disabled={deleteAngleBusy || deleteAngleConfirm.trim() !== "DELETE"}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-mono font-semibold text-white bg-rose-500 hover:bg-rose-600 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {deleteAngleBusy ? (
+                    <><Loader2 size={12} className="animate-spin" /> Deleting…</>
+                  ) : (
+                    <><Trash2 size={12} /> Delete Angle</>
                   )}
                 </button>
               </div>

@@ -121,6 +121,12 @@ export type Brand = {
   research: BrandResearch | null;
   researchStatus: "pending" | "researching" | "complete" | "failed";
   researchError: string | null;
+  /**
+   * Marks this brand as a Done-For-You client. Only DFY-flagged brands expose
+   * the Client Console (share links + feedback inbox) in the nav.
+   * Toggled by an admin in Settings → Clients. Defaults to false.
+   */
+  isDfyClient?: boolean;
 };
 
 async function get<T>(path: string): Promise<T> {
@@ -138,6 +144,19 @@ async function del<T>(path: string, body?: unknown): Promise<T> {
     method: "DELETE",
     headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const payload = (await res.json().catch(() => ({}))) as T | ApiError;
+  if (!res.ok) {
+    throw new ApiCallError(res.status, payload as ApiError);
+  }
+  return payload as T;
+}
+
+async function put<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
   });
   const payload = (await res.json().catch(() => ({}))) as T | ApiError;
   if (!res.ok) {
@@ -191,6 +210,25 @@ export async function patchBrand(
 
 export function retriggerBrandResearch(id: string): Promise<{ ok: true }> {
   return post<{ ok: true }>(`/api/brands/${id}/research`, {});
+}
+
+/**
+ * Toggle a brand's Done-For-You client flag. Admin-only on the server
+ * (`PATCH /api/brands/:id/dfy`). Flipping this on exposes the Client Command
+ * Center for the brand; flipping it off hides it again.
+ */
+export async function setBrandDfyClient(
+  id: string,
+  isDfyClient: boolean,
+): Promise<{ brand: Brand }> {
+  const res = await fetch(`/api/brands/${id}/dfy`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ isDfyClient }),
+  });
+  const payload = (await res.json().catch(() => ({}))) as { brand: Brand } | ApiError;
+  if (!res.ok) throw new ApiCallError(res.status, payload as ApiError);
+  return payload as { brand: Brand };
 }
 
 export function uploadProductImageRaw(
@@ -298,6 +336,9 @@ export type Product = {
   research: ProductResearchPayload | null;
   researchStatus: "pending" | "researching" | "complete" | "failed";
   researchError: string | null;
+  // Phase 2 client share link. NULL/absent = not shared. Present = the
+  // read-only public doc is live at /share/<shareToken>.
+  shareToken?: string | null;
 };
 
 export function listProducts(brandId: string): Promise<{ products: Product[] }> {
@@ -395,6 +436,230 @@ export function generateAngleArtifact(
     { kind },
   );
 }
+
+/**
+ * Operator MANUAL edit of one angle's message/adCopy copy. Overwrites the live
+ * cached artifact with hand-typed text (marked "complete"). Only "messages" and
+ * "adCopy" are hand-editable — "statements" is web-mined and must be
+ * regenerated. Re-fetch getProduct() afterwards to pick up the new content.
+ */
+export function updateAngleArtifactContent(
+  productId: string,
+  angleId: string,
+  kind: "messages" | "adCopy",
+  content: string,
+): Promise<{ ok: true }> {
+  return put<{ ok: true }>(
+    `/api/products/${productId}/angles/${encodeURIComponent(angleId)}/artifact`,
+    { kind, content },
+  );
+}
+
+/**
+ * Permanently delete one strategic angle (and all its cached artifacts) from a
+ * product's research. Returns the remaining angles so the caller can re-render
+ * without a refetch. Irreversible — the operator UI gates this behind a
+ * type-DELETE confirmation.
+ */
+export function deleteProductAngle(
+  productId: string,
+  angleId: string,
+): Promise<{ angles: ProductAngle[] }> {
+  return del<{ angles: ProductAngle[] }>(
+    `/api/products/${productId}/angles/${encodeURIComponent(angleId)}`,
+  );
+}
+
+// ── Phase 2: read-only client share link ──────────────────────────────
+// Operator-side (authed): mint/rotate and revoke the share token.
+// Public-side: getSharedResearch reads the sanitized doc by token (no auth).
+
+/**
+ * Mint (or rotate) the product's client share token. Returns the fresh token;
+ * the shareable URL is `${location.origin}/share/${shareToken}`. Calling again
+ * rotates the token, instantly invalidating any previously-shared URL.
+ */
+export function createShareLink(productId: string): Promise<{ shareToken: string }> {
+  return post<{ shareToken: string }>(`/api/products/${productId}/share`, {});
+}
+
+/** Revoke the product's share link (the public URL 404s immediately after). */
+export function revokeShareLink(productId: string): Promise<{ ok: true }> {
+  return del<{ ok: true }>(`/api/products/${productId}/share`);
+}
+
+/** A sub-artifact (statements / messages / adCopy) as seen by the client doc. */
+export type SharedArtifact = {
+  content: string | null;
+  status: SubJobStatus | null;
+};
+
+export type SharedAngle = {
+  id: string;
+  name: string;
+  block: string;
+  artifacts: Partial<Record<AngleArtifactKind, SharedArtifact>>;
+};
+
+/** Sanitized, public, read-only research payload returned by GET /api/share/:token. */
+export type SharedResearchPayload = {
+  brand: { name: string; logoUrl: string | null };
+  product: { name: string };
+  research: {
+    markdown: string | null;
+    angles: SharedAngle[];
+  };
+};
+
+/**
+ * Public fetch of the shared research document by token. NO auth/cookies
+ * required. Throws (404) when the token is missing, revoked, or unknown — the
+ * ClientSharePage maps that to an "invalid or expired link" state.
+ */
+export function getSharedResearch(token: string): Promise<SharedResearchPayload> {
+  return get<SharedResearchPayload>(`/api/share/${encodeURIComponent(token)}`);
+}
+
+// ── Phase 3: client feedback ───────────────────────────────────────────
+// One-way Approve/Needs-changes + optional note, keyed by the same section
+// anchors the checklist uses. Public fns write through the token-gated share
+// router; operator fns read + triage through the authed products router.
+
+export type FeedbackVerdict = "approved" | "changes";
+export type FeedbackSectionKind = "angle" | "messages" | "adCopy";
+export type FeedbackStatus = "open" | "resolved";
+
+/** The client's own feedback for one section, as returned by the public route. */
+export type ShareFeedback = {
+  anchorId: string;
+  sectionKind: FeedbackSectionKind;
+  verdict: FeedbackVerdict;
+  note: string | null;
+  clientName: string | null;
+  suggestion: string | null;
+  suggestionStatus: FeedbackSuggestionStatus;
+  suggestionError: string | null;
+  updatedAt: string;
+};
+
+/** Public: the client's submitted feedback for this share link (rehydrates the checklist). */
+export function getShareFeedback(token: string): Promise<{ feedback: ShareFeedback[] }> {
+  return get<{ feedback: ShareFeedback[] }>(`/api/share/${encodeURIComponent(token)}/feedback`);
+}
+
+/** Public: upsert the client's verdict + optional note for one section. */
+export function submitShareFeedback(
+  token: string,
+  anchorId: string,
+  body: { verdict: FeedbackVerdict; note?: string; clientName?: string },
+): Promise<{ feedback: ShareFeedback }> {
+  return put<{ feedback: ShareFeedback }>(
+    `/api/share/${encodeURIComponent(token)}/feedback/${encodeURIComponent(anchorId)}`,
+    body,
+  );
+}
+
+/** Public: clear the client's feedback for one section (undo). */
+export function clearShareFeedback(token: string, anchorId: string): Promise<{ ok: true }> {
+  return del<{ ok: true }>(
+    `/api/share/${encodeURIComponent(token)}/feedback/${encodeURIComponent(anchorId)}`,
+  );
+}
+
+/**
+ * Public: the CLIENT accepts the AI revision generated for one section. This
+ * applies the revision to the LIVE copy IMMEDIATELY (status → "applied") — there
+ * is no operator approval step. The feedback stays open so the operator gets a
+ * notification to acknowledge. Re-fetch getSharedResearch() after this resolves
+ * so the displayed copy reflects the applied change. Only valid while "ready".
+ */
+export function acceptShareSuggestion(
+  token: string,
+  anchorId: string,
+): Promise<{ feedback: ShareFeedback }> {
+  return post<{ feedback: ShareFeedback }>(
+    `/api/share/${encodeURIComponent(token)}/feedback/${encodeURIComponent(anchorId)}/suggestion/accept`,
+    {},
+  );
+}
+
+/**
+ * Public: the CLIENT declines the AI revision and asks the team to handle their
+ * note manually ("Send for manual review"). Keeps the original copy and leaves
+ * the feedback open. Only valid while status is "ready".
+ */
+export function declineShareSuggestion(
+  token: string,
+  anchorId: string,
+): Promise<{ feedback: ShareFeedback }> {
+  return post<{ feedback: ShareFeedback }>(
+    `/api/share/${encodeURIComponent(token)}/feedback/${encodeURIComponent(anchorId)}/suggestion/decline`,
+    {},
+  );
+}
+
+/**
+ * State of the client-driven AI revision proposal stashed on a feedback item:
+ *   null        — no proposal (approval, angle-level note, or nothing to revise)
+ *   "ready"     — generated and waiting on the CLIENT to accept or decline
+ *   "applied"   — client accepted; the revision was written LIVE immediately.
+ *                 Feedback stays open so the operator can acknowledge it.
+ *   "declined"  — client kept the original ("Send for manual review")
+ *   "failed"    — generation errored; see `suggestionError`
+ */
+export type FeedbackSuggestionStatus =
+  | "ready"
+  | "applied"
+  | "declined"
+  | "failed"
+  | null;
+
+/** Operator-side feedback row — the full triage view (includes status + ids). */
+export type OperatorFeedback = {
+  id: string;
+  anchorId: string;
+  angleId: string;
+  angleName: string | null;
+  sectionKind: FeedbackSectionKind;
+  verdict: FeedbackVerdict;
+  note: string | null;
+  clientName: string | null;
+  status: FeedbackStatus;
+  suggestion: string | null;
+  suggestionStatus: FeedbackSuggestionStatus;
+  suggestionError: string | null;
+  /** The live copy at the moment the (now applied) revision was generated. */
+  suggestionOriginal: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** Operator: all client feedback collected for a product (inbox + inline). */
+export function getProductFeedback(productId: string): Promise<{ feedback: OperatorFeedback[] }> {
+  return get<{ feedback: OperatorFeedback[] }>(`/api/products/${productId}/feedback`);
+}
+
+/** Operator: triage a single feedback item (open ↔ resolved). */
+export async function updateFeedbackStatus(
+  productId: string,
+  feedbackId: string,
+  status: FeedbackStatus,
+): Promise<{ feedback: OperatorFeedback }> {
+  const res = await fetch(`/api/products/${productId}/feedback/${feedbackId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+  const payload = (await res.json().catch(() => ({}))) as { feedback: OperatorFeedback } | ApiError;
+  if (!res.ok) throw new ApiCallError(res.status, payload as ApiError);
+  return payload as { feedback: OperatorFeedback };
+}
+
+// NOTE: There are no operator apply/dismiss functions. In the client-driven
+// flow the client both generates AND applies the AI revision live (see
+// acceptShareSuggestion). The operator only observes the applied before→after
+// (suggestionOriginal → suggestion) and acknowledges it with updateFeedbackStatus
+// ("mark as read" = open → resolved).
 
 export function uploadProductImage(
   id: string,
@@ -669,7 +934,7 @@ export function prepareCharacterForSeedance(id: string): Promise<{ ok: true; que
 
 // ---------- Team & invites ----------
 
-export type TeamRole = "admin" | "member";
+export type TeamRole = "admin" | "manager" | "member";
 
 export type TeamMemberRow = {
   userId: string;

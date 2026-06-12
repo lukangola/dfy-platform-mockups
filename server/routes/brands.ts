@@ -136,6 +136,36 @@ brandsRouter.patch("/:id", requireAuth, async (req: Request, res: Response) => {
 });
 
 /**
+ * PATCH /api/brands/:id/dfy — flip the Done-For-You client flag.
+ *
+ * Admin-only: marking a brand a DFY client unlocks the Client Console
+ * (client share links + feedback triage) for everyone who can see the brand,
+ * so it's a managed action, not something a member/manager should self-serve.
+ * Body: `{ isDfyClient: boolean }`.
+ */
+brandsRouter.patch("/:id/dfy", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { team } = req.auth!;
+    const body = (req.body ?? {}) as { isDfyClient?: unknown };
+    if (typeof body.isDfyClient !== "boolean") {
+      return sendError(res, 400, "isDfyClient must be a boolean");
+    }
+    // Scope strictly to the admin's team — an admin can't flip a brand that
+    // isn't on their team even if they guess the id.
+    const [row] = await db
+      .update(schema.brands)
+      .set({ isDfyClient: body.isDfyClient })
+      .where(and(eq(schema.brands.id, req.params.id), eq(schema.brands.teamId, team.id)))
+      .returning();
+    if (!row) return sendError(res, 404, "Brand not found");
+    res.json({ brand: row });
+  } catch (err) {
+    console.error("[brands] dfy toggle failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
  * POST /api/brands
  * Body:
  *   {

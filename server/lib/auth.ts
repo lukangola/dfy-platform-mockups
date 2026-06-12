@@ -221,6 +221,24 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+/**
+ * Gate for Client Console actions: allows admins AND managers, rejects
+ * plain members with 403. Managers are "one above member" — they can drive the
+ * client-facing share + feedback surface but have no team-management powers
+ * (those stay behind requireAdmin).
+ */
+export function requireManager(req: Request, res: Response, next: NextFunction) {
+  if (!req.auth) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+  if (req.auth.role !== "admin" && req.auth.role !== "manager") {
+    res.status(403).json({ error: "Manager or admin role required" });
+    return;
+  }
+  next();
+}
+
 // ── Bootstrap helpers ──────────────────────────────────────────────
 
 /**

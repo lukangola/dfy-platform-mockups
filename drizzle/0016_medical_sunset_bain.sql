@@ -1,0 +1,1 @@
+ALTER TABLE "brands" ADD COLUMN "is_dfy_client" boolean DEFAULT false NOT NULL;

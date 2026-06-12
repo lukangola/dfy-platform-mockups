@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { integer, jsonb, numeric, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, integer, jsonb, numeric, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 export const generations = pgTable("generations", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -62,6 +62,14 @@ export const brands = pgTable("brands", {
    * boot-time backfill assigns them to the first team.
    */
   teamId: uuid("team_id"),
+  /**
+   * Marks this brand as a Done-For-You client. Only DFY-flagged brands expose
+   * the Client Console (share links + feedback triage) in the workspace
+   * — non-DFY brands are internal/agency-owned and never get a client-facing
+   * share surface. Toggled by an admin in Settings → Clients. Default false so
+   * a freshly created brand is internal until explicitly promoted.
+   */
+  isDfyClient: boolean("is_dfy_client").notNull().default(false),
 });
 
 export const products = pgTable("products", {
@@ -78,7 +86,64 @@ export const products = pgTable("products", {
   research: jsonb("research"),
   researchStatus: text("research_status").notNull().default("pending"), // pending | researching | complete | failed
   researchError: text("research_error"),
+  /**
+   * Phase 2 client share link. A nullable, unique token granting read-only
+   * PUBLIC access to this product's research via /share/:token (served by
+   * GET /api/share/:token, no auth). NULL = not shared. Revoking sets it back
+   * to NULL and rotating overwrites it — either instantly invalidates the old
+   * URL. Unique so the public route can resolve a product by token; Postgres
+   * treats multiple NULLs as distinct, so unshared products never collide.
+   */
+  shareToken: text("share_token").unique(),
 });
+
+/**
+ * Phase 3 client feedback. One row per (share token × section anchor) — the
+ * client's structured response to a single feedback target: an angle, its
+ * messages, or its ad copy. Written by the PUBLIC, token-gated share page
+ * (PUT /api/share/:token/feedback/:anchorId); read by the operator on the
+ * product page (GET /api/products/:id/feedback). One-way by design: the client
+ * submits an Approve / Needs-changes verdict plus an optional note, and the
+ * operator triages it (`status` open|resolved). No operator reply is ever
+ * surfaced back on the share page.
+ *
+ * The unique (share_token, anchor_id) index turns a resubmission into an
+ * upsert, so a client can change their mind on a section without piling up
+ * duplicate rows. `angleId`, `angleName`, and `sectionKind` are denormalized
+ * snapshots captured at submit time so the operator inbox stays readable even
+ * if the underlying research is later edited or regenerated. `anchorId` is the
+ * exact handle the client checklist (and inline operator annotations) use:
+ * `angle-<id>`, `angle-<id>-messages`, or `angle-<id>-adCopy`.
+ */
+export const shareFeedback = pgTable("share_feedback", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+  productId: uuid("product_id").notNull(),
+  shareToken: text("share_token").notNull(),
+  anchorId: text("anchor_id").notNull(),
+  angleId: text("angle_id").notNull(),
+  angleName: text("angle_name"),
+  sectionKind: text("section_kind").notNull(), // "angle" | "messages" | "adCopy"
+  verdict: text("verdict").notNull(), // "approved" | "changes"
+  note: text("note"),
+  clientName: text("client_name"),
+  status: text("status").notNull().default("open"), // open | resolved
+  // Phase 4 — AI revision suggestion for "changes" verdicts on text artifacts
+  // (messages | adCopy). The operator asks the model to revise the section to
+  // address `note`; the proposal is stashed here pending accept/reject.
+  suggestion: text("suggestion"), // the AI-proposed revised content (null until generated)
+  suggestionStatus: text("suggestion_status"), // null | "ready" | "applied" | "declined" | "failed"
+  suggestionError: text("suggestion_error"), // error string when suggestionStatus = "failed"
+  // Snapshot of the live copy at the moment the revision was generated, so the
+  // operator can see the exact before→after change after the client applies it.
+  suggestionOriginal: text("suggestion_original"),
+}, (t) => ({
+  uniqTokenAnchor: uniqueIndex("share_feedback_token_anchor_uniq").on(t.shareToken, t.anchorId),
+}));
+
+export type ShareFeedback = typeof shareFeedback.$inferSelect;
+export type NewShareFeedback = typeof shareFeedback.$inferInsert;
 
 /**
  * Approved generated assets that the user has promoted to the shared Brand
@@ -312,7 +377,19 @@ export type Invite = typeof invites.$inferSelect;
 export type NewInvite = typeof invites.$inferInsert;
 export type BrandMember = typeof brandMembers.$inferSelect;
 export type NewBrandMember = typeof brandMembers.$inferInsert;
-export type Role = "admin" | "member";
+/**
+ * Team roles, in descending privilege order:
+ *   admin   — full team + workspace management (invites, role changes, brand
+ *             creation/deletion, Done-For-You client toggle).
+ *   manager — a member who additionally can see and use the Client Command
+ *             Center (client share links + feedback triage) for DFY clients.
+ *             No team-management powers.
+ *   member  — read/use access to the creative tools only; never sees the
+ *             Client Console.
+ * Stored as free text in team_members.role; no DB enum so adding a role is a
+ * code-only change.
+ */
+export type Role = "admin" | "manager" | "member";
 
 // ──────────────────────────────────────────────────────────────────────────
 // LISTICLE BUILDER

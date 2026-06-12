@@ -26,8 +26,10 @@ import CopyEngineAppPage from "./pages/workspace/CopyEngineAppPage";
 import ListicleBuilderAppPage from "./pages/workspace/ListicleBuilderAppPage";
 import WorkflowsPage from "./pages/workspace/WorkflowsPage";
 import DFYWorkflowPage from "./pages/workspace/DFYWorkflowPage";
+import ClientConsolePage from "./pages/workspace/ClientConsolePage";
 import SettingsPage from "./pages/workspace/SettingsPage";
 import { AcceptInvitePage, LoginPage, RegisterPage } from "./pages/AuthPages";
+import ClientSharePage from "./pages/ClientSharePage";
 
 /**
  * Gates the workspace behind authentication. While loading the initial /me
@@ -71,6 +73,14 @@ function Router() {
       <Route path="/docs" component={DocsIndexPage} />
       <Route path="/docs/character-broll" component={CharacterBrollDocsPage} />
 
+      {/* Public read-only client share document — token-gated, no auth.
+          The operator mints the token from the product page; the client
+          opens this URL to review angles/messages/ad copy and (Phase 3)
+          leave section-anchored feedback. */}
+      <Route path="/share/:token">
+        {(params) => <ClientSharePage token={params.token} />}
+      </Route>
+
       {/* Redirect root to workspace products */}
       <Route path="/">
         <Redirect to="/workspace/products" />
@@ -79,6 +89,13 @@ function Router() {
       {/* Workspace routes — gated. RequireAuth also mounts BrandProvider. */}
       <Route path="/workspace/products">
         <RequireAuth><WorkspaceLayout><ProductsPage /></WorkspaceLayout></RequireAuth>
+      </Route>
+
+      {/* Client Console — share links + feedback triage for the active
+          DFY brand. The page itself re-checks the manager/admin role and the
+          brand's DFY flag, so a hand-typed URL can't bypass the hidden nav. */}
+      <Route path="/workspace/console">
+        <RequireAuth><WorkspaceLayout><ClientConsolePage /></WorkspaceLayout></RequireAuth>
       </Route>
 
       <Route path="/workspace/products/:id">

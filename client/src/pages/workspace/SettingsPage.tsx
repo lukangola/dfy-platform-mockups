@@ -17,10 +17,11 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  AlertTriangle, Check, ChevronDown, Copy, Crown, FolderOpen, Loader2, Mail, RefreshCw,
-  Shield, Trash2, UserMinus, UserPlus, Users, X,
+  AlertTriangle, Building2, Check, ChevronDown, Copy, Crown, FolderOpen, Headset, Loader2, Mail,
+  RefreshCw, Shield, ShieldCheck, Trash2, UserMinus, UserPlus, Users, X,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { useBrand } from "@/contexts/BrandContext";
 import {
   getTeam,
   createTeamInvite,
@@ -29,6 +30,8 @@ import {
   removeTeamMember,
   getMemberBrands,
   setMemberBrands,
+  setBrandDfyClient,
+  type Brand,
   type MemberBrandAccess,
   type TeamSnapshot,
   type TeamRole,
@@ -50,6 +53,9 @@ function buildInviteUrl(token: string) {
 
 export default function SettingsPage() {
   const { user, role, logout } = useAuth();
+  // Settings sub-tabs. "clients" is admin-only (flag DFY brands); members and
+  // managers only ever see "team".
+  const [tab, setTab] = useState<"team" | "clients">("team");
   const [team, setTeam] = useState<TeamSnapshot | null>(null);
   // Manage-workspaces modal — null when closed; object holds the
   // target member's userId + display name while open.
@@ -77,9 +83,30 @@ export default function SettingsPage() {
       {/* Sub-sidebar (reserved for future Settings tabs) */}
       <aside className="w-56 border-r border-white/[0.06] p-4 shrink-0" style={{ background: "#0D0F12" }}>
         <div className="text-[10px] font-mono text-white/30 uppercase tracking-widest mb-3">Settings</div>
-        <button className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-cyan-500/10 text-cyan-300 border border-cyan-500/30 text-xs font-mono uppercase tracking-wider">
-          <Users size={12} /> Team
-        </button>
+        <div className="space-y-1">
+          <button
+            onClick={() => setTab("team")}
+            className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-mono uppercase tracking-wider transition-all ${
+              tab === "team"
+                ? "bg-cyan-500/10 text-cyan-300 border border-cyan-500/30"
+                : "text-white/50 hover:text-white/80 hover:bg-white/[0.04] border border-transparent"
+            }`}
+          >
+            <Users size={12} /> Team
+          </button>
+          {role === "admin" && (
+            <button
+              onClick={() => setTab("clients")}
+              className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-mono uppercase tracking-wider transition-all ${
+                tab === "clients"
+                  ? "bg-cyan-500/10 text-cyan-300 border border-cyan-500/30"
+                  : "text-white/50 hover:text-white/80 hover:bg-white/[0.04] border border-transparent"
+              }`}
+            >
+              <Building2 size={12} /> Clients
+            </button>
+          )}
+        </div>
         <p className="text-[10px] font-mono text-white/20 leading-relaxed mt-4 px-1">
           More settings tabs coming as the platform grows.
         </p>
@@ -93,12 +120,16 @@ export default function SettingsPage() {
         >
           <div>
             <div className="text-[10px] font-mono text-white/30 uppercase tracking-widest mb-1">Workspace settings</div>
-            <h1 className="text-xl font-medium text-white/90">Team</h1>
+            <h1 className="text-xl font-medium text-white/90">{tab === "team" ? "Team" : "Clients"}</h1>
             <p className="text-[12px] text-white/40 font-mono mt-1.5">
-              Manage who can access this workspace, set roles, and invite new members.
+              {tab === "team"
+                ? "Manage who can access this workspace, set roles, and invite new members."
+                : "Flag brands as Done-For-You clients to unlock the Client Console for managers and admins."}
             </p>
           </div>
 
+          {tab === "team" ? (
+          <>
           {error && (
             <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-[12px] text-rose-300 font-mono flex items-start gap-2">
               <AlertTriangle size={14} className="shrink-0 mt-0.5" />
@@ -288,6 +319,10 @@ export default function SettingsPage() {
                 </div>
               </div>
             </>
+          )}
+          </>
+          ) : (
+            <ClientsTab />
           )}
         </motion.div>
       </main>
@@ -483,11 +518,24 @@ function RoleBadge({ role }: { role: TeamRole | null }) {
       </span>
     );
   }
+  if (role === "manager") {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border font-mono uppercase tracking-wider text-[10px] bg-cyan-500/15 text-cyan-300 border-cyan-500/30">
+        <ShieldCheck size={10} /> Manager
+      </span>
+    );
+  }
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border font-mono uppercase tracking-wider text-[10px] bg-white/[0.04] text-white/60 border-white/[0.08]">
       <Shield size={10} /> Member
     </span>
   );
+}
+
+function roleIcon(r: TeamRole) {
+  if (r === "admin") return <Crown size={10} className="text-amber-400" />;
+  if (r === "manager") return <ShieldCheck size={10} className="text-cyan-400" />;
+  return <Shield size={10} className="text-white/60" />;
 }
 
 function RoleSelect({ value, onChange }: { value: TeamRole; onChange: (next: TeamRole) => void }) {
@@ -498,25 +546,143 @@ function RoleSelect({ value, onChange }: { value: TeamRole; onChange: (next: Tea
         onClick={() => setOpen((p) => !p)}
         className="flex items-center gap-1 px-2 py-1 rounded border border-white/[0.08] bg-white/[0.03] hover:border-white/[0.15] text-[10px] font-mono uppercase tracking-wider text-white/70"
       >
-        {value === "admin" ? <Crown size={10} className="text-amber-400" /> : <Shield size={10} className="text-white/60" />}
+        {roleIcon(value)}
         {value}
         <ChevronDown size={10} />
       </button>
       {open && (
         <div className="absolute right-0 top-full mt-1 z-10 bg-[#13151a] border border-white/[0.08] rounded shadow-xl">
-          {(["admin", "member"] as TeamRole[]).map((r) => (
+          {(["admin", "manager", "member"] as TeamRole[]).map((r) => (
             <button
               key={r}
               onClick={() => { setOpen(false); if (r !== value) onChange(r); }}
               className={`flex items-center gap-2 px-3 py-1.5 text-[10px] font-mono uppercase tracking-wider w-full text-left hover:bg-white/[0.04] ${value === r ? "text-cyan-400" : "text-white/70"}`}
             >
-              {r === "admin" ? <Crown size={10} /> : <Shield size={10} />}
+              {roleIcon(r)}
               {r}
               {value === r && <Check size={10} className="ml-auto" />}
             </button>
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Clients tab ──────────────────────────────────────────────────────
+//
+// Admin-only. Lists every brand on the team and lets the admin flag which
+// ones are Done-For-You clients. Flipping the flag unlocks the Client Command
+// Center (share links + feedback triage) for managers and admins on that
+// brand. Driven from BrandContext so toggling immediately reflects in the
+// sidebar nav + BrandSwitcher after refreshBrands().
+function ClientsTab() {
+  const { brands, refreshBrands } = useBrand();
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function toggle(brand: Brand) {
+    if (busyId) return;
+    setBusyId(brand.id);
+    setError(null);
+    try {
+      await setBrandDfyClient(brand.id, !brand.isDfyClient);
+      await refreshBrands();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const dfyCount = brands.filter((b) => b.isDfyClient).length;
+
+  return (
+    <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-5">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <div className="text-[10px] font-mono text-white/40 uppercase tracking-widest mb-1">
+            Done-For-You clients
+          </div>
+          <div className="text-sm text-white/85">
+            {dfyCount} of {brands.length} brand{brands.length === 1 ? "" : "s"} flagged
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 text-[10px] font-mono text-cyan-300/70 uppercase tracking-wider">
+          <Headset size={12} /> Client Console
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-[12px] text-rose-300 font-mono flex items-start gap-2 mb-3">
+          <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {brands.length === 0 ? (
+        <div className="text-[12px] text-white/50 font-mono py-4">
+          No brands on this team yet. Create one first, then come back to flag it as a client.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {brands.map((b) => {
+            const on = Boolean(b.isDfyClient);
+            const busy = busyId === b.id;
+            return (
+              <div
+                key={b.id}
+                className="flex items-center gap-3 p-3 rounded border border-white/[0.06] bg-white/[0.02]"
+              >
+                {b.logoUrl ? (
+                  <img
+                    src={b.logoUrl}
+                    alt=""
+                    className="w-8 h-8 rounded object-cover bg-white/[0.04] border border-white/[0.06] shrink-0"
+                  />
+                ) : (
+                  <div className="w-8 h-8 rounded bg-white/[0.04] border border-white/[0.06] flex items-center justify-center text-white/40 text-[11px] font-medium shrink-0">
+                    {b.name.slice(0, 1).toUpperCase()}
+                  </div>
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm text-white/85 truncate">{b.name}</div>
+                  <div className="text-[10px] font-mono mt-0.5">
+                    {on ? (
+                      <span className="text-cyan-300/80">Done-For-You client</span>
+                    ) : (
+                      <span className="text-white/30">Standard brand</span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  onClick={() => void toggle(b)}
+                  disabled={busy}
+                  role="switch"
+                  aria-checked={on}
+                  title={on ? "Disable Client Console for this brand" : "Enable Client Console for this brand"}
+                  className={`relative w-11 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 ${
+                    on ? "bg-cyan-500/40 border border-cyan-500/50" : "bg-white/[0.06] border border-white/[0.1]"
+                  }`}
+                >
+                  <span
+                    className={`absolute top-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-white transition-all ${
+                      on ? "left-[22px]" : "left-[3px]"
+                    } ${busy ? "opacity-60" : ""}`}
+                  />
+                  {busy && (
+                    <Loader2 size={11} className="animate-spin text-white absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+                  )}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <p className="text-[10px] font-mono text-white/30 leading-relaxed mt-4">
+        Flagging a brand unlocks the <span className="text-cyan-300/70">Client Console</span> in the sidebar for managers and admins — where you mint client share links and triage their feedback. Non-client brands stay hidden from it.
+      </p>
     </div>
   );
 }
@@ -578,6 +744,7 @@ function InviteForm({ onCreated, onError }: { onCreated: () => void; onError: (m
             className="bg-white/[0.03] border border-white/[0.08] rounded px-2 py-2 text-xs text-white/85 focus:border-cyan-500/40 focus:outline-none"
           >
             <option value="member">member</option>
+            <option value="manager">manager</option>
             <option value="admin">admin</option>
           </select>
         </div>
