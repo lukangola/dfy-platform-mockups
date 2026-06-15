@@ -552,6 +552,8 @@ export const competitors = pgTable("competitors", {
   fbPageId: text("fb_page_id"),
   igHandle: text("ig_handle"),
   tiktokHandle: text("tiktok_handle"),
+  gethookdBrandId: text("gethookd_brand_id"),       // resolved + cached from gethookd /brands
+  brandspyActive: boolean("brandspy_active").notNull().default(false),
   source: text("source").notNull(), // "auto" | "manual"
   status: text("status").notNull().default("active"), // active | archived
   /** Why auto-discovery surfaced this competitor (LLM rationale); null for manual adds. */
