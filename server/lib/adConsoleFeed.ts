@@ -26,6 +26,7 @@
 import { and, desc, eq, inArray, or, type SQL } from "drizzle-orm";
 import { db, schema } from "./db.js";
 import { getBrandNicheState } from "./adConsoleNiche.js";
+import { ORGANIC_MIN_DURATION_SEC } from "./adConsoleOrganic.js";
 import { DEFAULT_NICHE_CONFIG, type NicheStreamConfig } from "./nicheConfig.js";
 import type { AdCreative, FeedItem, NicheStream, OrganicPost } from "../db/schema.js";
 
@@ -68,9 +69,33 @@ const DAY_MS = 86_400_000;
 const COMPETITOR_AD_BOOST = 1;
 
 // Organic ranks on: relevance (which angle keyword SURFACED the clip — not its
-// caption) as the lead signal, then shares (the virality the operator cares
-// about), then recency.
+// caption) as the lead signal, then traction (engagement-RATE + reach), then recency.
 const ORGANIC_WEIGHTS: NicheStreamConfig["weights"] = { traction: 0.4, relevance: 0.5, recency: 0.1 };
+
+// Organic traction blends ENGAGEMENT-RATE (the platform virality metric ÷ views)
+// with REACH (log views), so a high-resonance clip ranks above one that's merely
+// big — but a tiny clip with a freak ratio can't outrank a genuinely viral one.
+// Rate saturations differ by platform: TikTok save-rates run higher than IG
+// share-rates. (All tunable.)
+const ORGANIC_RATE_W = 0.65;
+const ORGANIC_REACH_W = 0.35;
+const TIKTOK_SAVE_RATE_SAT = 0.05; // 5% saves/view ⇒ max resonance
+const IG_SHARE_RATE_SAT = 0.02; // 2% shares/view ⇒ max resonance
+// Calibrated to the real (engagement-gated, not view-gated) data: most clips sit
+// at 5K–500K views, so reach must differentiate across that band, not above 100K.
+const ORGANIC_REACH_LO_LOG = 4; // 10K views ⇒ reach 0
+const ORGANIC_REACH_HI_LOG = 6; // 1M views ⇒ reach 1
+
+/** Organic traction = engagement-rate (platform metric ÷ views) blended with reach. */
+function organicTraction(post: OrganicPost): number {
+  const isTikTok = post.source === "tiktok";
+  const primary = Math.max(0, (isTikTok ? post.bookmarks : post.shares) ?? 0);
+  const views = Math.max(0, post.views ?? 0);
+  const rate = views > 0 ? primary / views : 0;
+  const rateScore = clamp01(rate / (isTikTok ? TIKTOK_SAVE_RATE_SAT : IG_SHARE_RATE_SAT));
+  const reachScore = clamp01((Math.log10(views + 1) - ORGANIC_REACH_LO_LOG) / (ORGANIC_REACH_HI_LOG - ORGANIC_REACH_LO_LOG));
+  return round4(clamp01(ORGANIC_RATE_W * rateScore + ORGANIC_REACH_W * reachScore));
+}
 
 function toNum(v: unknown, fallback = 0): number {
   if (typeof v === "number") return Number.isFinite(v) ? v : fallback;
@@ -352,6 +377,9 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
     const recency = recencyScore(ad.adStop ?? ad.adStart ?? null);
     // Hard-tier researched-competitor ads above niche-keyword ads (see boost doc).
     const comp = composite(traction, relevance, recency, weights) + (ad.competitorId ? COMPETITOR_AD_BOOST : 0);
+    // Card chip shows WHY the ad is here: a niche ad shows the angle that surfaced
+    // it; a competitor ad shows a "competitor" tag (the card already names the brand).
+    const chips = ad.competitorId ? ["competitor"] : foundQuery ? [foundQuery] : matched;
     await upsertFeedItem({
       brandId,
       itemType: "ad",
@@ -360,20 +388,33 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
       refKey: `ad:${ad.id}`,
       relevance,
       composite: comp,
-      matched,
+      matched: chips,
     });
     adsRanked++;
   }
 
   // ── trending_organic rail ──
-  const organic: OrganicPost[] = streamId
+  const allOrganic: OrganicPost[] = streamId
     ? await db.select().from(schema.organicPosts).where(eq(schema.organicPosts.nicheStreamId, streamId))
     : [];
+  // Operator rule: clips must be ≥30s. Enforced at ingest for new pulls; applied
+  // here too so existing sub-30s clips drop out of the rail (unknown length kept).
+  const organic = allOrganic.filter((p) => p.durationSec == null || p.durationSec >= ORGANIC_MIN_DURATION_SEC);
+  const tooShortIds = allOrganic.filter((p) => p.durationSec != null && p.durationSec < ORGANIC_MIN_DURATION_SEC).map((p) => p.id);
+  if (tooShortIds.length > 0) {
+    await db
+      .delete(schema.feedItems)
+      .where(
+        and(
+          eq(schema.feedItems.brandId, brandId),
+          eq(schema.feedItems.rail, "trending_organic"),
+          eq(schema.feedItems.status, "new"),
+          inArray(schema.feedItems.organicPostId, tooShortIds),
+        ),
+      );
+  }
   let organicRanked = 0;
   for (const post of organic) {
-    // Eligibility (shares/duration for IG, bookmarks for TikTok) is enforced at
-    // ingest — everything in the pool already qualifies, so we just rank here.
-
     // Relevance from PROVENANCE, never the caption: the search keyword that
     // surfaced this clip. Found by one of the brand's own angle phrases ⇒ top;
     // by a niche seed term ⇒ secondary; otherwise a small floor.
@@ -387,10 +428,9 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
         : foundQuery
           ? 0.4
           : 0.3;
-    // Traction = shares (the virality signal the operator ranks on): 100→0.25,
-    // 1K→0.5, 10K→0.75, 100K→1.0.
-    const shares = Math.max(0, post.shares ?? 0);
-    const traction = round4(clamp01((Math.log10(shares + 1) - 1) / 4));
+    // Traction = engagement-RATE (saves/views for TikTok, shares/views for IG)
+    // blended with reach — rewards resonance without overranking raw-big clips.
+    const traction = organicTraction(post);
     const recency = recencyScore(post.postedAt ?? null);
     const comp = composite(traction, relevance, recency, ORGANIC_WEIGHTS);
     await upsertFeedItem({

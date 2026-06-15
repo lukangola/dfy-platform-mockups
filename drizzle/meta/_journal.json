@@ -148,6 +148,13 @@
       "when": 1781522991583,
       "tag": "0020_steady_galactus",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1781551654579,
+      "tag": "0021_wealthy_deathbird",
+      "breakpoints": true
     }
   ]
 }

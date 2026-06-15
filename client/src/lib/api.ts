@@ -1739,6 +1739,10 @@ export type AdConsoleOrganicPost = {
   likes: number | null;
   comments: number | null;
   shares: number | null;
+  /** TikTok saves (collectCount) — the TikTok virality metric. IG has no save count. */
+  bookmarks: number | null;
+  /** Clip length in seconds. */
+  durationSec: number | null;
   postedAt: string | null;
   transcript: string | null;
   format: string;

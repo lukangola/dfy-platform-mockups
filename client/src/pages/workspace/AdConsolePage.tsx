@@ -23,7 +23,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Radar, Loader2, ShieldAlert, Building2, RefreshCw, Sparkles, Settings2,
   Plus, Trash2, Archive, ArrowUpRight, SkipForward, Wand2, Play,
-  Megaphone, Flame, Lightbulb, X, ExternalLink, Clock, Eye, Heart, Layers,
+  Megaphone, Flame, Lightbulb, X, ExternalLink, Clock, Eye, Bookmark, Share2, Layers,
   CheckCircle2, AlertTriangle, ChevronDown,
 } from "lucide-react";
 import {
@@ -201,7 +201,7 @@ export default function AdConsolePage() {
     // above organic, so a single combined top-N query would starve the organic
     // rail (all top slots would be ads). Per-rail limits keep both populated.
     const [comp, org] = await Promise.all([
-      getAdConsoleFeed(activeBrandId, { rail: "competitor_ads", status: "new", limit: 60 }),
+      getAdConsoleFeed(activeBrandId, { rail: "competitor_ads", status: "new", limit: 200 }),
       getAdConsoleFeed(activeBrandId, { rail: "trending_organic", status: "new", limit: 250 }),
     ]);
     setFeedCards([...comp.feed, ...org.feed]);
@@ -235,7 +235,7 @@ export default function AdConsolePage() {
           listAdConsoleCompetitors(activeBrandId),
           listAdConsoleKeywordSets(activeBrandId),
           // Per-rail fetches (ads are score-boosted above organic — see refreshFeed).
-          getAdConsoleFeed(activeBrandId, { rail: "competitor_ads", status: "new", limit: 60 }),
+          getAdConsoleFeed(activeBrandId, { rail: "competitor_ads", status: "new", limit: 200 }),
           getAdConsoleFeed(activeBrandId, { rail: "trending_organic", status: "new", limit: 250 }),
           getAdConsoleIdeas(activeBrandId),
           getAdConsoleFeedPullStatus(activeBrandId),
@@ -868,9 +868,13 @@ function FeedCardView({
   }
   if (organic) {
     const v = compact(organic.views);
-    const l = compact(organic.likes);
     if (v) tractionBits.push({ icon: Eye, label: v });
-    if (l) tractionBits.push({ icon: Heart, label: l });
+    // Platform virality metric: TikTok → saves/bookmarks, Instagram → shares.
+    const isTikTok = organic.source === "tiktok";
+    const metric = compact(isTikTok ? organic.bookmarks : organic.shares);
+    if (metric) tractionBits.push({ icon: isTikTok ? Bookmark : Share2, label: metric });
+    if (organic.durationSec != null)
+      tractionBits.push({ icon: Clock, label: `${Math.round(organic.durationSec)}s` });
   }
 
   return (

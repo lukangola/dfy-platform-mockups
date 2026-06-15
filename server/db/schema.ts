@@ -654,7 +654,9 @@ export const organicPosts = pgTable("organic_posts", {
   views: integer("views"),
   likes: integer("likes"),
   comments: integer("comments"),
-  shares: integer("shares"),
+  shares: integer("shares"), // IG reshares / TikTok shareCount — the IG virality metric
+  bookmarks: integer("bookmarks"), // TikTok saves (collectCount) — the TikTok virality metric (IG has no save count)
+  durationSec: integer("duration_sec"), // clip length in seconds
   postedAt: timestamp("posted_at", { withTimezone: true }),
   transcript: text("transcript"), // FREE for IG; deferred (paid) for TikTok
   format: text("format").notNull().default("video"), // reels/tiktok are video
