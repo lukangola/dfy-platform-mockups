@@ -626,6 +626,7 @@ export const adCreatives = pgTable("ad_creatives", {
   // Discovery provenance (first writer wins).
   nicheStreamId: uuid("niche_stream_id"),
   competitorId: uuid("competitor_id"),
+  discoveryQuery: text("discovery_query"), // angle query that surfaced this niche ad — drives relevance (provenance, not copy)
   rawJson: jsonb("raw_json"), // full gethookd ad item for re-derivation / debugging
 }, (t) => ({
   uniqSourceExternal: uniqueIndex("ad_creatives_source_external_uniq").on(t.source, t.externalId),

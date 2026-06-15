@@ -333,9 +333,21 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
   for (const ad of ads) {
     const hay = normalizeHaystack([ad.copy, ad.advertiserName, ad.cta]);
     const { matched, weighted } = matchKeywords(hay, pools.ad);
-    // A researched competitor's ad is relevant by definition; niche-discovered ads
-    // get a floor so a sparse-copy-but-relevant ad isn't buried by copy-matching.
-    const relevance = ad.competitorId ? 1 : Math.max(relevanceFromMatch(weighted), RELEVANCE_FLOOR);
+    // Relevance from PROVENANCE, not the ad's copy: a researched competitor's ad is
+    // relevant by definition; a niche ad is scored on the angle QUERY that surfaced
+    // it (like the organic rail) — found by the brand's own angle phrase ⇒ top, by a
+    // niche seed term ⇒ secondary, by some other query ⇒ mid. Only ads with no stored
+    // query (legacy pulls) fall back to copy-matching, floored so they're not buried.
+    const foundQuery = (ad.discoveryQuery ?? "").toLowerCase().trim();
+    const relevance = ad.competitorId
+      ? 1
+      : pools.brandAngle.has(foundQuery)
+        ? 1
+        : pools.niche.has(foundQuery)
+          ? 0.6
+          : foundQuery
+            ? 0.5
+            : Math.max(relevanceFromMatch(weighted), RELEVANCE_FLOOR);
     const traction = adTraction(ad);
     const recency = recencyScore(ad.adStop ?? ad.adStart ?? null);
     // Hard-tier researched-competitor ads above niche-keyword ads (see boost doc).

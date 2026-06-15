@@ -19,7 +19,7 @@
  * until an operator clicks "pull". A 402 surfaces as CreditExhaustedError, which
  * stops the current phase gracefully.
  */
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "./db.js";
 import { DEFAULT_NICHE_CONFIG, type NicheStreamConfig } from "./nicheConfig.js";
 import { listCompetitors } from "./adConsoleCompetitors.js";
@@ -75,7 +75,7 @@ function resolveCaps(stream?: NicheStream | null): Caps {
 
 // ── Persistence ─────────────────────────────────────────────────────────────
 
-type Provenance = { nicheStreamId?: string | null; competitorId?: string | null };
+type Provenance = { nicheStreamId?: string | null; competitorId?: string | null; discoveryQuery?: string | null };
 
 /**
  * Upsert one ad into the global pool. Insert-or-refresh keyed by
@@ -131,6 +131,7 @@ async function upsertAdCreative(
       tractionScore: traction.toString(),
       nicheStreamId: prov.nicheStreamId ?? null,
       competitorId: prov.competitorId ?? null,
+      discoveryQuery: prov.discoveryQuery ?? null,
       rawJson: ad.rawJson,
     })
     .onConflictDoNothing({ target: [schema.adCreatives.source, schema.adCreatives.externalId] })
@@ -157,6 +158,9 @@ async function upsertAdCreative(
       isActive: ad.isActive,
       variationCount,
       tractionScore: traction.toString(),
+      // Backfill provenance query on re-pull WITHOUT clobbering the first writer
+      // (and never null it out when a competitor pull re-touches a niche ad).
+      discoveryQuery: sql`coalesce(${schema.adCreatives.discoveryQuery}, ${prov.discoveryQuery ?? null})`,
       rawJson: ad.rawJson,
       updatedAt: new Date(),
     })
@@ -240,7 +244,6 @@ export async function ingestNicheStreamAds(stream: NicheStream, brandQueries: st
   // text `query`. When the brand has no angle phrases yet, fall back to searching
   // the niche word itself as the query.
   const sweepQueries = queries.length ? queries : stream.niche ? [stream.niche] : [];
-  const prov: Provenance = { nicheStreamId: stream.id, competitorId: null };
   try {
     for (const q of sweepQueries) {
       const res = await client.explore({
@@ -250,7 +253,9 @@ export async function ingestNicheStreamAds(stream: NicheStream, brandQueries: st
         perPage: caps.adsPerQuery,
       });
       result.queriesRun++;
-      await ingestAds(res.data, prov, caps, result);
+      // Tag each ad with the query that surfaced it → relevance provenance (the
+      // ranker scores niche ads on this, not on re-matching their copy).
+      await ingestAds(res.data, { nicheStreamId: stream.id, competitorId: null, discoveryQuery: q }, caps, result);
     }
   } catch (e) {
     if (!(e instanceof CreditExhaustedError)) throw e;
