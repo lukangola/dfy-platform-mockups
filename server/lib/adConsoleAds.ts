@@ -31,6 +31,8 @@ import {
   scoreGethookdTraction,
   CreditExhaustedError,
   type GethookdAd,
+  type GethookdBrand,
+  type GethookdClient,
   type NormalizedGethookdAd,
 } from "./gethookd.js";
 import type { Competitor, NicheStream } from "../db/schema.js";
@@ -273,6 +275,64 @@ export async function ingestNicheStreamAds(stream: NicheStream, brandQueries: st
   return result;
 }
 
+const NAME_NOISE_RE = /\b(coffee|superfoods?|mushrooms?|drinks?|beverages?|organics?|co|inc|llc|ltd|company|brand|the)\b/gi;
+
+/** Normalize a brand/competitor name to lowercased alphanumeric words. */
+function nameWords(s: string): string[] {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(" ")
+    .filter((w) => w.length >= 2);
+}
+
+/**
+ * Resolve a competitor name to the RIGHT gethookd brand. The raw `?search=` is
+ * brittle: it fuzzy-matches substrings (so "Ryze" returned "Advisoryzen Jobs")
+ * and misses brands whose gethookd name differs from ours ("Wunderground Coffee"
+ * vs "Wunderground"). We therefore: (1) search a few name variations (raw,
+ * slash-normalized, suffix-stripped); (2) require the candidate to share a whole
+ * word with the competitor name — never take a no-shared-word fuzzy hit; and
+ * (3) among the survivors, prefer the brand with the most active ads (the real
+ * brand has thousands; a coincidental match has a handful). Returns null when
+ * nothing plausible matches, so we never pull a wrong brand's ads.
+ */
+async function resolveGethookdBrand(client: GethookdClient, name: string): Promise<GethookdBrand | null> {
+  const compWords = new Set(nameWords(name));
+  if (compWords.size === 0) return null;
+
+  const cleaned = name.replace(/[\\/]+/g, " ").replace(/\s+/g, " ").trim();
+  const stripped = cleaned.replace(NAME_NOISE_RE, " ").replace(/\s+/g, " ").trim();
+  const queries = Array.from(new Set([name, cleaned, stripped].filter((q) => q.trim().length >= 2)));
+
+  const byId = new Map<number, GethookdBrand>();
+  for (const q of queries) {
+    try {
+      const { data } = await client.searchBrands(q);
+      for (const b of data) byId.set(b.id, b);
+    } catch {
+      /* one query failing shouldn't abort resolution */
+    }
+  }
+
+  let best: GethookdBrand | null = null;
+  let bestScore = -1;
+  for (const b of Array.from(byId.values())) {
+    const bWords = nameWords(b.name);
+    const exact = bWords.join(" ") === Array.from(compWords).join(" ");
+    const overlap = bWords.filter((w) => compWords.has(w)).length;
+    if (!exact && overlap === 0) continue; // no shared whole word → reject the fuzzy hit
+    // Whole-word overlap dominates; active-ad volume breaks ties toward the real brand.
+    const score = (exact ? 1000 : overlap * 100) + Math.log10((b.active_ads ?? 0) + 1);
+    if (score > bestScore) {
+      bestScore = score;
+      best = b;
+    }
+  }
+  return best;
+}
+
 /**
  * Pull one competitor's ads from gethookd. Resolves (and caches) the gethookd
  * brand id from the competitor's name on first use, ensures the brand is in
@@ -286,8 +346,7 @@ export async function ingestCompetitorAds(competitor: Competitor, nicheStreamId:
   // Resolve + cache the gethookd brand id from the competitor's name.
   let brandId = competitor.gethookdBrandId?.trim() || null;
   if (!brandId) {
-    const { data } = await client.searchBrands(competitor.name);
-    const match = data.find((b) => b.name.toLowerCase() === competitor.name.toLowerCase()) ?? data[0];
+    const match = await resolveGethookdBrand(client, competitor.name);
     if (!match) {
       console.log(`[ad-console] no gethookd brand matched competitor "${competitor.name}"`);
       return result;
