@@ -214,6 +214,30 @@ async function upsertFeedItem(row: {
     });
 }
 
+/**
+ * Creative fingerprint for dedup. gethookd (like Meta) stores every placement /
+ * refresh of the same ad as a distinct record with a UNIQUE id but IDENTICAL
+ * advertiser + copy (the media URL embeds the ad id, so it's never a reliable
+ * dedup key). We collapse on advertiser + normalized copy. Ads with no copy are
+ * left unique (keyed by id) so we never merge unrelated blank-copy creatives.
+ */
+function creativeFingerprint(a: AdCreative): string {
+  const copy = (a.copy ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  if (!copy) return `uniq:${a.id}`;
+  return `${(a.advertiserName ?? "").toLowerCase().trim()}|${copy}`;
+}
+
+/** Within a dedup group, prefer competitor-sourced (keeps the boost + provenance), then higher traction, then a stable id. */
+function preferAd(candidate: AdCreative, current: AdCreative): boolean {
+  const cc = Boolean(candidate.competitorId);
+  const cu = Boolean(current.competitorId);
+  if (cc !== cu) return cc;
+  const tc = toNum(candidate.tractionScore);
+  const tu = toNum(current.tractionScore);
+  if (tc !== tu) return tc > tu;
+  return candidate.id < current.id;
+}
+
 /** Ads eligible for a brand: discovered via its niche stream OR its competitors. */
 async function loadEligibleAds(streamId: string | null, competitorIds: string[]): Promise<AdCreative[]> {
   const conds: SQL[] = [];
@@ -244,7 +268,35 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
   const competitorIds = competitorRows.map((c) => c.id);
 
   // ── competitor_ads rail ──
-  const ads = await loadEligibleAds(streamId, competitorIds);
+  const allAds = await loadEligibleAds(streamId, competitorIds);
+
+  // Collapse near-identical creatives (same advertiser + copy across many ad ids)
+  // down to one representative so the rail isn't 30 copies of the same ad.
+  const repByFp = new Map<string, AdCreative>();
+  for (const ad of allAds) {
+    const fp = creativeFingerprint(ad);
+    const cur = repByFp.get(fp);
+    if (!cur || preferAd(ad, cur)) repByFp.set(fp, ad);
+  }
+  const ads = Array.from(repByFp.values());
+  const repIds = new Set(ads.map((a) => a.id));
+  const collapsedIds = allAds.filter((a) => !repIds.has(a.id)).map((a) => a.id);
+
+  // Drop not-yet-actioned feed_items for the collapsed duplicates so they vanish
+  // from the rail; keep any the operator already selected/skipped.
+  if (collapsedIds.length > 0) {
+    await db
+      .delete(schema.feedItems)
+      .where(
+        and(
+          eq(schema.feedItems.brandId, brandId),
+          eq(schema.feedItems.rail, "competitor_ads"),
+          eq(schema.feedItems.status, "new"),
+          inArray(schema.feedItems.adCreativeId, collapsedIds),
+        ),
+      );
+  }
+
   let adsRanked = 0;
   for (const ad of ads) {
     const hay = normalizeHaystack([ad.copy, ad.advertiserName, ad.cta]);
@@ -318,7 +370,7 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
     niche: state.nicheType,
     seeded: state.seeded,
     streamId,
-    competitorAds: { considered: ads.length, ranked: adsRanked },
+    competitorAds: { considered: allAds.length, ranked: adsRanked },
     trendingOrganic: { considered: organic.length, ranked: organicRanked },
   };
 }
