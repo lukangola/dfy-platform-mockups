@@ -61,15 +61,14 @@ const WORD_WEIGHT = 0.4;
 const RECENCY_WINDOW_DAYS = 180;
 const DAY_MS = 86_400_000;
 
-// Ads pulled from a RESEARCHED competitor's own ad-library page (competitorId
-// set) are the operator's primary target, so we nudge them up the otherwise-0..1
-// composite. A soft +0.3 (not a hard +1.0 tier) keeps competitors leading while
-// letting a standout niche ad — relevance 1.0 + strong traction — interleave.
-const COMPETITOR_AD_BOOST = 0.3;
+// Competitor-ad boost (added to the otherwise-0..1 composite). Set to 0 so the
+// competitor_ads rail sorts purely on relevance + traction + recency — competitor
+// and niche ads interleave by quality, no hard tier.
+const COMPETITOR_AD_BOOST = 0;
 
-// Organic ranks on: relevance (which angle keyword SURFACED the clip — not its
-// caption) as the lead signal, then traction (engagement-RATE + reach), then recency.
-const ORGANIC_WEIGHTS: NicheStreamConfig["weights"] = { traction: 0.4, relevance: 0.5, recency: 0.1 };
+// Organic ranks 50/50 on relevance (which angle keyword SURFACED the clip — not
+// its caption) and traction (engagement-RATE + reach). Recency is not used.
+const ORGANIC_WEIGHTS: NicheStreamConfig["weights"] = { traction: 0.5, relevance: 0.5, recency: 0 };
 
 // Organic traction blends ENGAGEMENT-RATE (the platform virality metric ÷ views)
 // with REACH (log views), so a high-resonance clip ranks above one that's merely
