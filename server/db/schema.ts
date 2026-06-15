@@ -70,6 +70,15 @@ export const brands = pgTable("brands", {
    * a freshly created brand is internal until explicitly promoted.
    */
   isDfyClient: boolean("is_dfy_client").notNull().default(false),
+  /**
+   * Ad Creative Console niche classification. Auto-detected on setup by
+   * classifying the brand's products (e.g. "skincare" vs "supplement") so the
+   * brand can be attached to the matching shared `niche_streams` row. NULL =
+   * not yet classified; the Console prompts the operator (or runs the
+   * classifier) before its first feed pull. Free text, not an enum, so adding a
+   * niche is a config-only change.
+   */
+  nicheType: text("niche_type"),
 });
 
 export const products = pgTable("products", {
@@ -474,3 +483,268 @@ export type Listicle = typeof listicles.$inferSelect;
 export type NewListicle = typeof listicles.$inferInsert;
 export type ListicleImage = typeof listicleImages.$inferSelect;
 export type NewListicleImage = typeof listicleImages.$inferInsert;
+
+// ──────────────────────────────────────────────────────────────────────────
+// AD CREATIVE CONSOLE
+//
+// A swipeable "command center" of proven ad ideas + trending organic content,
+// filtered to a brand's niche and competitors and ranked by traction. The data
+// model has two layers (see spec §5):
+//
+//   SHARED  — `niche_streams` is pulled once per niche and reused across every
+//             brand in that niche (saves Apify credits). `ad_creatives` and
+//             `organic_posts` are a GLOBAL deduped pool keyed by the source's
+//             own ID — the same long-running competitor ad discovered for two
+//             brands is stored once.
+//   PER-BRAND — `competitors` (that brand's rivals), `brand_keyword_sets`
+//             (keyword_extract output per angle), and `feed_items` (the ranked
+//             queue linking a brand to pooled creatives/posts, with the
+//             per-brand relevance + composite scores). `feed_events` logs every
+//             swipe.
+//
+// Scoring split: `tractionScore` is INTRINSIC to a creative/post (longevity for
+// ads, views+engagement for organic) so it lives on the pooled rows.
+// `relevanceScore` and `compositeScore` depend on the viewing brand's keywords,
+// so they live on `feed_items` (per brand) — a deliberate deviation from the
+// spec §9 sketch, which put them on the creative for a single-brand v1.
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * One shared stream per niche (e.g. "supplement", "skincare"). Pulled once and
+ * reused by every brand of that niche. Holds the broad, brand-independent seed
+ * config: category keyword/hashtag lists used for the weekly broad pull, the
+ * niche's leading advertisers (for direct ad-library pulls), and adjacency
+ * pain-point keywords. Refreshed weekly; `lastRefreshedAt` gates the next pull.
+ */
+export const nicheStreams = pgTable("niche_streams", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+  niche: text("niche").notNull(), // "supplement" | "skincare" | ...  (matches brands.nicheType)
+  displayName: text("display_name").notNull(),
+  /** { adLibrary: string[], organic: string[], hashtags: string[] } — broad category queries for the weekly niche pull. */
+  keywords: jsonb("keywords"),
+  /** [{ name, fbPageUrl?, fbPageId?, igHandle?, tiktokHandle? }] — known leading advertisers for direct pulls. */
+  leadingAdvertisers: jsonb("leading_advertisers"),
+  /** string[] — adjacency problem/outcome keywords for organic discovery. */
+  painPointKeywords: jsonb("pain_point_keywords"),
+  /** Optional per-stream tuning: scoring weights + per-run credit caps. */
+  config: jsonb("config"),
+  lastRefreshedAt: timestamp("last_refreshed_at", { withTimezone: true }),
+}, (t) => ({
+  uniqNiche: uniqueIndex("niche_streams_niche_uniq").on(t.niche),
+}));
+
+/**
+ * A single competitor of a brand. Auto-discovered (LLM web_search) or
+ * manually added by the operator. We pull this advertiser's ads + organic
+ * directly (the "brand overlay" half of the feed). `dedupeKey` is an
+ * app-normalized identity (page id or lowercased handle) so a competitor can't
+ * be added twice for the same brand whether by auto-discovery or by hand.
+ */
+export const competitors = pgTable("competitors", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+  brandId: uuid("brand_id").notNull(),
+  name: text("name").notNull(),
+  fbPageUrl: text("fb_page_url"),
+  fbPageId: text("fb_page_id"),
+  igHandle: text("ig_handle"),
+  tiktokHandle: text("tiktok_handle"),
+  source: text("source").notNull(), // "auto" | "manual"
+  status: text("status").notNull().default("active"), // active | archived
+  /** Why auto-discovery surfaced this competitor (LLM rationale); null for manual adds. */
+  discoveryReason: text("discovery_reason"),
+  /** App-computed identity for dedup: fbPageId ?? lowercased igHandle ?? lowercased name. */
+  dedupeKey: text("dedupe_key").notNull(),
+  createdBy: uuid("created_by"), // operator who manually added it; null = auto-discovered
+}, (t) => ({
+  uniqBrandDedupe: uniqueIndex("competitors_brand_dedupe_uniq").on(t.brandId, t.dedupeKey),
+}));
+
+/**
+ * keyword_extract output for one (brand, angle). Three sections × 20 keywords
+ * (Problem / Desired-outcome / Product-solution). Section 3 → ad-library
+ * queries; Sections 1+2 → organic queries (spec §6.1). Generated async (status
+ * lifecycle mirrors the other LLM-action tables). Unique per (brand, angle) so
+ * a regeneration upserts rather than piling up.
+ */
+export const brandKeywordSets = pgTable("brand_keyword_sets", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+  brandId: uuid("brand_id").notNull(),
+  productId: uuid("product_id"), // soft ref — the product whose research seeded the extract
+  angleId: text("angle_id").notNull(),
+  angleName: text("angle_name"),
+  problemKeywords: jsonb("problem_keywords"), // string[] — Section 1 (20)
+  outcomeKeywords: jsonb("outcome_keywords"), // string[] — Section 2 (20)
+  productKeywords: jsonb("product_keywords"), // string[] — Section 3 (20)
+  status: text("status").notNull().default("pending"), // pending | running | complete | failed
+  error: text("error"),
+  model: text("model"),
+  promptVersion: text("prompt_version"),
+}, (t) => ({
+  uniqBrandAngle: uniqueIndex("brand_keyword_sets_brand_angle_uniq").on(t.brandId, t.angleId),
+}));
+
+/**
+ * GLOBAL deduped pool of scraped ad-library creatives (curious_coder FB ads
+ * scraper). Keyed by the ad's own archive id so the same ad discovered for
+ * multiple brands is stored once. Traction = longevity proxy (spec §7): there
+ * is no US/CA impression data, so a long `runtimeDays` is the "this ad wins"
+ * signal. `nicheStreamId` / `competitorId` record HOW it was first discovered
+ * (broad niche pull vs a specific competitor), not exclusive ownership.
+ */
+export const adCreatives = pgTable("ad_creatives", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+  source: text("source").notNull().default("facebook_ads"), // "facebook_ads"
+  externalId: text("external_id").notNull(), // Meta ad_archive_id — dedup key
+  advertiserName: text("advertiser_name"),
+  pageId: text("page_id"),
+  pageUrl: text("page_url"),
+  mediaUrls: jsonb("media_urls"), // string[] — creative image/video URLs
+  thumbnailUrl: text("thumbnail_url"),
+  format: text("format"), // "static" | "video"
+  copy: text("copy"), // primary ad text
+  cta: text("cta"),
+  landingUrl: text("landing_url"),
+  adStart: timestamp("ad_start", { withTimezone: true }),
+  adStop: timestamp("ad_stop", { withTimezone: true }),
+  runtimeDays: integer("runtime_days"), // (adStop ?? today) − adStart, clipped to 365d
+  isActive: boolean("is_active"),
+  variationCount: integer("variation_count"),
+  tractionScore: numeric("traction_score", { precision: 10, scale: 4 }), // intrinsic longevity score
+  // Tier-2 enrichment (deferred) — populated later for top-N items only.
+  hook: text("hook"),
+  transcript: text("transcript"),
+  // Discovery provenance (first writer wins).
+  nicheStreamId: uuid("niche_stream_id"),
+  competitorId: uuid("competitor_id"),
+  rawJson: jsonb("raw_json"), // full Apify item for re-derivation / debugging
+}, (t) => ({
+  uniqSourceExternal: uniqueIndex("ad_creatives_source_external_uniq").on(t.source, t.externalId),
+}));
+
+/**
+ * GLOBAL deduped pool of scraped organic posts (IG reels + TikTok). Keyed by
+ * (source, post id). IG transcripts come FREE from the scraper, so IG cards can
+ * show a script/hook with no extra LLM cost (spec §4). Traction = views floor +
+ * engagement + recency (no outlier scoring in v1).
+ */
+export const organicPosts = pgTable("organic_posts", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+  source: text("source").notNull(), // "instagram" | "tiktok"
+  externalId: text("external_id").notNull(), // post / reel id — dedup key
+  handle: text("handle"),
+  profileName: text("profile_name"),
+  postUrl: text("post_url"),
+  mediaUrl: text("media_url"),
+  thumbnailUrl: text("thumbnail_url"),
+  caption: text("caption"),
+  hashtags: jsonb("hashtags"), // string[]
+  views: integer("views"),
+  likes: integer("likes"),
+  comments: integer("comments"),
+  shares: integer("shares"),
+  postedAt: timestamp("posted_at", { withTimezone: true }),
+  transcript: text("transcript"), // FREE for IG; deferred (paid) for TikTok
+  format: text("format").notNull().default("video"), // reels/tiktok are video
+  tractionScore: numeric("traction_score", { precision: 10, scale: 4 }),
+  hook: text("hook"), // tier-2 (deferred)
+  nicheStreamId: uuid("niche_stream_id"),
+  rawJson: jsonb("raw_json"),
+}, (t) => ({
+  uniqSourceExternal: uniqueIndex("organic_posts_source_external_uniq").on(t.source, t.externalId),
+}));
+
+/**
+ * The per-brand ranked queue. One row links a brand to a pooled ad_creative OR
+ * organic_post, carrying the BRAND-SPECIFIC relevance + composite scores and
+ * the swipe status. `rail` places it in the UI (competitor/niche ads vs
+ * trending organic vs the weekly-ideas rail). `refKey` = `${itemType}:${refId}`
+ * gives a single dedup key so the same creative is queued at most once per
+ * brand.
+ */
+export const feedItems = pgTable("feed_items", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+  brandId: uuid("brand_id").notNull(),
+  itemType: text("item_type").notNull(), // "ad" | "organic"
+  adCreativeId: uuid("ad_creative_id"), // set when itemType = "ad"
+  organicPostId: uuid("organic_post_id"), // set when itemType = "organic"
+  rail: text("rail").notNull(), // "competitor_ads" | "trending_organic" | "weekly_ideas"
+  refKey: text("ref_key").notNull(), // `${itemType}:${refId}` — per-brand dedup
+  relevanceScore: numeric("relevance_score", { precision: 10, scale: 4 }),
+  compositeScore: numeric("composite_score", { precision: 10, scale: 4 }),
+  matchedKeywords: jsonb("matched_keywords"), // string[] — why it was deemed relevant
+  status: text("status").notNull().default("new"), // new | selected | skipped
+  tier2Enriched: boolean("tier2_enriched").notNull().default(false),
+}, (t) => ({
+  uniqBrandRef: uniqueIndex("feed_items_brand_ref_uniq").on(t.brandId, t.refKey),
+}));
+
+/**
+ * Append-only swipe log. Every select / skip / revise / view on a feed item is
+ * recorded here — powers the swipe UX (don't re-show actioned items) and a
+ * future relevance-learning loop.
+ */
+export const feedEvents = pgTable("feed_events", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  brandId: uuid("brand_id").notNull(),
+  feedItemId: uuid("feed_item_id").notNull(),
+  userId: uuid("user_id"), // operator who swiped
+  event: text("event").notNull(), // "select" | "skip" | "revise" | "view"
+  metadata: jsonb("metadata"), // e.g. emitted Creative Brief, routed app
+});
+
+/**
+ * LLM-GENERATED weekly creative ideas — the "This Week's Ideas" rail (spec §5,
+ * `weekly_ideas`). UNLIKE the competitor/organic rails (which queue real scraped
+ * creatives via feed_items), these are fresh ad concepts the model invents FOR
+ * this brand, grounded in its niche + extracted keywords + the top-ranked feed
+ * cards it just pulled. One generation run shares a `batchId`; the Console shows
+ * the newest batch. `status` mirrors the feed swipe lifecycle (new/selected/
+ * skipped) so the rail behaves like the others.
+ */
+export const adConsoleIdeas = pgTable("ad_console_ideas", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+  brandId: uuid("brand_id").notNull(),
+  batchId: uuid("batch_id").notNull(), // groups one generation run
+  title: text("title"), // short label for the idea card
+  hook: text("hook"), // the scroll-stopping opening line
+  concept: text("concept"), // what the ad does — the creative concept
+  format: text("format"), // "static" | "video" | "ugc"
+  angle: text("angle"), // which strategic angle it leans on
+  rationale: text("rationale"), // why it should work (grounded in observed traction)
+  sourceRefs: jsonb("source_refs"), // [{ type: "ad" | "organic", refId, note }] — grounding
+  status: text("status").notNull().default("new"), // new | selected | skipped
+  model: text("model"),
+  promptVersion: text("prompt_version"),
+});
+
+export type NicheStream = typeof nicheStreams.$inferSelect;
+export type NewNicheStream = typeof nicheStreams.$inferInsert;
+export type Competitor = typeof competitors.$inferSelect;
+export type NewCompetitor = typeof competitors.$inferInsert;
+export type BrandKeywordSet = typeof brandKeywordSets.$inferSelect;
+export type NewBrandKeywordSet = typeof brandKeywordSets.$inferInsert;
+export type AdCreative = typeof adCreatives.$inferSelect;
+export type NewAdCreative = typeof adCreatives.$inferInsert;
+export type OrganicPost = typeof organicPosts.$inferSelect;
+export type NewOrganicPost = typeof organicPosts.$inferInsert;
+export type FeedItem = typeof feedItems.$inferSelect;
+export type NewFeedItem = typeof feedItems.$inferInsert;
+export type FeedEvent = typeof feedEvents.$inferSelect;
+export type NewFeedEvent = typeof feedEvents.$inferInsert;
+export type AdConsoleIdea = typeof adConsoleIdeas.$inferSelect;
+export type NewAdConsoleIdea = typeof adConsoleIdeas.$inferInsert;

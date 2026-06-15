@@ -1,0 +1,1587 @@
+/**
+ * DESIGN: Studio Control Room — Ad Creative Console
+ *
+ * A swipeable "command center" of proven creative signal for the active brand.
+ * Three rails sit side by side:
+ *   - LEFT   — Competitor Ads (longest-running FB Ad Library creatives)
+ *   - CENTER — Trending Organic (highest-traction IG/TikTok posts) — the wide,
+ *              center-top hero feed per the design directive
+ *   - RIGHT  — This Week's Ideas (LLM-GENERATED fresh concepts, not scraped)
+ *
+ * Each card carries a "Make it mine" → Creative Brief handoff and a "Skip".
+ * Above the rails: a control bar to Pull this week's feed (Apify ads+organic+rank,
+ * polled to completion) and Generate ideas (one LLM call). A collapsible Setup
+ * panel manages the niche classification and the competitor watchlist.
+ *
+ * Access: managers + admins, ANY brand (no DFY gate). The page re-checks the
+ * role so a hand-typed URL can't bypass the hidden nav; mutations are also
+ * gated server-side with requireManager.
+ */
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useLocation } from "wouter";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Radar, Loader2, ShieldAlert, Building2, RefreshCw, Sparkles, Settings2,
+  Plus, Trash2, Archive, ArrowUpRight, SkipForward, Wand2, Play,
+  Megaphone, Flame, Lightbulb, X, ExternalLink, Clock, Eye, Heart, Layers,
+  CheckCircle2, AlertTriangle, ChevronDown,
+} from "lucide-react";
+import {
+  adConsoleImg,
+  getAdConsoleNiche, bootstrapAdConsole,
+  listAdConsoleCompetitors, addAdConsoleCompetitor,
+  updateAdConsoleCompetitor, deleteAdConsoleCompetitor,
+  listAdConsoleKeywordSets,
+  getAdConsoleFeed, selectAdConsoleFeedItem, skipAdConsoleFeedItem,
+  rankAdConsoleFeed,
+  startAdConsoleFeedPull, getAdConsoleFeedPullStatus,
+  getAdConsoleIdeas, generateAdConsoleIdeas, selectAdConsoleIdea, skipAdConsoleIdea,
+  ApiCallError,
+  type AdConsoleNicheState, type AdConsoleCompetitor, type AdConsoleFeedCard,
+  type AdConsoleOrganicPost,
+  type AdConsoleCreativeBrief, type AdConsoleFeedPullRun, type AdConsoleIdea,
+  type AdConsoleRecreationApp,
+} from "@/lib/api";
+import { useBrand } from "@/contexts/BrandContext";
+import { useAuth } from "@/contexts/AuthContext";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Small helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Notice = { kind: "info" | "success" | "error"; text: string };
+
+/** Compact number formatting: 12345 → "12.3K", 1200000 → "1.2M". */
+function compact(n: number | null | undefined): string | null {
+  if (n == null || Number.isNaN(n)) return null;
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/**
+ * True when a URL looks like a playable video file. FB/IG/TikTok CDN video
+ * URLs are signed and end in .mp4/.m3u8 (sometimes before a query string) or
+ * live on a `video.*` / `video-*` host. We can't fetch headers from the
+ * client, so this string heuristic is how the card decides to mount a
+ * <video> instead of an <img>.
+ */
+function isLikelyVideoUrl(u: string | null | undefined): boolean {
+  if (!u) return false;
+  try {
+    const url = new URL(u);
+    if (/\.(mp4|m3u8|webm|mov)(\?|$)/i.test(url.pathname)) return true;
+    if (/^video[-.]/i.test(url.hostname)) return true;
+    return false;
+  } catch {
+    return /\.(mp4|m3u8|webm|mov)(\?|$)/i.test(u);
+  }
+}
+
+/**
+ * Resolve a card's playable video URL, or null for a static creative.
+ * Ads: collectMedia() lists images first, then the video file, then its
+ * preview image — so we scan mediaUrls for the first video-looking URL rather
+ * than trusting index 0. Organic: mediaUrl is the video itself when the post
+ * is a reel/clip (thumbnailUrl is the cover).
+ */
+function pickVideoUrl(card: AdConsoleFeedCard): string | null {
+  const { ad, organic } = card;
+  if (ad) {
+    return (ad.mediaUrls ?? []).find(isLikelyVideoUrl) ?? null;
+  }
+  if (organic) {
+    if (isLikelyVideoUrl(organic.mediaUrl)) return organic.mediaUrl;
+    // Trust an explicit video format even when the CDN URL is opaque.
+    if ((organic.format ?? "").toLowerCase() === "video" && organic.mediaUrl) return organic.mediaUrl;
+  }
+  return null;
+}
+
+/**
+ * Durable, in-card playback for organic posts via the platforms' own embed
+ * players — the only reliable option since TikTok never returns a hotlinkable
+ * file (mediaUrl is null) and Instagram's signed CDN URL expires. TikTok keys
+ * off the numeric video id (externalId); Instagram off the /p|reel/<code>/ slug.
+ */
+function tiktokEmbedUrl(post: AdConsoleOrganicPost): string | null {
+  if (post.source !== "tiktok") return null;
+  const id = (post.externalId ?? "").trim();
+  if (!/^\d{6,}$/.test(id)) return null;
+  // autoplay=1 is fine: the iframe is mounted only after the operator clicks the
+  // card's play button (the facade), so nothing ever plays on load/scroll.
+  return `https://www.tiktok.com/player/v1/${id}?autoplay=1&controls=1&progress_bar=1&play_button=1&volume_control=1&fullscreen_button=1&music_info=0&description=0&rel=0&native_context_menu=0`;
+}
+
+function instagramEmbedUrl(post: AdConsoleOrganicPost): string | null {
+  if (post.source !== "instagram") return null;
+  const m = (post.postUrl ?? "").match(/instagram\.com\/(?:p|reel|tv)\/([^/?#]+)/i);
+  return m ? `https://www.instagram.com/reel/${m[1]}/embed/` : null;
+}
+
+/**
+ * Resolve an organic post's in-card PLAYER iframe, or null to play the raw
+ * <video> instead. TikTok has no hotlinkable file → always its player iframe.
+ * Instagram's raw video_url IS cross-origin-playable (CORP: cross-origin,
+ * ACAO: *), so we play it inline in a <video> — one click, no new tab; the
+ * /reel/<code>/embed iframe is only a fallback for a reel with no video URL.
+ */
+function pickOrganicEmbedUrl(card: AdConsoleFeedCard, videoUrl: string | null): string | null {
+  const { organic } = card;
+  if (!organic) return null;
+  if (organic.source === "tiktok") return tiktokEmbedUrl(organic);
+  if (organic.source === "instagram") return videoUrl ? null : instagramEmbedUrl(organic);
+  return null;
+}
+
+/** Where a Creative Brief's suggested recreation app lives + its label. */
+const RECREATION_APP: Record<AdConsoleRecreationApp, { label: string; path: string }> = {
+  static_ads_recreator: { label: "Static Ads Recreator", path: "/workspace/apps/static-ads" },
+  script_rewriting: { label: "Copy Engine", path: "/workspace/apps/copy-engine" },
+};
+
+/** A pull-run is mid-flight (started, not yet settled). */
+function isRunning(run: AdConsoleFeedPullRun | null): boolean {
+  return run?.status === "running";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Page
+// ─────────────────────────────────────────────────────────────────────────────
+
+export default function AdConsolePage() {
+  const { activeBrand, activeBrandId } = useBrand();
+  const { role } = useAuth();
+  const [, navigate] = useLocation();
+
+  const canUse = role === "admin" || role === "manager";
+  // The Ad Console is DFY-only: shown only for brands an admin has flagged a DFY
+  // client. The nav hides it for non-DFY brands; we re-check here so a hand-typed
+  // URL can't bypass it.
+  const isDfy = Boolean(activeBrand?.isDfyClient);
+
+  // Core data
+  const [niche, setNiche] = useState<AdConsoleNicheState | null>(null);
+  const [competitors, setCompetitors] = useState<AdConsoleCompetitor[]>([]);
+  const [keywordSetCount, setKeywordSetCount] = useState<number | null>(null);
+  const [feedCards, setFeedCards] = useState<AdConsoleFeedCard[]>([]);
+  const [ideas, setIdeas] = useState<AdConsoleIdea[]>([]);
+  const [pullRun, setPullRun] = useState<AdConsoleFeedPullRun | null>(null);
+
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Background bootstrap (auto niche + competitors + keywords). Fires once per
+  // brand per mount when the brand isn't set up yet; the ref de-dupes re-fires.
+  const [bootstrapping, setBootstrapping] = useState(false);
+  const bootstrappedRef = useRef<Set<string>>(new Set());
+
+  // Transient UI
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [brief, setBrief] = useState<AdConsoleCreativeBrief | null>(null);
+  const [actioningId, setActioningId] = useState<string | null>(null);
+
+  // Busy flags for the control bar
+  const [pulling, setPulling] = useState(false);
+  const [generatingIdeas, setGeneratingIdeas] = useState(false);
+
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flash = useCallback((n: Notice) => {
+    setNotice(n);
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => setNotice(null), 6000);
+  }, []);
+
+  // ── Loaders ────────────────────────────────────────────────────────────────
+
+  const refreshFeed = useCallback(async () => {
+    if (!activeBrandId) return;
+    // Fetch each rail independently: competitor-ad composites are hard-tiered
+    // above organic, so a single combined top-N query would starve the organic
+    // rail (all top slots would be ads). Per-rail limits keep both populated.
+    const [comp, org] = await Promise.all([
+      getAdConsoleFeed(activeBrandId, { rail: "competitor_ads", status: "new", limit: 60 }),
+      getAdConsoleFeed(activeBrandId, { rail: "trending_organic", status: "new", limit: 250 }),
+    ]);
+    setFeedCards([...comp.feed, ...org.feed]);
+  }, [activeBrandId]);
+
+  const refreshIdeas = useCallback(async () => {
+    if (!activeBrandId) return;
+    const { ideas: rows } = await getAdConsoleIdeas(activeBrandId);
+    setIdeas(rows);
+  }, [activeBrandId]);
+
+  const refreshCompetitors = useCallback(async () => {
+    if (!activeBrandId) return;
+    const { competitors: rows } = await listAdConsoleCompetitors(activeBrandId);
+    setCompetitors(rows);
+  }, [activeBrandId]);
+
+  // Initial load — pull everything in parallel.
+  useEffect(() => {
+    if (!activeBrandId || !canUse || !isDfy) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
+    (async () => {
+      try {
+        const [nicheState, comps, keywordSets, compFeed, organicFeed, ideaRows, pullStatus] = await Promise.all([
+          getAdConsoleNiche(activeBrandId),
+          listAdConsoleCompetitors(activeBrandId),
+          listAdConsoleKeywordSets(activeBrandId),
+          // Per-rail fetches (ads are score-boosted above organic — see refreshFeed).
+          getAdConsoleFeed(activeBrandId, { rail: "competitor_ads", status: "new", limit: 60 }),
+          getAdConsoleFeed(activeBrandId, { rail: "trending_organic", status: "new", limit: 250 }),
+          getAdConsoleIdeas(activeBrandId),
+          getAdConsoleFeedPullStatus(activeBrandId),
+        ]);
+        if (cancelled) return;
+        setNiche(nicheState);
+        setCompetitors(comps.competitors);
+        setKeywordSetCount(keywordSets.keywordSets.length);
+        setFeedCards([...compFeed.feed, ...organicFeed.feed]);
+        setIdeas(ideaRows.ideas);
+        setPullRun(pullStatus.run);
+
+        // Auto-prepare the brand in the background: detect niche + research
+        // competitors + extract angle keywords (all LLM, no Apify spend). Only
+        // when something's missing, and only once per brand per mount.
+        const needsBootstrap = !nicheState.nicheType || comps.competitors.length === 0;
+        if (needsBootstrap && !bootstrappedRef.current.has(activeBrandId)) {
+          bootstrappedRef.current.add(activeBrandId);
+          setBootstrapping(true);
+          void (async () => {
+            try {
+              await bootstrapAdConsole(activeBrandId);
+              const [n2, c2, k2] = await Promise.all([
+                getAdConsoleNiche(activeBrandId),
+                listAdConsoleCompetitors(activeBrandId),
+                listAdConsoleKeywordSets(activeBrandId),
+              ]);
+              if (cancelled) return;
+              setNiche(n2);
+              setCompetitors(c2.competitors);
+              setKeywordSetCount(k2.keywordSets.length);
+            } catch (err) {
+              console.error("[ad-console] background bootstrap failed:", err);
+              bootstrappedRef.current.delete(activeBrandId); // allow retry next mount
+            } finally {
+              if (!cancelled) setBootstrapping(false);
+            }
+          })();
+        }
+      } catch (err) {
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeBrandId, canUse, isDfy]);
+
+  // Poll the pull-run while it's in flight; refresh the feed when it settles.
+  useEffect(() => {
+    if (!activeBrandId || !isRunning(pullRun)) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      try {
+        const { run } = await getAdConsoleFeedPullStatus(activeBrandId);
+        if (cancelled) return;
+        if (run) {
+          setPullRun(run);
+          if (run.status !== "running") {
+            if (run.status === "complete") {
+              flash({ kind: "success", text: "Feed refreshed — new cards pulled and ranked." });
+              void refreshFeed();
+            } else {
+              flash({ kind: "error", text: run.error ?? "Feed pull failed." });
+            }
+            return; // effect re-runs on status change and stops
+          }
+        }
+        timer = setTimeout(tick, 2500);
+      } catch {
+        if (!cancelled) timer = setTimeout(tick, 4000);
+      }
+    };
+    timer = setTimeout(tick, 2500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [activeBrandId, pullRun, refreshFeed, flash]);
+
+  // ── Control-bar actions ──────────────────────────────────────────────────────
+
+  async function handlePullFeed() {
+    if (!activeBrandId || pulling || isRunning(pullRun)) return;
+    setPulling(true);
+    try {
+      const { run, alreadyRunning } = await startAdConsoleFeedPull(activeBrandId);
+      setPullRun(run);
+      flash({
+        kind: "info",
+        text: alreadyRunning ? "A pull is already running — watching it." : "Pulling this week's feed…",
+      });
+    } catch (err) {
+      const msg =
+        err instanceof ApiCallError && err.status === 424
+          ? "Apify isn't configured on this server — set APIFY_TOKEN to pull live data."
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      flash({ kind: "error", text: msg });
+    } finally {
+      setPulling(false);
+    }
+  }
+
+  async function handleGenerateIdeas() {
+    if (!activeBrandId || generatingIdeas) return;
+    setGeneratingIdeas(true);
+    try {
+      const { summary, ideas: rows } = await generateAdConsoleIdeas(activeBrandId);
+      setIdeas(rows);
+      flash({
+        kind: "success",
+        text: `Generated ${summary.generated} fresh idea${summary.generated === 1 ? "" : "s"} (grounded on ${summary.grounding.ads} ads + ${summary.grounding.organic} posts).`,
+      });
+    } catch (err) {
+      const msg =
+        err instanceof ApiCallError && err.status === 424
+          ? "The weekly_ideas prompt isn't configured on this server yet."
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      flash({ kind: "error", text: msg });
+    } finally {
+      setGeneratingIdeas(false);
+    }
+  }
+
+  // ── Card actions ────────────────────────────────────────────────────────────
+
+  async function handleMakeItMine(card: AdConsoleFeedCard) {
+    if (!activeBrandId || actioningId) return;
+    setActioningId(card.item.id);
+    try {
+      const { brief: b } = await selectAdConsoleFeedItem(activeBrandId, card.item.id);
+      setFeedCards((prev) => prev.filter((c) => c.item.id !== card.item.id));
+      setBrief(b);
+    } catch (err) {
+      flash({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setActioningId(null);
+    }
+  }
+
+  async function handleSkipCard(card: AdConsoleFeedCard) {
+    if (!activeBrandId || actioningId) return;
+    setActioningId(card.item.id);
+    try {
+      await skipAdConsoleFeedItem(activeBrandId, card.item.id);
+      setFeedCards((prev) => prev.filter((c) => c.item.id !== card.item.id));
+    } catch (err) {
+      flash({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setActioningId(null);
+    }
+  }
+
+  async function handleSelectIdea(idea: AdConsoleIdea) {
+    if (!activeBrandId || actioningId) return;
+    setActioningId(idea.id);
+    try {
+      await selectAdConsoleIdea(activeBrandId, idea.id);
+      setIdeas((prev) => prev.filter((i) => i.id !== idea.id));
+      flash({ kind: "success", text: `Saved "${idea.title ?? "idea"}" to your shortlist.` });
+    } catch (err) {
+      flash({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setActioningId(null);
+    }
+  }
+
+  async function handleSkipIdea(idea: AdConsoleIdea) {
+    if (!activeBrandId || actioningId) return;
+    setActioningId(idea.id);
+    try {
+      await skipAdConsoleIdea(activeBrandId, idea.id);
+      setIdeas((prev) => prev.filter((i) => i.id !== idea.id));
+    } catch (err) {
+      flash({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setActioningId(null);
+    }
+  }
+
+  // ── Split feed into rails ─────────────────────────────────────────────────────
+  const competitorCards = feedCards.filter((c) => c.item.rail === "competitor_ads");
+  const organicCards = feedCards.filter((c) => c.item.rail === "trending_organic");
+
+  const nicheLabel = niche?.stream?.displayName ?? niche?.nicheType ?? null;
+
+  // ── Render ────────────────────────────────────────────────────────────────────
+  return (
+    <div className="min-h-screen">
+      {/* Header */}
+      <div className="border-b border-white/[0.06] px-6 py-5 sticky top-0 z-20" style={{ background: "#0D0F12" }}>
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <h1 className="text-lg font-semibold text-white/90 flex items-center gap-2">
+              <Radar size={18} className="text-cyan-400" />
+              Ad Creative Console
+            </h1>
+            <p className="text-xs text-white/30 mt-1 font-mono flex items-center gap-2 flex-wrap">
+              <span>{activeBrand ? activeBrand.name : "No brand selected"}</span>
+              {nicheLabel && (
+                <span className="px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-300/80 border border-cyan-500/20 uppercase tracking-wider text-[10px]">
+                  {nicheLabel}
+                </span>
+              )}
+            </p>
+          </div>
+
+          {/* Control bar */}
+          {canUse && activeBrand && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void handleGenerateIdeas()}
+                disabled={generatingIdeas}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-mono tracking-wide border border-violet-500/30 bg-violet-500/10 text-violet-200 hover:bg-violet-500/20 transition-all disabled:opacity-50"
+              >
+                {generatingIdeas ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+                Generate ideas
+              </button>
+              <button
+                onClick={() => void handlePullFeed()}
+                disabled={pulling || isRunning(pullRun)}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-mono tracking-wide border border-cyan-500/40 bg-cyan-500/15 text-cyan-200 hover:bg-cyan-500/25 transition-all disabled:opacity-50"
+              >
+                {pulling || isRunning(pullRun) ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <RefreshCw size={13} />
+                )}
+                {isRunning(pullRun) ? "Pulling…" : "Pull this week's feed"}
+              </button>
+              <button
+                onClick={() => setSetupOpen((v) => !v)}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-mono tracking-wide border transition-all ${
+                  setupOpen
+                    ? "border-white/15 bg-white/[0.06] text-white/80"
+                    : "border-white/[0.08] bg-white/[0.02] text-white/40 hover:text-white/70"
+                }`}
+              >
+                <Settings2 size={13} />
+                Setup
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Pull progress strip */}
+        {isRunning(pullRun) && pullRun && <PullProgress run={pullRun} />}
+      </div>
+
+      <div className="p-6">
+        {/* Notice banner */}
+        <AnimatePresence>
+          {notice && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              className={`mb-4 flex items-center gap-2 rounded-lg border px-4 py-2.5 text-xs font-mono ${
+                notice.kind === "error"
+                  ? "border-rose-500/30 bg-rose-500/10 text-rose-300"
+                  : notice.kind === "success"
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                    : "border-cyan-500/30 bg-cyan-500/10 text-cyan-200"
+              }`}
+            >
+              {notice.kind === "error" ? (
+                <AlertTriangle size={13} />
+              ) : notice.kind === "success" ? (
+                <CheckCircle2 size={13} />
+              ) : (
+                <Loader2 size={13} className="animate-spin" />
+              )}
+              {notice.text}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Guards */}
+        {!canUse ? (
+          <GuardPanel
+            icon={ShieldAlert}
+            title="Manager access required"
+            body="The Ad Creative Console is available to managers and admins. Ask an admin to upgrade your role if you need access."
+          />
+        ) : !activeBrand ? (
+          <GuardPanel
+            icon={Building2}
+            title="No brand selected"
+            body="Pick a brand from the switcher in the top-left to load its competitor ads, trending posts, and weekly ideas."
+          />
+        ) : !isDfy ? (
+          <GuardPanel
+            icon={ShieldAlert}
+            title="DFY clients only"
+            body="The Ad Creative Console is enabled per brand. An admin can flag this brand as a DFY client under Settings → Clients to turn it on."
+          />
+        ) : loadError ? (
+          <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs font-mono text-rose-300">
+            Failed to load the console: {loadError}
+          </div>
+        ) : loading ? (
+          <div className="flex items-center justify-center py-20">
+            <Loader2 size={24} className="text-white/20 animate-spin" />
+          </div>
+        ) : (
+          <>
+            {/* Setup panel (collapsible) */}
+            <AnimatePresence initial={false}>
+              {setupOpen && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden"
+                >
+                  <SetupPanel
+                    niche={niche}
+                    nicheLabel={nicheLabel}
+                    competitors={competitors}
+                    keywordSetCount={keywordSetCount}
+                    bootstrapping={bootstrapping}
+                    onCompetitorsChange={refreshCompetitors}
+                    onFeedRanked={refreshFeed}
+                    onNotice={flash}
+                    brandId={activeBrandId!}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Three rails */}
+            <div className="grid gap-4 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1fr)] items-start">
+              {/* Competitor ads — left */}
+              <Rail
+                icon={Megaphone}
+                accent="indigo"
+                title="Competitor Ads"
+                subtitle="Longest-running creatives in the niche"
+                count={competitorCards.length}
+                empty="No ranked competitor ads yet — pull this week's feed to populate this rail."
+              >
+                {competitorCards.map((card) => (
+                  <FeedCardView
+                    key={card.item.id}
+                    card={card}
+                    accent="indigo"
+                    busy={actioningId === card.item.id}
+                    disabled={Boolean(actioningId)}
+                    onMakeItMine={() => void handleMakeItMine(card)}
+                    onSkip={() => void handleSkipCard(card)}
+                  />
+                ))}
+              </Rail>
+
+              {/* This week's ideas — center, LLM (wide column) */}
+              <Rail
+                icon={Lightbulb}
+                accent="violet"
+                title="This Week's Ideas"
+                subtitle="Fresh concepts generated for this brand"
+                count={ideas.length}
+                empty="No ideas yet — hit “Generate ideas” to spin up fresh concepts."
+              >
+                {ideas.map((idea) => (
+                  <IdeaCardView
+                    key={idea.id}
+                    idea={idea}
+                    busy={actioningId === idea.id}
+                    disabled={Boolean(actioningId)}
+                    onSave={() => void handleSelectIdea(idea)}
+                    onSkip={() => void handleSkipIdea(idea)}
+                  />
+                ))}
+              </Rail>
+
+              {/* Trending organic — right column */}
+              <Rail
+                icon={Flame}
+                accent="cyan"
+                title="Trending Organic"
+                subtitle="Highest-traction posts right now"
+                count={organicCards.length}
+                empty="No trending posts yet — pull this week's feed to populate this rail."
+              >
+                {organicCards.map((card) => (
+                  <FeedCardView
+                    key={card.item.id}
+                    card={card}
+                    accent="cyan"
+                    busy={actioningId === card.item.id}
+                    disabled={Boolean(actioningId)}
+                    onMakeItMine={() => void handleMakeItMine(card)}
+                    onSkip={() => void handleSkipCard(card)}
+                  />
+                ))}
+              </Rail>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Creative Brief modal */}
+      <AnimatePresence>
+        {brief && (
+          <BriefModal
+            brief={brief}
+            onClose={() => setBrief(null)}
+            onOpenApp={(path) => {
+              setBrief(null);
+              navigate(path);
+            }}
+          />
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pull progress strip
+// ─────────────────────────────────────────────────────────────────────────────
+
+function PullProgress({ run }: { run: AdConsoleFeedPullRun }) {
+  const steps: Array<{ key: "ads" | "organic" | "rank"; label: string }> = [
+    { key: "ads", label: "Ads" },
+    { key: "organic", label: "Organic" },
+    { key: "rank", label: "Rank" },
+  ];
+  return (
+    <div className="mt-3 flex items-center gap-3">
+      {steps.map(({ key, label }) => {
+        const s = run.steps[key].status;
+        const active = run.currentStep === key;
+        return (
+          <div key={key} className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider">
+            {s === "complete" ? (
+              <CheckCircle2 size={12} className="text-emerald-400" />
+            ) : s === "failed" ? (
+              <AlertTriangle size={12} className="text-rose-400" />
+            ) : s === "running" || active ? (
+              <Loader2 size={12} className="text-cyan-400 animate-spin" />
+            ) : (
+              <Clock size={12} className="text-white/20" />
+            )}
+            <span
+              className={
+                s === "complete"
+                  ? "text-emerald-300/80"
+                  : s === "failed"
+                    ? "text-rose-300/80"
+                    : s === "running"
+                      ? "text-cyan-300/80"
+                      : "text-white/30"
+              }
+            >
+              {label}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rail column
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Accent = "indigo" | "cyan" | "violet";
+
+const ACCENT: Record<Accent, { text: string; chip: string; ring: string; dot: string }> = {
+  indigo: {
+    text: "text-indigo-300",
+    chip: "bg-indigo-500/10 text-indigo-300 border-indigo-500/20",
+    ring: "border-indigo-500/20",
+    dot: "bg-indigo-400",
+  },
+  cyan: {
+    text: "text-cyan-300",
+    chip: "bg-cyan-500/10 text-cyan-300 border-cyan-500/20",
+    ring: "border-cyan-500/20",
+    dot: "bg-cyan-400",
+  },
+  violet: {
+    text: "text-violet-300",
+    chip: "bg-violet-500/10 text-violet-300 border-violet-500/20",
+    ring: "border-violet-500/20",
+    dot: "bg-violet-400",
+  },
+};
+
+function Rail({
+  icon: Icon,
+  accent,
+  title,
+  subtitle,
+  count,
+  empty,
+  hero,
+  children,
+}: {
+  icon: React.ElementType;
+  accent: Accent;
+  title: string;
+  subtitle: string;
+  count: number;
+  empty: string;
+  hero?: boolean;
+  children: React.ReactNode;
+}) {
+  const a = ACCENT[accent];
+  return (
+    <section
+      className={`rounded-xl border ${a.ring} bg-white/[0.02] ${hero ? "lg:bg-white/[0.03]" : ""} flex flex-col`}
+    >
+      {/* Rail header */}
+      <header className="px-4 py-3 border-b border-white/[0.06] flex items-center gap-2.5">
+        <div className={`w-7 h-7 rounded-lg border ${a.ring} bg-white/[0.03] flex items-center justify-center shrink-0`}>
+          <Icon size={14} className={a.text} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-sm font-semibold text-white/85 flex items-center gap-2">
+            {title}
+            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${a.chip}`}>{count}</span>
+          </h2>
+          <p className="text-[10px] text-white/30 font-mono truncate">{subtitle}</p>
+        </div>
+      </header>
+
+      {/* Cards */}
+      <div className="p-3 space-y-3">
+        {count === 0 ? (
+          <div className="px-3 py-10 text-center text-[11px] text-white/30 font-mono leading-relaxed">{empty}</div>
+        ) : (
+          <AnimatePresence initial={false}>{children}</AnimatePresence>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Feed card (ad or organic)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function FeedCardView({
+  card,
+  accent,
+  hero,
+  busy,
+  disabled,
+  onMakeItMine,
+  onSkip,
+}: {
+  card: AdConsoleFeedCard;
+  accent: Accent;
+  hero?: boolean;
+  busy: boolean;
+  disabled: boolean;
+  onMakeItMine: () => void;
+  onSkip: () => void;
+}) {
+  const a = ACCENT[accent];
+  const { ad, organic, item } = card;
+  // Organic players (TikTok/IG embeds + IG <video>) are click-to-load: the card
+  // shows the cover thumbnail until the operator presses play, then mounts the
+  // single player. Avoids 60 platform iframes booting at once (which throttle to
+  // black) and means nothing plays on load.
+  const [activated, setActivated] = useState(false);
+  // IG video URLs are signed + expire; if the raw <video> 403s we fall back to
+  // the durable /reel/<code>/embed iframe so a stale reel is still watchable.
+  const [videoFailed, setVideoFailed] = useState(false);
+
+  const isOrganic = item.itemType === "organic";
+  const advertiser = ad?.advertiserName ?? organic?.profileName ?? organic?.handle ?? "Unknown";
+  const handle = organic?.handle ? `@${organic.handle.replace(/^@/, "")}` : null;
+  const thumb = ad?.thumbnailUrl ?? ad?.mediaUrls?.[0] ?? organic?.thumbnailUrl ?? organic?.mediaUrl ?? null;
+  const videoUrl = pickVideoUrl(card);
+  // Organic posts play through the platform's own embed (durable; TikTok has no
+  // hotlinkable file and IG's CDN URL expires). Ads + live-URL IG use <video>.
+  const embedUrl = pickOrganicEmbedUrl(card, videoUrl);
+  // IG embed used as the fallback when the raw video fails (expired URL).
+  const embedFallbackUrl = organic?.source === "instagram" ? instagramEmbedUrl(organic) : null;
+  // The player to mount when activated: an explicit embed, else (on video error) the fallback embed.
+  const activePlayerUrl = embedUrl ?? (videoFailed ? embedFallbackUrl : null);
+  const hasMedia = Boolean(embedUrl || videoUrl || thumb);
+  // Organic content is vertical (9:16 reels/TikToks). Render it in a fixed
+  // vertical frame so the poster fills correctly and the card doesn't jump size
+  // when playback starts — <video h-auto> otherwise sits at the browser's 2:1
+  // default and a portrait reel collapses into a short black strip. Ads keep
+  // their native aspect (FB creatives are landscape/square/various).
+  const verticalFrame = Boolean(embedUrl) || (isOrganic && Boolean(videoUrl));
+  // Organic cards that have a player (embed or live <video>) use the click-to-load facade.
+  const canPlay = isOrganic && Boolean(embedUrl || videoUrl);
+  // Organic covers go through the same-origin proxy (IG CDN blocks cross-origin
+  // rendering); ad thumbnails (FB CDN) render directly.
+  const previewSrc = isOrganic ? adConsoleImg(thumb) : (thumb ?? undefined);
+  // Cap height so a 9:16 reel doesn't dominate the column, but let the media
+  // keep its native aspect ratio (no crop) — hero cards get a touch more room.
+  const mediaMaxH = hero ? "max-h-[80vh]" : "max-h-[68vh]";
+  const hook = ad?.hook ?? organic?.hook ?? null;
+  const body = ad?.copy ?? organic?.caption ?? null;
+  const format = (ad?.format ?? organic?.format ?? "").toLowerCase();
+  const sourceUrl = ad?.pageUrl ?? organic?.postUrl ?? ad?.landingUrl ?? null;
+  // Labelled "View on …" link to the original organic post.
+  const platformLabel =
+    organic?.source === "tiktok" ? "TikTok" : organic?.source === "instagram" ? "Instagram" : "Original";
+  // Deep-link straight to this creative's Meta Ad Library entry (externalId is
+  // the ad_archive_id). Lets the operator confirm an ad really came from the
+  // competitor's library, and fall back to the advertiser's full library page.
+  const adLibraryUrl = ad?.externalId
+    ? `https://www.facebook.com/ads/library/?id=${ad.externalId}`
+    : ad?.pageId
+      ? `https://www.facebook.com/ads/library/?view_all_page_id=${ad.pageId}`
+      : null;
+
+  // Traction line: ads → runtime/variations/active, organic → views/likes.
+  const tractionBits: Array<{ icon: React.ElementType; label: string }> = [];
+  if (ad) {
+    if (ad.runtimeDays != null) tractionBits.push({ icon: Clock, label: `${ad.runtimeDays}d running` });
+    if (ad.variationCount != null && ad.variationCount > 1)
+      tractionBits.push({ icon: Layers, label: `${ad.variationCount} variants` });
+  }
+  if (organic) {
+    const v = compact(organic.views);
+    const l = compact(organic.likes);
+    if (v) tractionBits.push({ icon: Eye, label: v });
+    if (l) tractionBits.push({ icon: Heart, label: l });
+  }
+
+  return (
+    <motion.article
+      layout
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, x: -40, transition: { duration: 0.18 } }}
+      className="rounded-lg border border-white/[0.07] bg-[#0D0F12] overflow-hidden group"
+    >
+      {/* Media — organic posts are CLICK-TO-LOAD: cover thumbnail + play button
+          in a vertical 9:16 frame; the platform player (TikTok/IG iframe or IG
+          <video>) mounts only when the operator presses play. Ads keep their
+          native-aspect <video>/<img>. No-media → fixed-aspect placeholder. */}
+      <div
+        className={`relative w-full bg-black overflow-hidden ${
+          verticalFrame
+            ? `aspect-[9/16] ${mediaMaxH} mx-auto`
+            : hasMedia
+              ? ""
+              : hero
+                ? "aspect-[4/3]"
+                : "aspect-video"
+        }`}
+      >
+        {canPlay && !activated ? (
+          // Facade: cover thumbnail + play overlay. Loads no media until clicked.
+          <button
+            type="button"
+            onClick={() => setActivated(true)}
+            aria-label={`Play ${platformLabel} video`}
+            className="absolute inset-0 w-full h-full group/play"
+          >
+            {previewSrc ? (
+              // eslint-disable-next-line jsx-a11y/img-redundant-alt
+              <img src={previewSrc} alt={advertiser} className="absolute inset-0 w-full h-full object-cover" loading="lazy" />
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <Flame size={22} className="text-white/15" />
+              </div>
+            )}
+            <div className="absolute inset-0 flex items-center justify-center bg-black/15 group-hover/play:bg-black/30 transition-colors">
+              <span className="flex items-center justify-center w-14 h-14 rounded-full bg-black/55 backdrop-blur border border-white/25 group-hover/play:scale-105 transition-transform">
+                <Play size={22} className="text-white translate-x-0.5" fill="currentColor" />
+              </span>
+            </div>
+          </button>
+        ) : canPlay && activated ? (
+          activePlayerUrl ? (
+            <iframe
+              src={activePlayerUrl}
+              title={`${platformLabel} — ${advertiser}`}
+              className="absolute inset-0 w-full h-full border-0"
+              allow="autoplay; encrypted-media; fullscreen; picture-in-picture; clipboard-write"
+              allowFullScreen
+              referrerPolicy="strict-origin-when-cross-origin"
+            />
+          ) : (
+            <video
+              src={videoUrl ?? undefined}
+              poster={previewSrc}
+              autoPlay
+              controls
+              playsInline
+              onError={() => setVideoFailed(true)}
+              className="absolute inset-0 w-full h-full object-cover bg-black"
+            />
+          )
+        ) : videoUrl ? (
+          <video
+            src={videoUrl}
+            poster={thumb ?? undefined}
+            controls
+            playsInline
+            preload="metadata"
+            className={`w-full h-auto ${mediaMaxH} object-contain bg-black block`}
+          />
+        ) : thumb ? (
+          // eslint-disable-next-line jsx-a11y/img-redundant-alt
+          <img
+            src={thumb}
+            alt={advertiser}
+            className={`w-full h-auto ${mediaMaxH} object-contain bg-black block`}
+            loading="lazy"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center">
+            {card.item.itemType === "ad" ? (
+              <Megaphone size={22} className="text-white/15" />
+            ) : (
+              <Flame size={22} className="text-white/15" />
+            )}
+          </div>
+        )}
+        {/* format + traction chips */}
+        <div className="absolute top-2 left-2 flex items-center gap-1.5 pointer-events-none">
+          {format && (
+            <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-black/60 text-white/70 backdrop-blur">
+              {format}
+            </span>
+          )}
+        </div>
+        {tractionBits.length > 0 && (
+          // Pin traction to the top-right for any player (video or embed) so it
+          // clears the control bar along the bottom edge; bottom-left for statics.
+          <div
+            className={`absolute ${
+              videoUrl || embedUrl ? "top-2 right-2" : "bottom-2 left-2"
+            } flex items-center gap-1.5 pointer-events-none`}
+          >
+            {tractionBits.map((t, i) => {
+              const TIcon = t.icon;
+              return (
+                <span
+                  key={i}
+                  className="flex items-center gap-1 text-[9px] font-mono px-1.5 py-0.5 rounded bg-black/60 text-white/75 backdrop-blur"
+                >
+                  <TIcon size={9} /> {t.label}
+                </span>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Body */}
+      <div className="p-3 space-y-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${a.dot}`} />
+          <span className="text-[11px] font-medium text-white/75 truncate">{advertiser}</span>
+          {handle && <span className="text-[10px] font-mono text-white/30 truncate">{handle}</span>}
+          <div className="ml-auto shrink-0 flex items-center gap-2">
+            {adLibraryUrl && (
+              <a
+                href={adLibraryUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1 text-[9px] font-mono text-white/30 hover:text-cyan-300 transition-colors"
+                title="View in Meta Ad Library"
+              >
+                <ExternalLink size={11} /> Ad Library
+              </a>
+            )}
+            {isOrganic && organic?.postUrl ? (
+              <a
+                href={organic.postUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1 text-[9px] font-mono text-white/30 hover:text-cyan-300 transition-colors"
+                title={`View original post on ${platformLabel}`}
+              >
+                <ExternalLink size={11} /> {platformLabel}
+              </a>
+            ) : sourceUrl ? (
+              <a
+                href={sourceUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-white/25 hover:text-white/60 transition-colors"
+                title="Open source"
+              >
+                <ArrowUpRight size={13} />
+              </a>
+            ) : null}
+          </div>
+        </div>
+
+        {hook && <p className="text-[12px] leading-snug text-white/90 font-medium line-clamp-3">{hook}</p>}
+        {body && <p className="text-[11px] leading-snug text-white/45 line-clamp-3">{body}</p>}
+
+        {item.matchedKeywords && item.matchedKeywords.length > 0 && (
+          <div className="flex flex-wrap gap-1 pt-0.5">
+            {item.matchedKeywords.slice(0, 4).map((kw, i) => (
+              <span
+                key={i}
+                className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-white/[0.04] text-white/40 border border-white/[0.06]"
+              >
+                {kw}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Actions */}
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            onClick={onMakeItMine}
+            disabled={disabled}
+            className={`flex-1 flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border ${a.chip} hover:brightness-125 transition-all disabled:opacity-40`}
+          >
+            {busy ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
+            Make it mine
+          </button>
+          <button
+            onClick={onSkip}
+            disabled={disabled}
+            className="flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/40 hover:text-white/70 hover:bg-white/[0.05] transition-all disabled:opacity-40"
+            title="Skip"
+          >
+            <SkipForward size={12} />
+          </button>
+        </div>
+      </div>
+    </motion.article>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Idea card (LLM-generated)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function IdeaCardView({
+  idea,
+  busy,
+  disabled,
+  onSave,
+  onSkip,
+}: {
+  idea: AdConsoleIdea;
+  busy: boolean;
+  disabled: boolean;
+  onSave: () => void;
+  onSkip: () => void;
+}) {
+  const a = ACCENT.violet;
+  return (
+    <motion.article
+      layout
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, x: 40, transition: { duration: 0.18 } }}
+      className="rounded-lg border border-violet-500/15 bg-[#0D0F12] overflow-hidden"
+    >
+      <div className="p-3 space-y-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {idea.format && (
+            <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-300 border border-violet-500/20">
+              {idea.format}
+            </span>
+          )}
+          {idea.angle && (
+            <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/[0.04] text-white/40 border border-white/[0.06]">
+              {idea.angle}
+            </span>
+          )}
+        </div>
+
+        {idea.title && <h3 className="text-[12px] font-semibold text-white/85">{idea.title}</h3>}
+        {idea.hook && (
+          <p className="text-[12px] leading-snug text-white/90 font-medium italic">“{idea.hook}”</p>
+        )}
+        {idea.concept && <p className="text-[11px] leading-snug text-white/50 line-clamp-4">{idea.concept}</p>}
+
+        {idea.rationale && (
+          <div className="flex items-start gap-1.5 pt-0.5">
+            <Lightbulb size={11} className="text-violet-300/60 shrink-0 mt-0.5" />
+            <p className="text-[10px] leading-snug text-white/35 font-mono line-clamp-3">{idea.rationale}</p>
+          </div>
+        )}
+
+        {idea.sourceRefs && idea.sourceRefs.length > 0 && (
+          <div className="flex flex-wrap gap-1 pt-0.5">
+            {idea.sourceRefs.slice(0, 3).map((ref, i) => (
+              <span
+                key={i}
+                className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-white/[0.04] text-white/40 border border-white/[0.06]"
+                title={ref.note ?? undefined}
+              >
+                {ref.ref ?? ref.type ?? "source"}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Actions */}
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            onClick={onSave}
+            disabled={disabled}
+            className={`flex-1 flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border ${a.chip} hover:brightness-125 transition-all disabled:opacity-40`}
+          >
+            {busy ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+            Save idea
+          </button>
+          <button
+            onClick={onSkip}
+            disabled={disabled}
+            className="flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/40 hover:text-white/70 hover:bg-white/[0.05] transition-all disabled:opacity-40"
+            title="Skip"
+          >
+            <SkipForward size={12} />
+          </button>
+        </div>
+      </div>
+    </motion.article>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Creative Brief modal (Make-it-mine handoff)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function BriefModal({
+  brief,
+  onClose,
+  onOpenApp,
+}: {
+  brief: AdConsoleCreativeBrief;
+  onClose: () => void;
+  onOpenApp: (path: string) => void;
+}) {
+  const app = RECREATION_APP[brief.suggestedApp];
+  const thumb = brief.thumbnailUrl ?? brief.referenceMediaUrls[0] ?? null;
+  const body = brief.copy ?? brief.caption ?? brief.transcript ?? brief.sourceCopy ?? null;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <motion.div
+        initial={{ opacity: 0, scale: 0.96, y: 10 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96, y: 10 }}
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-lg rounded-xl border border-white/10 bg-[#0D0F12] shadow-2xl overflow-hidden"
+      >
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Wand2 size={16} className="text-cyan-400" />
+            <h3 className="text-sm font-semibold text-white/90">Creative Brief</h3>
+          </div>
+          <button onClick={onClose} className="text-white/30 hover:text-white/70 transition-colors">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
+          <div className="flex gap-4">
+            {thumb && (
+              <div className="w-24 h-24 rounded-lg overflow-hidden bg-white/[0.03] border border-white/[0.06] shrink-0">
+                <img src={thumb} alt={brief.advertiserName ?? "reference"} className="w-full h-full object-cover" />
+              </div>
+            )}
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/[0.05] text-white/60 border border-white/[0.08]">
+                  {brief.format}
+                </span>
+                {brief.tractionBadge && (
+                  <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+                    {brief.tractionBadge}
+                  </span>
+                )}
+              </div>
+              {brief.advertiserName && (
+                <p className="text-[12px] text-white/70 truncate">{brief.advertiserName}</p>
+              )}
+              {brief.hook && <p className="text-[13px] text-white/90 font-medium leading-snug">{brief.hook}</p>}
+            </div>
+          </div>
+
+          {body && (
+            <div>
+              <p className="text-[10px] font-mono uppercase tracking-wider text-white/30 mb-1">Reference copy</p>
+              <p className="text-[12px] text-white/60 leading-relaxed whitespace-pre-wrap line-clamp-[8]">{body}</p>
+            </div>
+          )}
+
+          {brief.matchedKeywords.length > 0 && (
+            <div>
+              <p className="text-[10px] font-mono uppercase tracking-wider text-white/30 mb-1.5">Matched keywords</p>
+              <div className="flex flex-wrap gap-1">
+                {brief.matchedKeywords.slice(0, 8).map((kw, i) => (
+                  <span
+                    key={i}
+                    className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-300/80 border border-cyan-500/20"
+                  >
+                    {kw}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 flex items-center gap-2">
+            <ExternalLink size={13} className="text-cyan-400 shrink-0" />
+            <p className="text-[11px] font-mono text-white/50">
+              Routes into <span className="text-white/80">{app.label}</span>
+            </p>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-4 border-t border-white/[0.06] flex items-center justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-3 py-2 rounded-lg text-xs font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/50 hover:text-white/80 transition-all"
+          >
+            Close
+          </button>
+          <button
+            onClick={() => onOpenApp(app.path)}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-mono tracking-wide border border-cyan-500/40 bg-cyan-500/15 text-cyan-200 hover:bg-cyan-500/25 transition-all"
+          >
+            Open {app.label}
+            <ArrowUpRight size={13} />
+          </button>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Setup panel — niche + competitor watchlist
+// ─────────────────────────────────────────────────────────────────────────────
+
+function SetupPanel({
+  brandId,
+  niche,
+  nicheLabel,
+  competitors,
+  keywordSetCount,
+  bootstrapping,
+  onCompetitorsChange,
+  onFeedRanked,
+  onNotice,
+}: {
+  brandId: string;
+  niche: AdConsoleNicheState | null;
+  nicheLabel: string | null;
+  competitors: AdConsoleCompetitor[];
+  keywordSetCount: number | null;
+  /** True while the background bootstrap (niche + competitors + keywords) runs. */
+  bootstrapping: boolean;
+  onCompetitorsChange: () => Promise<void>;
+  onFeedRanked: () => Promise<void>;
+  onNotice: (n: Notice) => void;
+}) {
+  const [ranking, setRanking] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newFb, setNewFb] = useState("");
+  const [rowBusy, setRowBusy] = useState<string | null>(null);
+
+  const active = competitors.filter((c) => c.status === "active");
+  const archived = competitors.filter((c) => c.status !== "active");
+
+  async function handleRank() {
+    if (ranking) return;
+    setRanking(true);
+    try {
+      const summary = await rankAdConsoleFeed(brandId);
+      await onFeedRanked();
+      onNotice({
+        kind: "success",
+        text: `Re-ranked: ${summary.competitorAds.ranked} ads + ${summary.trendingOrganic.ranked} posts.`,
+      });
+    } catch (err) {
+      onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setRanking(false);
+    }
+  }
+
+  async function handleAdd() {
+    const name = newName.trim();
+    if (!name || adding) return;
+    setAdding(true);
+    try {
+      await addAdConsoleCompetitor(brandId, { name, fbPageUrl: newFb.trim() || null });
+      setNewName("");
+      setNewFb("");
+      await onCompetitorsChange();
+      onNotice({ kind: "success", text: `Added ${name} to the watchlist.` });
+    } catch (err) {
+      onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function handleArchiveToggle(c: AdConsoleCompetitor) {
+    if (rowBusy) return;
+    setRowBusy(c.id);
+    try {
+      await updateAdConsoleCompetitor(c.id, { status: c.status === "active" ? "archived" : "active" });
+      await onCompetitorsChange();
+    } catch (err) {
+      onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setRowBusy(null);
+    }
+  }
+
+  async function handleDelete(c: AdConsoleCompetitor) {
+    if (rowBusy) return;
+    setRowBusy(c.id);
+    try {
+      await deleteAdConsoleCompetitor(c.id);
+      await onCompetitorsChange();
+    } catch (err) {
+      onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setRowBusy(null);
+    }
+  }
+
+  return (
+    <div className="mb-5 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 grid gap-5 md:grid-cols-2">
+      {/* Niche + signal */}
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <Radar size={13} className="text-cyan-400" />
+          <h3 className="text-[11px] font-mono uppercase tracking-wider text-white/50">Niche &amp; signal</h3>
+        </div>
+        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] text-white/40 font-mono">Niche</span>
+            <span className="text-[12px] text-white/80 flex items-center gap-1.5">
+              {nicheLabel ? (
+                <>
+                  {nicheLabel}
+                  {niche?.seeded && <span className="text-[9px] text-emerald-400/70 font-mono">seeded</span>}
+                </>
+              ) : bootstrapping ? (
+                <span className="flex items-center gap-1.5 text-cyan-300/80">
+                  <Loader2 size={11} className="animate-spin" /> Auto-detecting…
+                </span>
+              ) : (
+                "Not detected"
+              )}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] text-white/40 font-mono">Keyword sets</span>
+            <span className="text-[12px] text-white/80">{keywordSetCount ?? 0} angle{keywordSetCount === 1 ? "" : "s"}</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => void handleRank()}
+            disabled={ranking}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/50 hover:text-white/80 transition-all disabled:opacity-50"
+          >
+            {ranking ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+            Re-rank feed
+          </button>
+        </div>
+        <p className="text-[10px] text-white/25 font-mono leading-relaxed">
+          Niche, competitors &amp; angle keywords are detected automatically in the background — they sharpen which ads &amp; posts rank into your feed.
+        </p>
+      </div>
+
+      {/* Competitors */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Megaphone size={13} className="text-indigo-300" />
+            <h3 className="text-[11px] font-mono uppercase tracking-wider text-white/50">
+              Competitor watchlist
+              <span className="ml-1.5 text-white/30">({active.length})</span>
+            </h3>
+          </div>
+          {bootstrapping && (
+            <span className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-mono tracking-wide border border-indigo-500/20 bg-indigo-500/[0.06] text-indigo-200/80">
+              <Loader2 size={11} className="animate-spin" /> Auto-researching…
+            </span>
+          )}
+        </div>
+
+        {/* Add form */}
+        <div className="flex items-center gap-1.5">
+          <input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void handleAdd();
+            }}
+            placeholder="Competitor name"
+            className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-white/[0.03] border border-white/[0.08] text-[11px] text-white/80 placeholder:text-white/25 focus:outline-none focus:border-cyan-500/40"
+          />
+          <input
+            value={newFb}
+            onChange={(e) => setNewFb(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void handleAdd();
+            }}
+            placeholder="FB page URL (optional)"
+            className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-white/[0.03] border border-white/[0.08] text-[11px] text-white/80 placeholder:text-white/25 focus:outline-none focus:border-cyan-500/40"
+          />
+          <button
+            onClick={() => void handleAdd()}
+            disabled={adding || !newName.trim()}
+            className="shrink-0 flex items-center justify-center w-8 h-8 rounded-lg border border-cyan-500/30 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/20 transition-all disabled:opacity-40"
+            title="Add competitor"
+          >
+            {adding ? <Loader2 size={13} className="animate-spin" /> : <Plus size={14} />}
+          </button>
+        </div>
+
+        {/* List */}
+        <div className="space-y-1 max-h-56 overflow-y-auto pr-1">
+          {active.length === 0 && archived.length === 0 ? (
+            <p className="text-[11px] text-white/30 font-mono py-3 text-center">
+              {bootstrapping ? "Auto-researching competitors…" : "No competitors yet — add one above."}
+            </p>
+          ) : (
+            <>
+              {active.map((c) => (
+                <CompetitorRow
+                  key={c.id}
+                  c={c}
+                  busy={rowBusy === c.id}
+                  onArchive={() => void handleArchiveToggle(c)}
+                  onDelete={() => void handleDelete(c)}
+                />
+              ))}
+              {archived.length > 0 && (
+                <>
+                  <div className="text-[9px] font-mono uppercase tracking-wider text-white/20 px-1 pt-2 flex items-center gap-1">
+                    <ChevronDown size={10} /> Archived ({archived.length})
+                  </div>
+                  {archived.map((c) => (
+                    <CompetitorRow
+                      key={c.id}
+                      c={c}
+                      busy={rowBusy === c.id}
+                      onArchive={() => void handleArchiveToggle(c)}
+                      onDelete={() => void handleDelete(c)}
+                    />
+                  ))}
+                </>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CompetitorRow({
+  c,
+  busy,
+  onArchive,
+  onDelete,
+}: {
+  c: AdConsoleCompetitor;
+  busy: boolean;
+  onArchive: () => void;
+  onDelete: () => void;
+}) {
+  const dimmed = c.status !== "active";
+  return (
+    <div
+      className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-white/[0.05] bg-white/[0.02] ${
+        dimmed ? "opacity-50" : ""
+      }`}
+    >
+      <span className="text-[11px] text-white/75 truncate flex-1 min-w-0">{c.name}</span>
+      {c.source === "auto" && (
+        <span className="text-[8px] font-mono uppercase tracking-wider px-1 py-0.5 rounded bg-indigo-500/10 text-indigo-300/70 border border-indigo-500/20 shrink-0">
+          auto
+        </span>
+      )}
+      <button
+        onClick={onArchive}
+        disabled={busy}
+        className="shrink-0 text-white/25 hover:text-amber-300 transition-colors disabled:opacity-40"
+        title={dimmed ? "Reactivate" : "Archive"}
+      >
+        {busy ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} />}
+      </button>
+      <button
+        onClick={onDelete}
+        disabled={busy}
+        className="shrink-0 text-white/25 hover:text-rose-400 transition-colors disabled:opacity-40"
+        title="Delete"
+      >
+        <Trash2 size={12} />
+      </button>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Guard panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+function GuardPanel({
+  icon: Icon,
+  title,
+  body,
+}: {
+  icon: React.ElementType;
+  title: string;
+  body: string;
+}) {
+  return (
+    <div className="max-w-xl mx-auto mt-10 rounded-xl border border-white/[0.06] bg-white/[0.02] px-6 py-8 text-center">
+      <div className="w-12 h-12 rounded-xl bg-white/[0.03] border border-white/[0.06] flex items-center justify-center mx-auto mb-4">
+        <Icon size={20} className="text-white/30" />
+      </div>
+      <h2 className="text-sm font-semibold text-white/80">{title}</h2>
+      <p className="text-xs text-white/40 mt-2 leading-relaxed font-mono">{body}</p>
+    </div>
+  );
+}

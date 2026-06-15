@@ -1,0 +1,408 @@
+/**
+ * Ad Creative Console — relevance + dedup + composite ranking (Phase 5).
+ *
+ * Materializes the per-brand ranked queue (`feed_items`) from the two GLOBAL
+ * pools (`ad_creatives`, `organic_posts`). This is the "merged brand feed" of
+ * spec §5/§6: BRAND FEED = niche stream ∪ brand overlay → deduped → ranked.
+ *
+ * Pure + deterministic — NO Apify, NO LLM. `tractionScore` is already baked
+ * into the pooled rows (longevity for ads, views+engagement for organic). Here
+ * we add the BRAND-SPECIFIC half:
+ *   - relevance — lexical keyword-match strength of the item's text against the
+ *     brand's `keyword_extract` output (spec §7: keep it cheap). Two-word
+ *     keywords weigh more than broad one-word anchors.
+ *   - composite — weighted blend of traction · relevance · recency (weights
+ *     from the niche stream's tuned config, else the seed default).
+ *
+ * Two rails are produced here:
+ *   - `competitor_ads`   — ads from the brand's niche stream ∪ its competitors.
+ *   - `trending_organic` — organic posts from the brand's niche stream.
+ * The `weekly_ideas` rail is LLM-GENERATED (separate generator) — not pooled
+ * creatives — so it is intentionally NOT produced by this ranker.
+ *
+ * Re-ranking is idempotent: upsert on (brandId, refKey) refreshes the scores
+ * but PRESERVES the swipe `status`, so a re-rank never un-skips an item.
+ */
+import { and, desc, eq, inArray, or, type SQL } from "drizzle-orm";
+import { db, schema } from "./db.js";
+import { getBrandNicheState } from "./adConsoleNiche.js";
+import { DEFAULT_NICHE_CONFIG, type NicheStreamConfig } from "./nicheConfig.js";
+import type { AdCreative, FeedItem, NicheStream, OrganicPost } from "../db/schema.js";
+
+// Weighted keyword-match score saturates here (≈ this many two-word hits = 1.0).
+const RELEVANCE_SATURATION = 5;
+// Two-word phrases are specific signal; one-word anchors are broad — weigh less.
+const PHRASE_WEIGHT = 1;
+const WORD_WEIGHT = 0.4;
+// Recency decays linearly to 0 across this window. Wider than the organic
+// recency filter so a long-running (older) ad still earns partial recency while
+// its traction score carries the longevity signal.
+const RECENCY_WINDOW_DAYS = 180;
+const DAY_MS = 86_400_000;
+
+// Ads pulled from a RESEARCHED competitor's own ad-library page (competitorId
+// set) are the operator's primary target. Hard-tier them above niche-keyword-
+// discovered ads (whitelisting / affiliate pages, which lack a competitorId) by
+// adding a full point to the otherwise-0..1 composite — so the brand's actual
+// competitors sit on top, with quality still ordering within each tier.
+const COMPETITOR_AD_BOOST = 1;
+
+// Organic ranks on: relevance (which angle keyword SURFACED the clip — not its
+// caption) as the lead signal, then shares (the virality the operator cares
+// about), then recency.
+const ORGANIC_WEIGHTS: NicheStreamConfig["weights"] = { traction: 0.4, relevance: 0.5, recency: 0.1 };
+
+function toNum(v: unknown, fallback = 0): number {
+  if (typeof v === "number") return Number.isFinite(v) ? v : fallback;
+  if (typeof v === "string") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  }
+  return fallback;
+}
+
+function round4(n: number): number {
+  return Math.round(n * 10_000) / 10_000;
+}
+
+function clamp01(n: number): number {
+  return n < 0 ? 0 : n > 1 ? 1 : n;
+}
+
+function asStringArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+/** Lowercase + collapse to single-spaced, padded so single words match on word boundaries. */
+function normalizeHaystack(parts: (string | null | undefined)[]): string {
+  const joined = parts.filter(Boolean).join(" ").toLowerCase();
+  const cleaned = joined.replace(/[^a-z0-9#\s]/g, " ").replace(/\s+/g, " ").trim();
+  return ` ${cleaned} `;
+}
+
+/**
+ * Weighted lexical match of keyword list against a haystack. Two-word phrases
+ * must appear adjacent; one-word keywords must appear as a standalone token.
+ * Returns the distinct matched keywords + the summed weight.
+ */
+function matchKeywords(haystack: string, keywords: string[]): { matched: string[]; weighted: number } {
+  const matched: string[] = [];
+  let weighted = 0;
+  const seen = new Set<string>();
+  for (const raw of keywords) {
+    const kw = raw.toLowerCase().trim();
+    if (!kw || seen.has(kw)) continue;
+    seen.add(kw);
+    if (haystack.includes(` ${kw} `)) {
+      matched.push(kw);
+      weighted += kw.includes(" ") ? PHRASE_WEIGHT : WORD_WEIGHT;
+    }
+  }
+  return { matched, weighted };
+}
+
+function relevanceFromMatch(weighted: number): number {
+  return round4(clamp01(weighted / RELEVANCE_SATURATION));
+}
+
+/** Linear recency: 1.0 today → 0 at RECENCY_WINDOW_DAYS. Null date → neutral-low. */
+function recencyScore(date: Date | null | undefined): number {
+  if (!date) return 0.3;
+  const ageDays = (Date.now() - date.getTime()) / DAY_MS;
+  return round4(clamp01(1 - ageDays / RECENCY_WINDOW_DAYS));
+}
+
+function composite(traction: number, relevance: number, recency: number, w: NicheStreamConfig["weights"]): number {
+  return round4(w.traction * traction + w.relevance * relevance + w.recency * recency);
+}
+
+function resolveWeights(stream: NicheStream | null): NicheStreamConfig["weights"] {
+  const cfg = (stream?.config ?? null) as Partial<NicheStreamConfig> | null;
+  const w = cfg?.weights;
+  if (w && typeof w.traction === "number" && typeof w.relevance === "number" && typeof w.recency === "number") {
+    return w;
+  }
+  return DEFAULT_NICHE_CONFIG.weights;
+}
+
+export type FeedRankSummary = {
+  brandId: string;
+  niche: string | null;
+  seeded: boolean;
+  streamId: string | null;
+  competitorAds: { considered: number; ranked: number };
+  trendingOrganic: { considered: number; ranked: number };
+};
+
+type KeywordPools = {
+  /** Flat term list for AD copy matching (ads still score on their rich copy). */
+  ad: string[];
+  /** The brand's own problem/outcome angle phrases (lowercased) — top relevance. */
+  brandAngle: Set<string>;
+  /** The niche's seed problem-language terms (lowercased) — secondary relevance. */
+  niche: Set<string>;
+};
+
+/**
+ * Build the brand's relevance keyword sets.
+ *
+ * Ads keep copy-matching (`ad` = the unified problem/outcome pool) — ad copy is
+ * rich enough. Organic does NOT use captions at all; instead the ranker reads
+ * the `searchQuery` that surfaced each clip and looks it up here: a clip found
+ * by one of the brand's own angle phrases (`brandAngle`) is top-relevant; one
+ * found by a niche seed term (`niche`) is secondary.
+ */
+async function buildKeywordPools(brandId: string, stream: NicheStream | null): Promise<KeywordPools> {
+  const sets = await db
+    .select({
+      problem: schema.brandKeywordSets.problemKeywords,
+      outcome: schema.brandKeywordSets.outcomeKeywords,
+      status: schema.brandKeywordSets.status,
+    })
+    .from(schema.brandKeywordSets)
+    .where(eq(schema.brandKeywordSets.brandId, brandId));
+
+  const brandAngle = new Set<string>();
+  for (const s of sets) {
+    if (s.status !== "complete") continue;
+    for (const k of asStringArray(s.problem)) brandAngle.add(k.toLowerCase());
+    for (const k of asStringArray(s.outcome)) brandAngle.add(k.toLowerCase());
+  }
+
+  const niche = new Set<string>();
+  const streamKw = (stream?.keywords ?? {}) as { organic?: unknown };
+  for (const k of asStringArray(streamKw.organic)) niche.add(k.toLowerCase());
+  for (const k of asStringArray(stream?.painPointKeywords)) niche.add(k.toLowerCase());
+
+  const ad = Array.from(new Set<string>([...Array.from(brandAngle), ...Array.from(niche)]));
+  return { ad, brandAngle, niche };
+}
+
+/** Upsert one feed item, refreshing scores while preserving swipe status. */
+async function upsertFeedItem(row: {
+  brandId: string;
+  itemType: "ad" | "organic";
+  adCreativeId?: string;
+  organicPostId?: string;
+  rail: string;
+  refKey: string;
+  relevance: number;
+  composite: number;
+  matched: string[];
+}): Promise<void> {
+  await db
+    .insert(schema.feedItems)
+    .values({
+      brandId: row.brandId,
+      itemType: row.itemType,
+      adCreativeId: row.adCreativeId ?? null,
+      organicPostId: row.organicPostId ?? null,
+      rail: row.rail,
+      refKey: row.refKey,
+      relevanceScore: String(row.relevance),
+      compositeScore: String(row.composite),
+      matchedKeywords: row.matched,
+    })
+    .onConflictDoUpdate({
+      target: [schema.feedItems.brandId, schema.feedItems.refKey],
+      set: {
+        relevanceScore: String(row.relevance),
+        compositeScore: String(row.composite),
+        matchedKeywords: row.matched,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+/** Ads eligible for a brand: discovered via its niche stream OR its competitors. */
+async function loadEligibleAds(streamId: string | null, competitorIds: string[]): Promise<AdCreative[]> {
+  const conds: SQL[] = [];
+  if (streamId) conds.push(eq(schema.adCreatives.nicheStreamId, streamId));
+  if (competitorIds.length > 0) conds.push(inArray(schema.adCreatives.competitorId, competitorIds));
+  if (conds.length === 0) return [];
+  const where = conds.length === 1 ? conds[0] : or(...conds);
+  return db.select().from(schema.adCreatives).where(where);
+}
+
+/**
+ * Re-rank a brand's feed: score every eligible ad + organic post against the
+ * brand's keywords and upsert into `feed_items`. Returns counts per rail.
+ */
+export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
+  const state = await getBrandNicheState(brandId);
+  const stream = state.stream;
+  const streamId = stream?.id ?? null;
+  const weights = resolveWeights(stream);
+  const pools = await buildKeywordPools(brandId, stream);
+
+  // Brand overlay: this brand's competitors (any status — the ad was pulled
+  // while the competitor was active; archiving shouldn't drop already-pooled ads).
+  const competitorRows = await db
+    .select({ id: schema.competitors.id })
+    .from(schema.competitors)
+    .where(eq(schema.competitors.brandId, brandId));
+  const competitorIds = competitorRows.map((c) => c.id);
+
+  // ── competitor_ads rail ──
+  const ads = await loadEligibleAds(streamId, competitorIds);
+  let adsRanked = 0;
+  for (const ad of ads) {
+    const hay = normalizeHaystack([ad.copy, ad.advertiserName, ad.cta]);
+    const { matched, weighted } = matchKeywords(hay, pools.ad);
+    const relevance = relevanceFromMatch(weighted);
+    const traction = toNum(ad.tractionScore);
+    const recency = recencyScore(ad.adStop ?? ad.adStart ?? null);
+    // Hard-tier researched-competitor ads above niche-keyword ads (see boost doc).
+    const comp = composite(traction, relevance, recency, weights) + (ad.competitorId ? COMPETITOR_AD_BOOST : 0);
+    await upsertFeedItem({
+      brandId,
+      itemType: "ad",
+      adCreativeId: ad.id,
+      rail: "competitor_ads",
+      refKey: `ad:${ad.id}`,
+      relevance,
+      composite: comp,
+      matched,
+    });
+    adsRanked++;
+  }
+
+  // ── trending_organic rail ──
+  const organic: OrganicPost[] = streamId
+    ? await db.select().from(schema.organicPosts).where(eq(schema.organicPosts.nicheStreamId, streamId))
+    : [];
+  let organicRanked = 0;
+  for (const post of organic) {
+    // Eligibility (shares/duration for IG, bookmarks for TikTok) is enforced at
+    // ingest — everything in the pool already qualifies, so we just rank here.
+
+    // Relevance from PROVENANCE, never the caption: the search keyword that
+    // surfaced this clip. Found by one of the brand's own angle phrases ⇒ top;
+    // by a niche seed term ⇒ secondary; otherwise a small floor.
+    const foundQuery = String((post.rawJson as Record<string, unknown> | null)?.searchQuery ?? "")
+      .toLowerCase()
+      .trim();
+    const relevance = pools.brandAngle.has(foundQuery)
+      ? 1
+      : pools.niche.has(foundQuery)
+        ? 0.5
+        : foundQuery
+          ? 0.4
+          : 0.3;
+    // Traction = shares (the virality signal the operator ranks on): 100→0.25,
+    // 1K→0.5, 10K→0.75, 100K→1.0.
+    const shares = Math.max(0, post.shares ?? 0);
+    const traction = round4(clamp01((Math.log10(shares + 1) - 1) / 4));
+    const recency = recencyScore(post.postedAt ?? null);
+    const comp = composite(traction, relevance, recency, ORGANIC_WEIGHTS);
+    await upsertFeedItem({
+      brandId,
+      itemType: "organic",
+      organicPostId: post.id,
+      rail: "trending_organic",
+      refKey: `organic:${post.id}`,
+      relevance,
+      composite: comp,
+      matched: foundQuery ? [foundQuery] : [],
+    });
+    organicRanked++;
+  }
+
+  console.log(
+    `[ad-console] ranked feed for ${brandId} (niche=${state.nicheType ?? "none"}): ` +
+      `${adsRanked} ads, ${organicRanked} organic`,
+  );
+
+  return {
+    brandId,
+    niche: state.nicheType,
+    seeded: state.seeded,
+    streamId,
+    competitorAds: { considered: ads.length, ranked: adsRanked },
+    trendingOrganic: { considered: organic.length, ranked: organicRanked },
+  };
+}
+
+/** A feed item joined to whichever pooled row it references. */
+export type FeedCard = {
+  item: FeedItem;
+  ad: AdCreative | null;
+  organic: OrganicPost | null;
+};
+
+/**
+ * Read a brand's ranked feed, highest composite first. Defaults to the
+ * not-yet-actioned ("new") items the Console shows; pass `status` for the full
+ * log. Optionally filter by `rail`.
+ */
+export async function listBrandFeed(
+  brandId: string,
+  opts?: { rail?: string; status?: string; limit?: number },
+): Promise<FeedCard[]> {
+  const conds: SQL[] = [eq(schema.feedItems.brandId, brandId)];
+  conds.push(eq(schema.feedItems.status, opts?.status ?? "new"));
+  if (opts?.rail) conds.push(eq(schema.feedItems.rail, opts.rail));
+
+  const q = db
+    .select({
+      item: schema.feedItems,
+      ad: schema.adCreatives,
+      organic: schema.organicPosts,
+    })
+    .from(schema.feedItems)
+    .leftJoin(schema.adCreatives, eq(schema.feedItems.adCreativeId, schema.adCreatives.id))
+    .leftJoin(schema.organicPosts, eq(schema.feedItems.organicPostId, schema.organicPosts.id))
+    .where(and(...conds))
+    .orderBy(desc(schema.feedItems.compositeScore));
+
+  const rows = opts?.limit ? await q.limit(opts.limit) : await q;
+  return rows.map((r) => ({ item: r.item, ad: r.ad ?? null, organic: r.organic ?? null }));
+}
+
+/** Read ONE feed item (scoped to the brand) joined to its pooled row. */
+export async function getFeedCard(brandId: string, feedItemId: string): Promise<FeedCard | null> {
+  const [r] = await db
+    .select({
+      item: schema.feedItems,
+      ad: schema.adCreatives,
+      organic: schema.organicPosts,
+    })
+    .from(schema.feedItems)
+    .leftJoin(schema.adCreatives, eq(schema.feedItems.adCreativeId, schema.adCreatives.id))
+    .leftJoin(schema.organicPosts, eq(schema.feedItems.organicPostId, schema.organicPosts.id))
+    .where(and(eq(schema.feedItems.brandId, brandId), eq(schema.feedItems.id, feedItemId)))
+    .limit(1);
+  if (!r) return null;
+  return { item: r.item, ad: r.ad ?? null, organic: r.organic ?? null };
+}
+
+/** Flip a feed item's swipe status. Returns the updated row, or null if absent. */
+export async function setFeedItemStatus(
+  brandId: string,
+  feedItemId: string,
+  status: "new" | "selected" | "skipped",
+): Promise<FeedItem | null> {
+  const [row] = await db
+    .update(schema.feedItems)
+    .set({ status, updatedAt: new Date() })
+    .where(and(eq(schema.feedItems.brandId, brandId), eq(schema.feedItems.id, feedItemId)))
+    .returning();
+  return row ?? null;
+}
+
+/** Append a swipe event to the log (powers the UX + a future relevance loop). */
+export async function recordFeedEvent(input: {
+  brandId: string;
+  feedItemId: string;
+  userId: string | null;
+  event: "select" | "skip" | "revise" | "view";
+  metadata?: unknown;
+}): Promise<void> {
+  await db.insert(schema.feedEvents).values({
+    brandId: input.brandId,
+    feedItemId: input.feedItemId,
+    userId: input.userId,
+    event: input.event,
+    metadata: (input.metadata ?? null) as object | null,
+  });
+}

@@ -1587,3 +1587,502 @@ export function deployListicle(id: string): Promise<{
     {},
   );
 }
+
+// ---------- Ad Creative Console ----------
+//
+// Typed wrappers over /api/ad-console/* (managers + admins, any brand). The
+// types mirror the server rows verbatim, with the JSON-wire caveats: timestamps
+// and `numeric` score columns arrive as strings, `integer` columns as numbers,
+// and `jsonb` columns as their parsed shape. Every endpoint 401s when
+// unauthenticated and the credit-spending pulls 424 when Apify isn't configured.
+
+const AD_CONSOLE = "/api/ad-console";
+
+/**
+ * Route an organic thumbnail through our same-origin image proxy. Instagram's
+ * CDN serves covers with CORP `same-origin`, so a direct <img> renders black;
+ * the proxy re-serves the bytes from our origin. Pass-through for empty URLs.
+ */
+export function adConsoleImg(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  return `${AD_CONSOLE}/img?url=${encodeURIComponent(url)}`;
+}
+
+/** Shared niche_streams row — the broad-query/seed config for a niche. */
+export type AdConsoleNicheStream = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  niche: string;
+  displayName: string;
+  keywords: { adLibrary?: string[]; organic?: string[]; hashtags?: string[] } | null;
+  leadingAdvertisers: Array<{
+    name: string;
+    fbPageUrl?: string;
+    fbPageId?: string;
+    igHandle?: string;
+    tiktokHandle?: string;
+  }> | null;
+  painPointKeywords: string[] | null;
+  config: Record<string, unknown> | null;
+  lastRefreshedAt: string | null;
+};
+
+export type AdConsoleNicheState = {
+  nicheType: string | null;
+  seeded: boolean;
+  stream: AdConsoleNicheStream | null;
+};
+
+export type AdConsoleNicheClassification = {
+  niche: string;
+  confidence: number;
+  reasoning: string;
+  seeded: boolean;
+};
+
+/** Background "make the brand Console-ready" summary (niche + competitors + keywords). */
+export type AdConsoleBootstrapResult = {
+  brandId: string;
+  niche: string | null;
+  seeded: boolean;
+  competitorCount: number;
+  competitorsDiscovered: number;
+  keywords: { totalAngles: number; extracted: number; failed: number } | null;
+  steps: {
+    niche: "ok" | "skipped" | "failed";
+    competitors: "ok" | "skipped" | "failed";
+    keywords: "ok" | "skipped" | "failed";
+  };
+  errors: string[];
+};
+
+export type AdConsoleCompetitor = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  brandId: string;
+  name: string;
+  fbPageUrl: string | null;
+  fbPageId: string | null;
+  igHandle: string | null;
+  tiktokHandle: string | null;
+  source: "auto" | "manual";
+  status: "active" | "archived" | string;
+  discoveryReason: string | null;
+  dedupeKey: string;
+  createdBy: string | null;
+};
+
+export type AdConsoleKeywordSetStatus = "pending" | "running" | "complete" | "failed";
+
+export type AdConsoleKeywordSet = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  brandId: string;
+  productId: string | null;
+  angleId: string;
+  angleName: string | null;
+  problemKeywords: string[] | null;
+  outcomeKeywords: string[] | null;
+  productKeywords: string[] | null;
+  status: AdConsoleKeywordSetStatus;
+  error: string | null;
+  model: string | null;
+  promptVersion: string | null;
+};
+
+export type AdConsoleAdCreative = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  source: string;
+  externalId: string;
+  advertiserName: string | null;
+  pageId: string | null;
+  pageUrl: string | null;
+  mediaUrls: string[] | null;
+  thumbnailUrl: string | null;
+  format: "static" | "video" | string | null;
+  copy: string | null;
+  cta: string | null;
+  landingUrl: string | null;
+  adStart: string | null;
+  adStop: string | null;
+  runtimeDays: number | null;
+  isActive: boolean | null;
+  variationCount: number | null;
+  /** `numeric` → string on the wire. */
+  tractionScore: string | null;
+  hook: string | null;
+  transcript: string | null;
+  nicheStreamId: string | null;
+  competitorId: string | null;
+  rawJson: unknown;
+};
+
+export type AdConsoleOrganicPost = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  source: "instagram" | "tiktok" | string;
+  externalId: string;
+  handle: string | null;
+  profileName: string | null;
+  postUrl: string | null;
+  mediaUrl: string | null;
+  thumbnailUrl: string | null;
+  caption: string | null;
+  hashtags: string[] | null;
+  views: number | null;
+  likes: number | null;
+  comments: number | null;
+  shares: number | null;
+  postedAt: string | null;
+  transcript: string | null;
+  format: string;
+  /** `numeric` → string on the wire. */
+  tractionScore: string | null;
+  hook: string | null;
+  nicheStreamId: string | null;
+  rawJson: unknown;
+};
+
+export type AdConsoleFeedItemStatus = "new" | "selected" | "skipped";
+export type AdConsoleRail = "competitor_ads" | "trending_organic" | "weekly_ideas";
+
+export type AdConsoleFeedItem = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  brandId: string;
+  itemType: "ad" | "organic";
+  adCreativeId: string | null;
+  organicPostId: string | null;
+  rail: AdConsoleRail;
+  refKey: string;
+  /** `numeric` → string on the wire. */
+  relevanceScore: string | null;
+  compositeScore: string | null;
+  matchedKeywords: string[] | null;
+  status: AdConsoleFeedItemStatus;
+  tier2Enriched: boolean;
+};
+
+/** One ranked feed card = the brand's feed_item joined to its pooled row. */
+export type AdConsoleFeedCard = {
+  item: AdConsoleFeedItem;
+  ad: AdConsoleAdCreative | null;
+  organic: AdConsoleOrganicPost | null;
+};
+
+export type AdConsoleRankSummary = {
+  brandId: string;
+  niche: string | null;
+  seeded: boolean;
+  streamId: string | null;
+  competitorAds: { considered: number; ranked: number };
+  trendingOrganic: { considered: number; ranked: number };
+};
+
+/** Per-scope counts from one Apify pull. */
+export type AdConsoleIngestResult = {
+  queriesRun: number;
+  itemsSeen: number;
+  inserted: number;
+  updated: number;
+  skipped: number;
+};
+
+export type AdConsoleAdIngestSummary = {
+  niche: string | null;
+  seeded: boolean;
+  nicheAds: AdConsoleIngestResult | null;
+  competitorAds: AdConsoleIngestResult | null;
+  competitorsPulled: number;
+};
+
+export type AdConsoleOrganicIngestSummary = {
+  niche: string | null;
+  seeded: boolean;
+  instagram: AdConsoleIngestResult | null;
+  tiktok: AdConsoleIngestResult | null;
+};
+
+/** Which recreation app a Creative Brief routes into (spec §11). */
+export type AdConsoleRecreationApp = "static_ads_recreator" | "script_rewriting";
+
+/** Normalized Creative Brief emitted on "Make it mine". */
+export type AdConsoleCreativeBrief = {
+  feedItemId: string;
+  sourceType: "ad" | "organic";
+  sourceId: string;
+  brandId: string;
+  productId: string | null;
+  niche: string | null;
+  format: string;
+  suggestedApp: AdConsoleRecreationApp;
+  referenceMediaUrls: string[];
+  thumbnailUrl: string | null;
+  sourceCopy: string | null;
+  copy: string | null;
+  caption: string | null;
+  transcript: string | null;
+  hook: string | null;
+  cta: string | null;
+  landingUrl: string | null;
+  advertiserName: string | null;
+  tractionBadge: string | null;
+  sourceUrl: string | null;
+  language: string;
+  matchedKeywords: string[];
+  brand: {
+    id: string;
+    name: string;
+    websiteUrl: string | null;
+    guidelinesMarkdown: string | null;
+  };
+};
+
+/** "Pull this week's feed" background-run snapshot (one per brand, in-memory). */
+type AdConsolePullStepStatus = "pending" | "running" | "complete" | "failed";
+type AdConsolePullStep<T> = { status: AdConsolePullStepStatus; summary: T | null; error: string | null };
+export type AdConsoleFeedPullRun = {
+  brandId: string;
+  status: "running" | "complete" | "failed";
+  startedAt: string;
+  finishedAt: string | null;
+  currentStep: "ads" | "organic" | "rank" | null;
+  steps: {
+    ads: AdConsolePullStep<AdConsoleAdIngestSummary>;
+    organic: AdConsolePullStep<AdConsoleOrganicIngestSummary>;
+    rank: AdConsolePullStep<AdConsoleRankSummary>;
+  };
+  error: string | null;
+};
+
+// ── Niche ──
+
+export function getAdConsoleNiche(brandId: string): Promise<AdConsoleNicheState> {
+  return get<AdConsoleNicheState>(`${AD_CONSOLE}/brands/${brandId}/niche`);
+}
+
+/**
+ * Fire the background bootstrap: auto-detect niche, auto-research competitors
+ * (when the watchlist is empty), and extract angle keywords. LLM-only — no
+ * Apify spend. Idempotent + server-deduped, safe to call on every Console load.
+ */
+export function bootstrapAdConsole(brandId: string): Promise<AdConsoleBootstrapResult> {
+  return post<AdConsoleBootstrapResult>(`${AD_CONSOLE}/brands/${brandId}/bootstrap`, {});
+}
+
+/** (Re)classify the brand's niche from its products + research. 424 if nothing to classify. */
+export function detectAdConsoleNiche(
+  brandId: string,
+): Promise<{ classification: AdConsoleNicheClassification; state: AdConsoleNicheState }> {
+  return post<{ classification: AdConsoleNicheClassification; state: AdConsoleNicheState }>(
+    `${AD_CONSOLE}/brands/${brandId}/detect-niche`,
+    {},
+  );
+}
+
+// ── Competitors ──
+
+export function listAdConsoleCompetitors(brandId: string): Promise<{ competitors: AdConsoleCompetitor[] }> {
+  return get<{ competitors: AdConsoleCompetitor[] }>(`${AD_CONSOLE}/brands/${brandId}/competitors`);
+}
+
+export function addAdConsoleCompetitor(
+  brandId: string,
+  input: {
+    name: string;
+    fbPageUrl?: string | null;
+    fbPageId?: string | null;
+    igHandle?: string | null;
+    tiktokHandle?: string | null;
+  },
+): Promise<{ competitor: AdConsoleCompetitor; created: boolean }> {
+  return post<{ competitor: AdConsoleCompetitor; created: boolean }>(
+    `${AD_CONSOLE}/brands/${brandId}/competitors`,
+    input,
+  );
+}
+
+/** LLM web_search discovery — only ADDS new competitors. 424 if no products / prompt missing. */
+export function discoverAdConsoleCompetitors(
+  brandId: string,
+): Promise<{ inserted: AdConsoleCompetitor[]; all: AdConsoleCompetitor[]; discovered: number }> {
+  return post<{ inserted: AdConsoleCompetitor[]; all: AdConsoleCompetitor[]; discovered: number }>(
+    `${AD_CONSOLE}/brands/${brandId}/competitors/discover`,
+    {},
+  );
+}
+
+export async function updateAdConsoleCompetitor(
+  id: string,
+  patch: {
+    name?: string;
+    fbPageUrl?: string | null;
+    fbPageId?: string | null;
+    igHandle?: string | null;
+    tiktokHandle?: string | null;
+    status?: "active" | "archived" | string;
+  },
+): Promise<{ competitor: AdConsoleCompetitor }> {
+  const res = await fetch(`${AD_CONSOLE}/competitors/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const payload = (await res.json().catch(() => ({}))) as { competitor: AdConsoleCompetitor } | ApiError;
+  if (!res.ok) throw new ApiCallError(res.status, payload as ApiError);
+  return payload as { competitor: AdConsoleCompetitor };
+}
+
+export function deleteAdConsoleCompetitor(id: string): Promise<{ ok: true }> {
+  return del<{ ok: true }>(`${AD_CONSOLE}/competitors/${id}`);
+}
+
+// ── Keyword sets (Phase 2) ──
+
+export function listAdConsoleKeywordSets(brandId: string): Promise<{ keywordSets: AdConsoleKeywordSet[] }> {
+  return get<{ keywordSets: AdConsoleKeywordSet[] }>(`${AD_CONSOLE}/brands/${brandId}/keyword-sets`);
+}
+
+/** Kick off keyword extraction for ONE angle. Returns the `running` row to poll. */
+export function extractAdConsoleKeywords(
+  brandId: string,
+  args: { productId: string; angleId: string },
+): Promise<{ keywordSet: AdConsoleKeywordSet }> {
+  return post<{ keywordSet: AdConsoleKeywordSet }>(`${AD_CONSOLE}/brands/${brandId}/keyword-sets`, args);
+}
+
+// ── Ingestion (Phase 3/4) — spends Apify credits, 424 if Apify unconfigured ──
+
+export function ingestAdConsoleAds(
+  brandId: string,
+  scope: "niche" | "competitors" | "all" = "all",
+): Promise<AdConsoleAdIngestSummary> {
+  return post<AdConsoleAdIngestSummary>(`${AD_CONSOLE}/brands/${brandId}/ingest-ads`, { scope });
+}
+
+export function ingestAdConsoleOrganic(
+  brandId: string,
+  scope: "instagram" | "tiktok" | "all" = "all",
+): Promise<AdConsoleOrganicIngestSummary> {
+  return post<AdConsoleOrganicIngestSummary>(`${AD_CONSOLE}/brands/${brandId}/ingest-organic`, { scope });
+}
+
+// ── Ranking + feed (Phase 5) ──
+
+/** Deterministic, no-credit re-rank of the brand's eligible pool into feed_items. */
+export function rankAdConsoleFeed(brandId: string): Promise<AdConsoleRankSummary> {
+  return post<AdConsoleRankSummary>(`${AD_CONSOLE}/brands/${brandId}/rank-feed`, {});
+}
+
+export function getAdConsoleFeed(
+  brandId: string,
+  opts?: { rail?: AdConsoleRail; status?: AdConsoleFeedItemStatus; limit?: number },
+): Promise<{ feed: AdConsoleFeedCard[] }> {
+  const params = new URLSearchParams();
+  if (opts?.rail) params.set("rail", opts.rail);
+  if (opts?.status) params.set("status", opts.status);
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  return get<{ feed: AdConsoleFeedCard[] }>(
+    `${AD_CONSOLE}/brands/${brandId}/feed${qs ? `?${qs}` : ""}`,
+  );
+}
+
+// ── Make-it-mine / Skip (Phase 6) ──
+
+export function selectAdConsoleFeedItem(
+  brandId: string,
+  feedItemId: string,
+): Promise<{ brief: AdConsoleCreativeBrief; item: AdConsoleFeedItem }> {
+  return post<{ brief: AdConsoleCreativeBrief; item: AdConsoleFeedItem }>(
+    `${AD_CONSOLE}/brands/${brandId}/feed/${feedItemId}/select`,
+    {},
+  );
+}
+
+export function skipAdConsoleFeedItem(brandId: string, feedItemId: string): Promise<{ ok: true }> {
+  return post<{ ok: true }>(`${AD_CONSOLE}/brands/${brandId}/feed/${feedItemId}/skip`, {});
+}
+
+// ── "Pull this week's feed" orchestration (Phase 6) ──
+
+/** Fire the chained ads → organic → rank pull. 424 if Apify unconfigured; poll status below. */
+export function startAdConsoleFeedPull(
+  brandId: string,
+): Promise<{ run: AdConsoleFeedPullRun; alreadyRunning: boolean }> {
+  return post<{ run: AdConsoleFeedPullRun; alreadyRunning: boolean }>(
+    `${AD_CONSOLE}/brands/${brandId}/pull-feed`,
+    {},
+  );
+}
+
+export function getAdConsoleFeedPullStatus(
+  brandId: string,
+): Promise<{ run: AdConsoleFeedPullRun | null }> {
+  return get<{ run: AdConsoleFeedPullRun | null }>(`${AD_CONSOLE}/brands/${brandId}/pull-feed/status`);
+}
+
+// ── This Week's Ideas (LLM-generated rail) ──
+
+export type AdConsoleIdeaSourceRef = { type: string | null; ref: string | null; note: string | null };
+
+/** One LLM-generated ad concept in the "This Week's Ideas" rail. */
+export type AdConsoleIdea = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  brandId: string;
+  batchId: string;
+  title: string | null;
+  hook: string | null;
+  concept: string | null;
+  format: "static" | "video" | "ugc" | string | null;
+  angle: string | null;
+  rationale: string | null;
+  sourceRefs: AdConsoleIdeaSourceRef[] | null;
+  status: AdConsoleFeedItemStatus;
+  model: string | null;
+  promptVersion: string | null;
+};
+
+export type AdConsoleIdeasSummary = {
+  brandId: string;
+  batchId: string;
+  generated: number;
+  grounding: { ads: number; organic: number };
+};
+
+/** The brand's newest idea batch. `includeActioned` adds selected/skipped cards. */
+export function getAdConsoleIdeas(
+  brandId: string,
+  opts?: { includeActioned?: boolean },
+): Promise<{ ideas: AdConsoleIdea[] }> {
+  const qs = opts?.includeActioned ? "?includeActioned=true" : "";
+  return get<{ ideas: AdConsoleIdea[] }>(`${AD_CONSOLE}/brands/${brandId}/ideas${qs}`);
+}
+
+/** Generate a fresh batch (one LLM call, no Apify credits). 424 if prompt unconfigured. */
+export function generateAdConsoleIdeas(
+  brandId: string,
+  count?: number,
+): Promise<{ summary: AdConsoleIdeasSummary; ideas: AdConsoleIdea[] }> {
+  return post<{ summary: AdConsoleIdeasSummary; ideas: AdConsoleIdea[] }>(
+    `${AD_CONSOLE}/brands/${brandId}/ideas/generate`,
+    count != null ? { count } : {},
+  );
+}
+
+export function selectAdConsoleIdea(brandId: string, ideaId: string): Promise<{ idea: AdConsoleIdea }> {
+  return post<{ idea: AdConsoleIdea }>(`${AD_CONSOLE}/brands/${brandId}/ideas/${ideaId}/select`, {});
+}
+
+export function skipAdConsoleIdea(brandId: string, ideaId: string): Promise<{ idea: AdConsoleIdea }> {
+  return post<{ idea: AdConsoleIdea }>(`${AD_CONSOLE}/brands/${brandId}/ideas/${ideaId}/skip`, {});
+}

@@ -27,6 +27,7 @@ import ListicleBuilderAppPage from "./pages/workspace/ListicleBuilderAppPage";
 import WorkflowsPage from "./pages/workspace/WorkflowsPage";
 import DFYWorkflowPage from "./pages/workspace/DFYWorkflowPage";
 import ClientConsolePage from "./pages/workspace/ClientConsolePage";
+import AdConsolePage from "./pages/workspace/AdConsolePage";
 import SettingsPage from "./pages/workspace/SettingsPage";
 import { AcceptInvitePage, LoginPage, RegisterPage } from "./pages/AuthPages";
 import ClientSharePage from "./pages/ClientSharePage";
@@ -96,6 +97,13 @@ function Router() {
           brand's DFY flag, so a hand-typed URL can't bypass the hidden nav. */}
       <Route path="/workspace/console">
         <RequireAuth><WorkspaceLayout><ClientConsolePage /></WorkspaceLayout></RequireAuth>
+      </Route>
+
+      {/* Ad Creative Console — competitor/trend research command center for the
+          active brand. Managers + admins, ANY brand (no DFY gate). The page
+          re-checks the role so a hand-typed URL can't bypass the hidden nav. */}
+      <Route path="/workspace/ad-console">
+        <RequireAuth><WorkspaceLayout><AdConsolePage /></WorkspaceLayout></RequireAuth>
       </Route>
 
       <Route path="/workspace/products/:id">

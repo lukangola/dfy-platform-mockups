@@ -9,7 +9,7 @@ import { Link, useLocation } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Package, Palette, LayoutGrid, ChevronLeft, ChevronRight,
-  Settings, HelpCircle, FolderOpen, Zap, LogOut, Crown, Shield, Headset,
+  Settings, HelpCircle, FolderOpen, Zap, LogOut, Crown, Shield, Headset, Radar,
 } from "lucide-react";
 import BrandSwitcher from "./BrandSwitcher";
 import { useAuth } from "@/contexts/AuthContext";
@@ -38,17 +38,36 @@ const CLIENT_CONSOLE_ITEM = {
   description: "Client share + feedback",
 };
 
+// Ad Creative Console is gated like the Client Console: managers/admins AND
+// only when the active brand is flagged a DFY client (toggled by an admin under
+// Settings → Clients). Sits with the other operator surfaces, after Apps.
+const AD_CONSOLE_ITEM = {
+  id: "ad-console",
+  label: "Ad Console",
+  icon: Radar,
+  path: "/workspace/ad-console",
+  description: "Competitor + trend command center",
+};
+
 export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
   const [location] = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const { user, role, logout } = useAuth();
   const { activeBrand } = useBrand();
 
-  const showClientConsole =
-    (role === "admin" || role === "manager") && Boolean(activeBrand?.isDfyClient);
-  const navItems = showClientConsole
-    ? [NAV_ITEMS[0], CLIENT_CONSOLE_ITEM, ...NAV_ITEMS.slice(1)]
-    : NAV_ITEMS;
+  const isManager = role === "admin" || role === "manager";
+  // Both manager consoles are DFY-only: shown to managers/admins only when the
+  // active brand is flagged a DFY client.
+  const showDfyConsoles = isManager && Boolean(activeBrand?.isDfyClient);
+  // Client Console sits right after Products; Ad Console sits after Apps.
+  const navItems = [
+    NAV_ITEMS[0], // Products
+    ...(showDfyConsoles ? [CLIENT_CONSOLE_ITEM] : []),
+    NAV_ITEMS[1], // Brand Info
+    NAV_ITEMS[2], // Apps
+    ...(showDfyConsoles ? [AD_CONSOLE_ITEM] : []),
+    ...NAV_ITEMS.slice(3), // Assets, Workflows
+  ];
 
   const isActive = (path: string) => location.startsWith(path);
   const settingsActive = location.startsWith("/workspace/settings");
