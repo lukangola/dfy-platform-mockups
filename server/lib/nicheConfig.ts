@@ -67,7 +67,7 @@ export type NicheSeed = {
 };
 
 const DEFAULT_CONFIG: NicheStreamConfig = {
-  weights: { traction: 0.5, relevance: 0.35, recency: 0.15 },
+  weights: { relevance: 0.5, traction: 0.35, recency: 0.15 },
   caps: {
     adsPerQuery: 40,
     organicPerQuery: 30,

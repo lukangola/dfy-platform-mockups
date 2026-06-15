@@ -29,6 +29,26 @@ import { getBrandNicheState } from "./adConsoleNiche.js";
 import { DEFAULT_NICHE_CONFIG, type NicheStreamConfig } from "./nicheConfig.js";
 import type { AdCreative, FeedItem, NicheStream, OrganicPost } from "../db/schema.js";
 
+// ── Ad traction sub-blend ────────────────────────────────────────────────────
+// gethookd's `performance_score` is its own quality composite, but we enrich it
+// with two always-present signals it under-weights:
+//   - LONGEVITY (days_active): the best available proxy for sustained ad spend.
+//     gethookd's actual spend field is populated for <20% of ads and only as a
+//     coarse "$0–500" band, so it's unusable — but an ad that's run 90+ days is
+//     one the advertiser keeps paying for, i.e. it works.
+//   - SCALING (used_count): an advertiser running many variants of one creative
+//     is scaling a proven winner.
+const TRACTION_PERF_W = 0.5;
+const TRACTION_LONGEVITY_W = 0.35;
+const TRACTION_SCALE_W = 0.15;
+const LONGEVITY_SATURATION_DAYS = 90; // 90+ days live ⇒ full longevity credit
+const VARIATION_SATURATION = 4; // used_count 5+ ⇒ full scaling credit
+
+// Pooled ads are here because they're in the brand's niche or from a tracked
+// competitor — a sparse-copy ad can still be relevant, so never disqualify it.
+// Keyword-copy matches score ABOVE this floor; researched competitors score 1.0.
+const RELEVANCE_FLOOR = 0.4;
+
 // Weighted keyword-match score saturates here (≈ this many two-word hits = 1.0).
 const RELEVANCE_SATURATION = 5;
 // Two-word phrases are specific signal; one-word anchors are broad — weigh less.
@@ -114,6 +134,18 @@ function recencyScore(date: Date | null | undefined): number {
 
 function composite(traction: number, relevance: number, recency: number, w: NicheStreamConfig["weights"]): number {
   return round4(w.traction * traction + w.relevance * relevance + w.recency * recency);
+}
+
+/**
+ * Ad traction = gethookd quality score + longevity (sustained-spend proxy) +
+ * scaling (variation count). Longevity/variation come from the pooled columns
+ * (`runtimeDays` = days_active, `variationCount` = used_count).
+ */
+function adTraction(ad: AdCreative): number {
+  const perf = clamp01(toNum(ad.tractionScore)); // gethookd performance_score / 100
+  const longevity = clamp01((ad.runtimeDays ?? 0) / LONGEVITY_SATURATION_DAYS);
+  const scale = clamp01(((ad.variationCount ?? 1) - 1) / VARIATION_SATURATION);
+  return round4(clamp01(TRACTION_PERF_W * perf + TRACTION_LONGEVITY_W * longevity + TRACTION_SCALE_W * scale));
 }
 
 function resolveWeights(stream: NicheStream | null): NicheStreamConfig["weights"] {
@@ -301,8 +333,10 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
   for (const ad of ads) {
     const hay = normalizeHaystack([ad.copy, ad.advertiserName, ad.cta]);
     const { matched, weighted } = matchKeywords(hay, pools.ad);
-    const relevance = relevanceFromMatch(weighted);
-    const traction = toNum(ad.tractionScore);
+    // A researched competitor's ad is relevant by definition; niche-discovered ads
+    // get a floor so a sparse-copy-but-relevant ad isn't buried by copy-matching.
+    const relevance = ad.competitorId ? 1 : Math.max(relevanceFromMatch(weighted), RELEVANCE_FLOOR);
+    const traction = adTraction(ad);
     const recency = recencyScore(ad.adStop ?? ad.adStart ?? null);
     // Hard-tier researched-competitor ads above niche-keyword ads (see boost doc).
     const comp = composite(traction, relevance, recency, weights) + (ad.competitorId ? COMPETITOR_AD_BOOST : 0);
