@@ -61,22 +61,25 @@ describe("GethookdClient.getRemainingCredits", () => {
 });
 
 describe("GethookdClient.addBrandSpy", () => {
-  it("resolves true on status 200", async () => {
+  it("resolves true on status 200 and posts the brand_id as a NUMBER (internal id)", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
     const c = new GethookdClient({ apiKey: "k", baseUrl: "https://api.test", fetchImpl });
-    await expect(c.addBrandSpy("brand123")).resolves.toBe(true);
+    await expect(c.addBrandSpy("849")).resolves.toBe(true);
+    // BrandSpy requires gethookd's internal numeric id — not the page external_id.
+    const body = JSON.parse(fetchImpl.mock.calls[0][1].body);
+    expect(body).toEqual({ brand_id: 849 });
   });
 
   it("resolves true on status 409 (already monitored)", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 409, json: async () => ({}) });
     const c = new GethookdClient({ apiKey: "k", baseUrl: "https://api.test", fetchImpl });
-    await expect(c.addBrandSpy("brand123")).resolves.toBe(true);
+    await expect(c.addBrandSpy("849")).resolves.toBe(true);
   });
 
   it("rejects with CreditExhaustedError on status 402", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 402, json: async () => ({}) });
     const c = new GethookdClient({ apiKey: "k", baseUrl: "https://api.test", fetchImpl });
-    await expect(c.addBrandSpy("brand123")).rejects.toBeInstanceOf(CreditExhaustedError);
+    await expect(c.addBrandSpy("849")).rejects.toBeInstanceOf(CreditExhaustedError);
   });
 });
 

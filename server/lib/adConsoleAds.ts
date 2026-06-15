@@ -233,20 +233,21 @@ export async function ingestNicheStreamAds(stream: NicheStream, brandQueries: st
 
   // Brand angle (problem/outcome) phrases first, then niche problem-language fill.
   const queries = dedupCI([...brandQueries, ...nicheOrganic, ...painPoints]).slice(0, caps.queriesPerPlatform);
-  const lookbackFrom = new Date(Date.now() - (caps.adLookbackDays ?? 365) * 86_400_000).toISOString();
 
-  // Phase 1: breadth via /explore. When there are no brand/niche phrases, run one
-  // niche-only sweep (query undefined).
+  // Phase 1: breadth via /explore, driven by the brand's angle phrases. gethookd's
+  // `niche` filter expects its own taxonomy — our raw niche string matches nothing
+  // and zeroes the whole result set — so we DON'T send it; relevance comes from the
+  // text `query`. When the brand has no angle phrases yet, fall back to searching
+  // the niche word itself as the query.
+  const sweepQueries = queries.length ? queries : stream.niche ? [stream.niche] : [];
   const prov: Provenance = { nicheStreamId: stream.id, competitorId: null };
   try {
-    for (const q of queries.length ? queries : [undefined]) {
+    for (const q of sweepQueries) {
       const res = await client.explore({
-        niche: stream.niche,
         query: q,
         location: DEFAULT_COUNTRY,
         performanceScores: ["winning", "scaling"],
         perPage: caps.adsPerQuery,
-        startDateFrom: lookbackFrom,
       });
       result.queriesRun++;
       await ingestAds(res.data, prov, caps, result);
@@ -257,32 +258,12 @@ export async function ingestNicheStreamAds(stream: NicheStream, brandQueries: st
     return result;
   }
 
-  // Phase 2: auto-leader core (free brands-by-category → ensure BrandSpy →
-  // top-ads). Per-leader try/catch so one BrandSpy plan cap / 500 doesn't abort
-  // the phase; a 402 stops the leader phase entirely.
-  try {
-    const leaders = await client.brandsByCategory(stream.niche, 10);
-    for (const leader of leaders.data) {
-      try {
-        await client.addBrandSpy(leader.external_id); // may THROW on a BrandSpy plan cap
-        const top = await client.brandTopAds(leader.external_id, 10);
-        result.queriesRun++;
-        await ingestAds(top.data, prov, caps, result);
-      } catch (e) {
-        if (e instanceof CreditExhaustedError) break;
-        // else: skip this leader (plan cap / transient), continue with the next.
-        console.warn(`[ad-console] niche leader "${leader.name}" skipped:`, e);
-      }
-    }
-  } catch (e) {
-    if (e instanceof CreditExhaustedError) {
-      console.warn(`[ad-console] niche-leader phase stopped early — gethookd credits exhausted`);
-    } else {
-      // Non-credit failure of the (free) category lookup — log and move on; the
-      // breadth phase already produced results.
-      console.warn(`[ad-console] niche-leader phase failed for "${stream.niche}":`, e);
-    }
-  }
+  // Phase 2 (auto-leader via brands-by-category) is DISABLED: gethookd's
+  // `parent_categories` taxonomy doesn't match our raw niche string, so it
+  // returns irrelevant brands (e.g. "Bank Repo Cars") — and BrandSpy slots are
+  // capped, so spying garbage brands burns the cap for no value. The breadth
+  // /explore phase above already populates the niche pool; named competitors are
+  // covered by ingestCompetitorAds. Re-enable once a real niche→category map exists.
 
   return result;
 }
@@ -306,7 +287,8 @@ export async function ingestCompetitorAds(competitor: Competitor, nicheStreamId:
       console.log(`[ad-console] no gethookd brand matched competitor "${competitor.name}"`);
       return result;
     }
-    brandId = match.external_id;
+    // BrandSpy + /brandspy/{id}/top-ads require gethookd's INTERNAL id, NOT external_id.
+    brandId = String(match.id);
     await db
       .update(schema.competitors)
       .set({ gethookdBrandId: brandId, updatedAt: new Date() })

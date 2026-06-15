@@ -78,6 +78,9 @@ export interface GethookdAd {
 }
 
 export interface GethookdBrand {
+  /** gethookd's INTERNAL brand id — the one BrandSpy + /brandspy/{id}/top-ads expect. */
+  id: number;
+  /** Platform (Meta) page id — NOT accepted by BrandSpy. */
   external_id: string;
   name: string;
   logo_url?: string;
@@ -135,7 +138,6 @@ export interface ExploreParams {
   sortColumn?: string;
   /** Omitted by default (API default ordering). */
   sortDirection?: "asc" | "desc";
-  startDateFrom?: string;
 }
 
 export class GethookdClient {
@@ -188,7 +190,6 @@ export class GethookdClient {
       per_page: p.perPage,
       sort_column: p.sortColumn,
       sort_direction: p.sortDirection,
-      start_date_from: p.startDateFrom,
     });
   }
 
@@ -237,7 +238,8 @@ export class GethookdClient {
     const res = await this.fetchImpl(this.baseUrl + "/api/v1/brandspy", {
       method: "POST",
       headers,
-      body: JSON.stringify({ brand_id: brandId }),
+      // brand_id must be gethookd's INTERNAL numeric id (NOT the page external_id).
+      body: JSON.stringify({ brand_id: Number(brandId) }),
     });
     if (res.status === 402) throw new CreditExhaustedError();
     if (!res.ok && res.status !== 409) throw new Error(`gethookd /api/v1/brandspy failed: ${res.status}`);
