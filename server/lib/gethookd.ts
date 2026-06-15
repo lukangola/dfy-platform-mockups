@@ -205,3 +205,63 @@ export function getGethookdClient(): GethookdClient {
   if (!env.GETHOOKD_API_KEY) throw new Error("GETHOOKD_API_KEY not set");
   return new GethookdClient({ apiKey: env.GETHOOKD_API_KEY, baseUrl: env.GETHOOKD_BASE_URL });
 }
+
+// ---------------------------------------------------------------------------
+// Ad normalization — field shape matches adConsoleAds.upsertAdCreative writes
+// ---------------------------------------------------------------------------
+
+// Shape matches the fields adConsoleAds.upsertAdCreative writes into schema.adCreatives.
+// NOTE: NormalizedFbAd (Facebook source) uses `raw` internally but upsertAdCreative
+// writes it as `rawJson` to the DB. For the gethookd source we store it as `rawJson`
+// directly so the gethookd-specific upsert (Task 4) can write ad.rawJson unchanged.
+// runtimeDays is included here because gethookd provides days_active directly,
+// whereas the FB path computes runtimeDays from adStart/adStop in upsertAdCreative.
+export interface NormalizedGethookdAd {
+  externalId: string;
+  advertiserName?: string;
+  pageId?: string;
+  pageUrl?: string;
+  mediaUrls: string[];
+  thumbnailUrl?: string;
+  format: "static" | "video";
+  copy?: string;
+  cta?: string;
+  landingUrl?: string;
+  adStart?: Date;
+  adStop?: Date;
+  runtimeDays?: number;
+  isActive: boolean;
+  variationCount?: number;
+  rawJson: GethookdAd;
+}
+
+export function normalizeGethookdAd(ad: GethookdAd): NormalizedGethookdAd {
+  const media = (ad.media ?? []).map((m) => m.url).filter((u): u is string => !!u);
+  const card = ad.ad_cards?.[0];
+  const isVideo = ad.display_format === "video" || ad.media?.[0]?.type === "video";
+  return {
+    externalId: ad.id,
+    advertiserName: ad.brand?.name,
+    pageId: ad.brand?.external_id,
+    pageUrl: ad.share_url,
+    mediaUrls: media,
+    thumbnailUrl: ad.media?.[0]?.thumbnail_url,
+    format: isVideo ? "video" : "static",
+    copy: card?.body ?? card?.caption,
+    cta: card?.cta_text,
+    landingUrl: ad.ad_cards?.find((c) => c.landing_page)?.landing_page,
+    adStart: ad.start_date ? new Date(ad.start_date) : undefined,
+    adStop: ad.end_date ? new Date(ad.end_date) : undefined,
+    runtimeDays: ad.days_active,
+    isActive: ad.active_in_library === 1,
+    variationCount: ad.used_count,
+    rawJson: ad,
+  };
+}
+
+/** gethookd performance_score (assume 0..10) → 0..1 traction. Replaces scoreAdLongevity. */
+export function scoreGethookdTraction(ad: GethookdAd): number {
+  // Divisor /10 assumes performance_score range is 0..10 — verify in Task 6 against live data.
+  const s = ad.performance_score ?? 0;
+  return Math.max(0, Math.min(1, s / 10));
+}

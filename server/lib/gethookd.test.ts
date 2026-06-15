@@ -44,3 +44,33 @@ describe("GethookdClient.addBrandSpy", () => {
     await expect(c.addBrandSpy("brand123")).rejects.toBeInstanceOf(CreditExhaustedError);
   });
 });
+
+import { normalizeGethookdAd, scoreGethookdTraction } from "./gethookd.js";
+
+const ad: GethookdAd = {
+  id: "9", performance_score: 9.2, performance_score_title: "winning", ad_spend_range_score_title: "$$$",
+  days_active: 84, used_count: 9, active_in_library: 0, start_date: "2026-01-01", end_date: "2026-03-26",
+  display_format: "video", page_type: "vsl_page", share_url: "https://s/9",
+  media: [{ type: "video", url: "https://v/9.mp4", thumbnail_url: "https://t/9.jpg" }],
+  ad_cards: [{ body: "B", cta_text: "Shop", landing_page: "https://lp/9" }],
+  brand: { external_id: "b1", name: "Acme" },
+};
+describe("normalizeGethookdAd", () => {
+  it("maps to the ad_creatives field shape", () => {
+    const n = normalizeGethookdAd(ad);
+    expect(n.externalId).toBe("9");
+    expect(n.advertiserName).toBe("Acme");
+    expect(n.format).toBe("video");
+    expect(n.mediaUrls).toEqual(["https://v/9.mp4"]);
+    expect(n.landingUrl).toBe("https://lp/9");
+    expect(n.isActive).toBe(false);
+    expect(n.runtimeDays).toBe(84);
+    expect(n.variationCount).toBe(9);
+  });
+});
+describe("scoreGethookdTraction", () => {
+  it("normalizes performance_score (0..10) to 0..1, dominant", () => {
+    expect(scoreGethookdTraction(ad)).toBeCloseTo(0.92, 2);
+    expect(scoreGethookdTraction({ id: "x" })).toBe(0);
+  });
+});
