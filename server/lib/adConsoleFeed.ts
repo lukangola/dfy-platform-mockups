@@ -61,10 +61,10 @@ const WORD_WEIGHT = 0.4;
 const RECENCY_WINDOW_DAYS = 180;
 const DAY_MS = 86_400_000;
 
-// Competitor-ad boost (added to the otherwise-0..1 composite). Set to 0 so the
-// competitor_ads rail sorts purely on relevance + traction + recency — competitor
-// and niche ads interleave by quality, no hard tier.
-const COMPETITOR_AD_BOOST = 0;
+// Competitor-ad boost (added to the otherwise-0..1 composite). A soft +0.3 keeps
+// the brand's researched competitors leading the rail while still letting a
+// standout niche ad interleave — not a hard tier.
+const COMPETITOR_AD_BOOST = 0.3;
 
 // Organic ranks 50/50 on relevance (which angle keyword SURFACED the clip — not
 // its caption) and traction (engagement-RATE + reach). Recency is not used.
