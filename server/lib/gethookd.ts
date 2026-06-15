@@ -23,7 +23,15 @@ export function isGethookdConfigured(): boolean {
 export type PerformanceTitle = "testing" | "scaling" | "winning" | "optimized";
 
 export interface GethookdAd {
-  id: string;
+  id: string | number;
+  external_id?: string;
+  title?: string;
+  body?: string;
+  link_description?: string | null;
+  cta_type?: string;
+  cta_text?: string;
+  landing_page?: string;
+  asset_type?: string;
   performance_score?: number;
   performance_score_title?: PerformanceTitle;
   ad_spend_range_score?: number;
@@ -37,6 +45,14 @@ export interface GethookdAd {
   display_format?: string;
   page_type?: string;
   share_url?: string;
+  primary_media?: {
+    type?: string;
+    url?: string;
+    resized_url?: string | null;
+    thumbnail_url?: string | null;
+    video_length?: number;
+  };
+  primary_image_url?: string;
   media?: {
     type?: string;
     url?: string;
@@ -103,9 +119,12 @@ export interface ExploreParams {
   performanceScores?: PerformanceTitle[];
   page?: number;
   perPage?: number;
-  /** Defaults to `"performance"` when omitted. */
+  /**
+   * Omitted by default (API default ordering). There is no performance sort
+   * column. Valid columns are `used_count` | `start_date` | `created_at`.
+   */
   sortColumn?: string;
-  /** Defaults to `"desc"` when omitted. */
+  /** Omitted by default (API default ordering). */
   sortDirection?: "asc" | "desc";
   startDateFrom?: string;
 }
@@ -158,8 +177,8 @@ export class GethookdClient {
       performance_scores: p.performanceScores?.join(","),
       page: p.page,
       per_page: p.perPage,
-      sort_column: p.sortColumn ?? "performance",
-      sort_direction: p.sortDirection ?? "desc",
+      sort_column: p.sortColumn,
+      sort_direction: p.sortDirection,
       start_date_from: p.startDateFrom,
     });
   }
@@ -236,20 +255,28 @@ export interface NormalizedGethookdAd {
 }
 
 export function normalizeGethookdAd(ad: GethookdAd): NormalizedGethookdAd {
-  const media = (ad.media ?? []).map((m) => m.url).filter((u): u is string => !!u);
   const card = ad.ad_cards?.[0];
-  const isVideo = ad.display_format === "video" || ad.media?.[0]?.type === "video";
+  const mappedMedia = (ad.media ?? []).map((m) => m.url).filter((u): u is string => !!u);
+  const media =
+    mappedMedia.length > 0
+      ? mappedMedia
+      : [ad.primary_media?.url ?? ad.primary_image_url].filter((u): u is string => typeof u === "string");
+  const isVideo =
+    ad.display_format === "video" ||
+    ad.asset_type === "video" ||
+    ad.media?.[0]?.type === "video" ||
+    ad.primary_media?.type === "video";
   return {
-    externalId: ad.id,
+    externalId: String(ad.id),
     advertiserName: ad.brand?.name,
     pageId: ad.brand?.external_id,
     pageUrl: ad.share_url,
     mediaUrls: media,
-    thumbnailUrl: ad.media?.[0]?.thumbnail_url,
+    thumbnailUrl: ad.media?.[0]?.thumbnail_url ?? ad.primary_media?.thumbnail_url ?? undefined,
     format: isVideo ? "video" : "static",
-    copy: card?.body ?? card?.caption,
-    cta: card?.cta_text,
-    landingUrl: ad.ad_cards?.find((c) => c.landing_page)?.landing_page,
+    copy: ad.body ?? card?.body ?? card?.caption ?? ad.title,
+    cta: ad.cta_text ?? card?.cta_text,
+    landingUrl: ad.landing_page ?? ad.ad_cards?.find((c) => c.landing_page)?.landing_page,
     adStart: ad.start_date ? new Date(ad.start_date) : undefined,
     adStop: ad.end_date ? new Date(ad.end_date) : undefined,
     runtimeDays: ad.days_active,
@@ -259,9 +286,15 @@ export function normalizeGethookdAd(ad: GethookdAd): NormalizedGethookdAd {
   };
 }
 
-/** gethookd performance_score (assume 0..10) → 0..1 traction. Replaces scoreAdLongevity. */
+/**
+ * gethookd performance_score → 0..1 traction. Replaces scoreAdLongevity.
+ *
+ * Verified live 2026-06-15: performance_score is a banded 0..100 score (NOT
+ * 0..10). Observed distinct values across 150 ads: 1 (Testing), 41 (Scaling),
+ * 61 (Growing), 81 (Optimized), 91 (Winning) — MIN 1, MAX 91. So we divide by
+ * 100 (e.g. 41 → 0.41, 91 → 0.91) and clamp to [0, 1].
+ */
 export function scoreGethookdTraction(ad: GethookdAd): number {
-  // Divisor /10 assumes performance_score range is 0..10 — verify in Task 6 against live data.
   const s = ad.performance_score ?? 0;
-  return Math.max(0, Math.min(1, s / 10));
+  return Math.max(0, Math.min(1, s / 100));
 }

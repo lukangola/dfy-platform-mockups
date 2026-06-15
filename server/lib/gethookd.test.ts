@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { GethookdClient, CreditExhaustedError } from "./gethookd.js";
+import { GethookdClient, CreditExhaustedError, type GethookdAd } from "./gethookd.js";
 
 describe("GethookdClient.explore", () => {
   it("builds the /explore URL with filters + bearer auth and parses credits", async () => {
@@ -15,6 +15,7 @@ describe("GethookdClient.explore", () => {
     expect(url).toContain("niche=skincare");
     expect(url).toContain("per_page=50");
     expect(url).toContain("performance_scores=winning%2Cscaling");
+    expect(url).not.toContain("sort_column");
     expect(fetchImpl.mock.calls[0][1].headers.Authorization).toBe("Bearer k");
     expect(res.credits).toEqual({ used: 0.5, remaining: 399.5 });
   });
@@ -47,30 +48,51 @@ describe("GethookdClient.addBrandSpy", () => {
 
 import { normalizeGethookdAd, scoreGethookdTraction } from "./gethookd.js";
 
+// Mirrors the REAL /explore shape: numeric id, top-level copy/cta/landing,
+// EMPTY ad_cards, 0..100 banded performance_score.
 const ad: GethookdAd = {
-  id: "9", performance_score: 9.2, performance_score_title: "winning", ad_spend_range_score_title: "$$$",
+  id: 9, title: "T", body: "B", cta_text: "Shop", landing_page: "https://lp/9",
+  performance_score: 91, performance_score_title: "winning", ad_spend_range_score_title: "$$$",
   days_active: 84, used_count: 9, active_in_library: 0, start_date: "2026-01-01", end_date: "2026-03-26",
-  display_format: "video", page_type: "vsl_page", share_url: "https://s/9",
+  display_format: "video", share_url: "https://s/9",
   media: [{ type: "video", url: "https://v/9.mp4", thumbnail_url: "https://t/9.jpg" }],
-  ad_cards: [{ body: "B", cta_text: "Shop", landing_page: "https://lp/9" }],
+  ad_cards: [],
   brand: { external_id: "b1", name: "Acme" },
 };
+
+// No top-level copy/cta/landing — these must fall back to ad_cards[0].
+const adCardsFallback: GethookdAd = {
+  id: 10, active_in_library: 1,
+  media: [{ type: "image", url: "https://i/10.jpg" }],
+  ad_cards: [{ body: "FB", cta_text: "Learn", landing_page: "https://lp/fb" }],
+};
+
 describe("normalizeGethookdAd", () => {
-  it("maps to the ad_creatives field shape", () => {
+  it("maps to the ad_creatives field shape (top-level copy/cta/landing)", () => {
     const n = normalizeGethookdAd(ad);
     expect(n.externalId).toBe("9");
     expect(n.advertiserName).toBe("Acme");
     expect(n.format).toBe("video");
     expect(n.mediaUrls).toEqual(["https://v/9.mp4"]);
+    expect(n.copy).toBe("B");
+    expect(n.cta).toBe("Shop");
     expect(n.landingUrl).toBe("https://lp/9");
     expect(n.isActive).toBe(false);
     expect(n.runtimeDays).toBe(84);
     expect(n.variationCount).toBe(9);
   });
+
+  it("falls back to ad_cards[0] when top-level copy/cta/landing are absent", () => {
+    const n = normalizeGethookdAd(adCardsFallback);
+    expect(n.copy).toBe("FB");
+    expect(n.cta).toBe("Learn");
+    expect(n.landingUrl).toBe("https://lp/fb");
+  });
 });
 describe("scoreGethookdTraction", () => {
-  it("normalizes performance_score (0..10) to 0..1, dominant", () => {
-    expect(scoreGethookdTraction(ad)).toBeCloseTo(0.92, 2);
+  it("normalizes performance_score (0..100) to 0..1, dominant", () => {
+    expect(scoreGethookdTraction(ad)).toBeCloseTo(0.91, 2);
     expect(scoreGethookdTraction({ id: "x" })).toBe(0);
+    expect(scoreGethookdTraction({ id: "y", performance_score: 150 })).toBe(1);
   });
 });
