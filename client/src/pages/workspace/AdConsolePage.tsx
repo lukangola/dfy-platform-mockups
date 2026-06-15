@@ -22,7 +22,7 @@ import { useLocation } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Radar, Loader2, ShieldAlert, Building2, RefreshCw, Sparkles, Settings2,
-  Plus, Trash2, Archive, ArrowUpRight, SkipForward, Wand2, Play,
+  Plus, Trash2, Archive, ArrowUpRight, Wand2, Play,
   Megaphone, Flame, Lightbulb, X, ExternalLink, Clock, Eye, Bookmark, Share2, Layers,
   CheckCircle2, AlertTriangle, ChevronDown,
 } from "lucide-react";
@@ -1058,12 +1058,12 @@ function FeedCardView({
           </div>
         )}
 
-        {/* Actions */}
-        <div className="flex items-center gap-2 pt-1">
+        {/* Actions — stacked full-width (matches the reference card) */}
+        <div className="flex flex-col gap-1.5 pt-1">
           <button
             onClick={onMakeItMine}
             disabled={disabled}
-            className={`flex-1 flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border ${a.chip} hover:brightness-125 transition-all disabled:opacity-40`}
+            className={`w-full flex items-center justify-center gap-1.5 px-2.5 py-2.5 rounded-lg text-[11px] font-mono tracking-wide border ${a.chip} hover:brightness-125 transition-all disabled:opacity-40`}
           >
             {busy ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
             Make it mine
@@ -1071,10 +1071,9 @@ function FeedCardView({
           <button
             onClick={onSkip}
             disabled={disabled}
-            className="flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/40 hover:text-white/70 hover:bg-white/[0.05] transition-all disabled:opacity-40"
-            title="Skip"
+            className="w-full flex items-center justify-center px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/40 hover:text-white/70 hover:bg-white/[0.05] transition-all disabled:opacity-40"
           >
-            <SkipForward size={12} />
+            Skip
           </button>
         </div>
       </div>
@@ -1149,12 +1148,12 @@ function IdeaCardView({
           </div>
         )}
 
-        {/* Actions */}
-        <div className="flex items-center gap-2 pt-1">
+        {/* Actions — stacked full-width (matches the reference card) */}
+        <div className="flex flex-col gap-1.5 pt-1">
           <button
             onClick={onSave}
             disabled={disabled}
-            className={`flex-1 flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border ${a.chip} hover:brightness-125 transition-all disabled:opacity-40`}
+            className={`w-full flex items-center justify-center gap-1.5 px-2.5 py-2.5 rounded-lg text-[11px] font-mono tracking-wide border ${a.chip} hover:brightness-125 transition-all disabled:opacity-40`}
           >
             {busy ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
             Save idea
@@ -1162,10 +1161,9 @@ function IdeaCardView({
           <button
             onClick={onSkip}
             disabled={disabled}
-            className="flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/40 hover:text-white/70 hover:bg-white/[0.05] transition-all disabled:opacity-40"
-            title="Skip"
+            className="w-full flex items-center justify-center px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/40 hover:text-white/70 hover:bg-white/[0.05] transition-all disabled:opacity-40"
           >
-            <SkipForward size={12} />
+            Skip
           </button>
         </div>
       </div>
