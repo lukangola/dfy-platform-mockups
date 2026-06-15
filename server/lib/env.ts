@@ -59,6 +59,10 @@ export const env = {
   // Apify API token — powers real Reddit harvesting for resonance mining.
   // When unset, the resonance miner falls back to the web_search path.
   APIFY_TOKEN: process.env.APIFY_TOKEN ?? "",
+  // gethookd ad-intelligence API — the Ad Console's competitor/niche ad source.
+  GETHOOKD_API_KEY: process.env.GETHOOKD_API_KEY ?? "",
+  GETHOOKD_BASE_URL: process.env.GETHOOKD_BASE_URL ?? "https://api.gethookd.ai",
+  GETHOOKD_CREDIT_RESERVE: Number(process.env.GETHOOKD_CREDIT_RESERVE ?? 50),
   DATABASE_URL: process.env.DATABASE_URL!,
   // Railway / Fly / Render / Heroku all inject `PORT`. Our existing dev
   // setup uses `API_PORT=3001`. Honor `PORT` first so the production host
