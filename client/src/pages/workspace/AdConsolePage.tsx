@@ -431,9 +431,12 @@ export default function AdConsolePage() {
 
   // ── Render ────────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen lg:h-screen lg:flex lg:flex-col lg:overflow-hidden">
       {/* Header */}
-      <div className="border-b border-white/[0.06] px-6 py-5 sticky top-0 z-20" style={{ background: "#0D0F12" }}>
+      <div
+        className="border-b border-white/[0.06] px-6 py-5 sticky top-0 z-20 lg:shrink-0"
+        style={{ background: "#0D0F12" }}
+      >
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-lg font-semibold text-white/90 flex items-center gap-2">
@@ -492,7 +495,7 @@ export default function AdConsolePage() {
         {isRunning(pullRun) && pullRun && <PullProgress run={pullRun} />}
       </div>
 
-      <div className="p-6">
+      <div className="p-6 lg:flex-1 lg:min-h-0 lg:flex lg:flex-col lg:overflow-hidden">
         {/* Notice banner */}
         <AnimatePresence>
           {notice && (
@@ -556,7 +559,7 @@ export default function AdConsolePage() {
                   initial={{ opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: "auto" }}
                   exit={{ opacity: 0, height: 0 }}
-                  className="overflow-hidden"
+                  className="overflow-hidden lg:shrink-0"
                 >
                   <SetupPanel
                     niche={niche}
@@ -573,8 +576,8 @@ export default function AdConsolePage() {
               )}
             </AnimatePresence>
 
-            {/* Three rails */}
-            <div className="grid gap-4 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1fr)] items-start">
+            {/* Three rails — each column scrolls independently on desktop */}
+            <div className="grid gap-4 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1fr)] items-start lg:items-stretch lg:flex-1 lg:min-h-0">
               {/* Competitor ads — left */}
               <Rail
                 icon={Megaphone}
@@ -734,6 +737,10 @@ const ACCENT: Record<Accent, { text: string; chip: string; ring: string; dot: st
   },
 };
 
+// The primary card action ("Make it mine" / "Save idea") is ONE consistent color
+// across every rail — not the per-rail accent — to match the reference card.
+const PRIMARY_ACTION_BTN = "bg-violet-500/15 text-violet-200 border-violet-500/30";
+
 function Rail({
   icon: Icon,
   accent,
@@ -756,10 +763,10 @@ function Rail({
   const a = ACCENT[accent];
   return (
     <section
-      className={`rounded-xl border ${a.ring} bg-white/[0.02] ${hero ? "lg:bg-white/[0.03]" : ""} flex flex-col`}
+      className={`rounded-xl border ${a.ring} bg-white/[0.02] ${hero ? "lg:bg-white/[0.03]" : ""} flex flex-col lg:h-full lg:min-h-0 lg:overflow-hidden`}
     >
       {/* Rail header */}
-      <header className="px-4 py-3 border-b border-white/[0.06] flex items-center gap-2.5">
+      <header className="px-4 py-3 border-b border-white/[0.06] flex items-center gap-2.5 lg:shrink-0">
         <div className={`w-7 h-7 rounded-lg border ${a.ring} bg-white/[0.03] flex items-center justify-center shrink-0`}>
           <Icon size={14} className={a.text} />
         </div>
@@ -772,8 +779,8 @@ function Rail({
         </div>
       </header>
 
-      {/* Cards */}
-      <div className="p-3 space-y-3">
+      {/* Cards — scroll within the column on desktop */}
+      <div className="p-3 space-y-3 lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
         {count === 0 ? (
           <div className="px-3 py-10 text-center text-[11px] text-white/30 font-mono leading-relaxed">{empty}</div>
         ) : (
@@ -1063,7 +1070,7 @@ function FeedCardView({
           <button
             onClick={onMakeItMine}
             disabled={disabled}
-            className={`w-full flex items-center justify-center gap-1.5 px-2.5 py-2.5 rounded-lg text-[11px] font-mono tracking-wide border ${a.chip} hover:brightness-125 transition-all disabled:opacity-40`}
+            className={`w-full flex items-center justify-center gap-1.5 px-2.5 py-2.5 rounded-lg text-[11px] font-mono tracking-wide border ${PRIMARY_ACTION_BTN} hover:brightness-125 transition-all disabled:opacity-40`}
           >
             {busy ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
             Make it mine
@@ -1153,7 +1160,7 @@ function IdeaCardView({
           <button
             onClick={onSave}
             disabled={disabled}
-            className={`w-full flex items-center justify-center gap-1.5 px-2.5 py-2.5 rounded-lg text-[11px] font-mono tracking-wide border ${a.chip} hover:brightness-125 transition-all disabled:opacity-40`}
+            className={`w-full flex items-center justify-center gap-1.5 px-2.5 py-2.5 rounded-lg text-[11px] font-mono tracking-wide border ${PRIMARY_ACTION_BTN} hover:brightness-125 transition-all disabled:opacity-40`}
           >
             {busy ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
             Save idea
