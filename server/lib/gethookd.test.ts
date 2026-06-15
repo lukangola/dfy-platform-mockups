@@ -24,6 +24,40 @@ describe("GethookdClient.explore", () => {
     const c = new GethookdClient({ apiKey: "k", baseUrl: "https://api.test", fetchImpl });
     await expect(c.explore({ niche: "x" })).rejects.toBeInstanceOf(CreditExhaustedError);
   });
+  it("parses string remaining_credits into a number", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [], used_credits: 0.01, remaining_credits: "397.96" }),
+    });
+    const c = new GethookdClient({ apiKey: "k", baseUrl: "https://api.test", fetchImpl });
+    const res = await c.explore({ perPage: 1 });
+    expect(res.credits).toEqual({ used: 0.01, remaining: 397.96 });
+  });
+});
+
+describe("GethookdClient.getRemainingCredits", () => {
+  it("returns the numeric balance when explore reports a string remaining_credits", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [], used_credits: 0.01, remaining_credits: "250.00" }),
+    });
+    const c = new GethookdClient({ apiKey: "k", baseUrl: "https://api.test", fetchImpl });
+    await expect(c.getRemainingCredits()).resolves.toBe(250);
+  });
+
+  it("returns 0 when the underlying call 402s (credits exhausted)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 402, json: async () => ({}) });
+    const c = new GethookdClient({ apiKey: "k", baseUrl: "https://api.test", fetchImpl });
+    await expect(c.getRemainingCredits()).resolves.toBe(0);
+  });
+
+  it("returns null on a non-402 failure (e.g. 500)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+    const c = new GethookdClient({ apiKey: "k", baseUrl: "https://api.test", fetchImpl });
+    await expect(c.getRemainingCredits()).resolves.toBeNull();
+  });
 });
 
 describe("GethookdClient.addBrandSpy", () => {

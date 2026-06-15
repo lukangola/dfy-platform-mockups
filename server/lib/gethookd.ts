@@ -105,9 +105,16 @@ export class CreditExhaustedError extends Error {
 // Defensive readers — mirror the pattern in apify.ts
 // ---------------------------------------------------------------------------
 
-function pickNum(body: Record<string, unknown>, key: string): number | undefined {
+// Accepts both numbers and numeric strings — gethookd returns `remaining_credits`
+// as a string ("397.96") but `used_credits` as a number.
+function pickNumLoose(body: Record<string, unknown>, key: string): number | undefined {
   const v = body[key];
-  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
+  if (typeof v === "string") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,9 +166,9 @@ export class GethookdClient {
 
     const body = (await res.json()) as Record<string, unknown>;
 
-    const remaining = pickNum(body, "remaining_credits");
+    const remaining = pickNumLoose(body, "remaining_credits");
     const credits: GethookdCredits | undefined =
-      remaining !== undefined ? { used: pickNum(body, "used_credits") ?? 0, remaining } : undefined;
+      remaining !== undefined ? { used: pickNumLoose(body, "used_credits") ?? 0, remaining } : undefined;
 
     // Unchecked cast: we trust gethookd's response shape here — no runtime validation.
     return { data: (body["data"] ?? body) as T, credits };
@@ -183,6 +190,23 @@ export class GethookdClient {
       sort_direction: p.sortDirection,
       start_date_from: p.startDateFrom,
     });
+  }
+
+  /**
+   * Read the current remaining credit balance. Costs ~0.01 credit (a minimal
+   * 1-ad /explore probe) — gethookd reports credits only on paid data calls,
+   * there is no free balance endpoint. Returns the balance, or 0 when credits
+   * are already exhausted (402), or null when it can't be determined (so callers
+   * can fail open and rely on the hard 402 stop).
+   */
+  async getRemainingCredits(): Promise<number | null> {
+    try {
+      const res = await this.explore({ perPage: 1 });
+      return res.credits?.remaining ?? null;
+    } catch (e) {
+      if (e instanceof CreditExhaustedError) return 0;
+      return null;
+    }
   }
 
   getAd(adId: string) {
