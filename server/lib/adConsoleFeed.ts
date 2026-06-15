@@ -62,11 +62,10 @@ const RECENCY_WINDOW_DAYS = 180;
 const DAY_MS = 86_400_000;
 
 // Ads pulled from a RESEARCHED competitor's own ad-library page (competitorId
-// set) are the operator's primary target. Hard-tier them above niche-keyword-
-// discovered ads (whitelisting / affiliate pages, which lack a competitorId) by
-// adding a full point to the otherwise-0..1 composite — so the brand's actual
-// competitors sit on top, with quality still ordering within each tier.
-const COMPETITOR_AD_BOOST = 1;
+// set) are the operator's primary target, so we nudge them up the otherwise-0..1
+// composite. A soft +0.3 (not a hard +1.0 tier) keeps competitors leading while
+// letting a standout niche ad — relevance 1.0 + strong traction — interleave.
+const COMPETITOR_AD_BOOST = 0.3;
 
 // Organic ranks on: relevance (which angle keyword SURFACED the clip — not its
 // caption) as the lead signal, then traction (engagement-RATE + reach), then recency.
