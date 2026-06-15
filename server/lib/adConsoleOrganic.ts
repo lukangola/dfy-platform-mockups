@@ -379,10 +379,13 @@ async function upsertOrganicPost(
   caps: Caps,
   brandHandles: Set<string>,
 ): Promise<"inserted" | "updated" | "skipped"> {
-  // Eligibility (spec §7): drop posts older than the recency window.
-  if (post.postedAt) {
+  // Recency gate: only applied when a POSITIVE window is configured. 0 / unset =
+  // no limit (operator rule) — the best evergreen clips are often old, so we keep
+  // them and let engagement (saves/shares) decide.
+  const recencyDays = caps.organicRecencyDays ?? 0;
+  if (recencyDays > 0 && post.postedAt) {
     const ageDays = (Date.now() - post.postedAt.getTime()) / 86_400_000;
-    if (ageDays > (caps.organicRecencyDays || 60)) return "skipped";
+    if (ageDays > recencyDays) return "skipped";
   }
 
   // Shared quality gates: videos only, no ads/paid-partnership, no posts authored
@@ -422,7 +425,7 @@ async function upsertOrganicPost(
       comments: post.comments,
       shares: post.shares,
       bookmarks: post.bookmarks,
-      durationSec: post.durationSec,
+      durationSec: post.durationSec != null ? Math.round(post.durationSec) : null,
       postedAt: post.postedAt,
       transcript: post.transcript,
       format: "video",
@@ -450,7 +453,7 @@ async function upsertOrganicPost(
       comments: post.comments,
       shares: post.shares,
       bookmarks: post.bookmarks,
-      durationSec: post.durationSec,
+      durationSec: post.durationSec != null ? Math.round(post.durationSec) : null,
       postedAt: post.postedAt,
       // Only fill a transcript we now have — never wipe one a prior pull captured.
       ...(post.transcript ? { transcript: post.transcript } : {}),

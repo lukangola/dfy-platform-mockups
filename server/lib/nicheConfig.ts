@@ -72,7 +72,7 @@ const DEFAULT_CONFIG: NicheStreamConfig = {
     adsPerQuery: 40,
     organicPerQuery: 30,
     queriesPerPlatform: 8,
-    organicRecencyDays: 60,
+    organicRecencyDays: 0, // 0 = no recency limit — keep evergreen high-engagement clips
     adLookbackDays: 365,
   },
 };
