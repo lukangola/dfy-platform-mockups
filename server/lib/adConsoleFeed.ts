@@ -70,29 +70,17 @@ const COMPETITOR_AD_BOOST = 0.3;
 // its caption) and traction (engagement-RATE + reach). Recency is not used.
 const ORGANIC_WEIGHTS: NicheStreamConfig["weights"] = { traction: 0.5, relevance: 0.5, recency: 0 };
 
-// Organic traction blends ENGAGEMENT-RATE (the platform virality metric ÷ views)
-// with REACH (log views), so a high-resonance clip ranks above one that's merely
-// big — but a tiny clip with a freak ratio can't outrank a genuinely viral one.
-// Rate saturations differ by platform: TikTok save-rates run higher than IG
-// share-rates. (All tunable.)
-const ORGANIC_RATE_W = 0.65;
-const ORGANIC_REACH_W = 0.35;
-const TIKTOK_SAVE_RATE_SAT = 0.05; // 5% saves/view ⇒ max resonance
-const IG_SHARE_RATE_SAT = 0.02; // 2% shares/view ⇒ max resonance
-// Calibrated to the real (engagement-gated, not view-gated) data: most clips sit
-// at 5K–500K views, so reach must differentiate across that band, not above 100K.
-const ORGANIC_REACH_LO_LOG = 4; // 10K views ⇒ reach 0
-const ORGANIC_REACH_HI_LOG = 6; // 1M views ⇒ reach 1
+// Organic traction ranks on the ABSOLUTE platform virality metric (TikTok saves /
+// IG shares) on a log scale — the highest absolute share/save counts rise to the
+// top. Floor at the ingest gate (100); saturate at 100K. (Tunable.)
+const ORGANIC_VOL_LO_LOG = 2; // 100 saves/shares ⇒ 0
+const ORGANIC_VOL_HI_LOG = 5; // 100K saves/shares ⇒ 1
 
-/** Organic traction = engagement-rate (platform metric ÷ views) blended with reach. */
+/** Organic traction = ABSOLUTE platform virality volume (TikTok saves / IG shares), log-scaled. */
 function organicTraction(post: OrganicPost): number {
   const isTikTok = post.source === "tiktok";
   const primary = Math.max(0, (isTikTok ? post.bookmarks : post.shares) ?? 0);
-  const views = Math.max(0, post.views ?? 0);
-  const rate = views > 0 ? primary / views : 0;
-  const rateScore = clamp01(rate / (isTikTok ? TIKTOK_SAVE_RATE_SAT : IG_SHARE_RATE_SAT));
-  const reachScore = clamp01((Math.log10(views + 1) - ORGANIC_REACH_LO_LOG) / (ORGANIC_REACH_HI_LOG - ORGANIC_REACH_LO_LOG));
-  return round4(clamp01(ORGANIC_RATE_W * rateScore + ORGANIC_REACH_W * reachScore));
+  return round4(clamp01((Math.log10(primary + 1) - ORGANIC_VOL_LO_LOG) / (ORGANIC_VOL_HI_LOG - ORGANIC_VOL_LO_LOG)));
 }
 
 function toNum(v: unknown, fallback = 0): number {
