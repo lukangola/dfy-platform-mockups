@@ -298,7 +298,11 @@ function nameWords(s: string): string[] {
  * brand has thousands; a coincidental match has a handful). Returns null when
  * nothing plausible matches, so we never pull a wrong brand's ads.
  */
-async function resolveGethookdBrand(client: GethookdClient, name: string): Promise<GethookdBrand | null> {
+async function resolveGethookdBrand(
+  client: GethookdClient,
+  name: string,
+  fbPageId?: string | null,
+): Promise<GethookdBrand | null> {
   const compWords = new Set(nameWords(name));
   if (compWords.size === 0) return null;
 
@@ -313,6 +317,16 @@ async function resolveGethookdBrand(client: GethookdClient, name: string): Promi
       for (const b of data) byId.set(b.id, b);
     } catch {
       /* one query failing shouldn't abort resolution */
+    }
+  }
+
+  // Strongest signal: the brand's Meta page id (external_id) === the competitor's
+  // fb_page_id. Exact + name-independent — disambiguates "Ryze" and rescues
+  // odd-named brands the name search only barely surfaces.
+  const fb = fbPageId?.trim();
+  if (fb) {
+    for (const b of Array.from(byId.values())) {
+      if (b.external_id && b.external_id === fb) return b;
     }
   }
 
@@ -346,7 +360,7 @@ export async function ingestCompetitorAds(competitor: Competitor, nicheStreamId:
   // Resolve + cache the gethookd brand id from the competitor's name.
   let brandId = competitor.gethookdBrandId?.trim() || null;
   if (!brandId) {
-    const match = await resolveGethookdBrand(client, competitor.name);
+    const match = await resolveGethookdBrand(client, competitor.name, competitor.fbPageId);
     if (!match) {
       console.log(`[ad-console] no gethookd brand matched competitor "${competitor.name}"`);
       return result;

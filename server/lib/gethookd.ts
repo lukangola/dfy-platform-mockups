@@ -215,7 +215,11 @@ export class GethookdClient {
   }
 
   searchBrands(search: string) {
-    return this.get<GethookdBrand[]>("/api/v1/brands", { search });
+    // gethookd's brand search runs SQL LIKE, where `\` is the escape char and
+    // `%`/`_` are wildcards — so a literal name like "MUD\WTR" returns nothing
+    // unless we escape those characters first.
+    const escaped = search.replace(/[\\%_]/g, (ch) => "\\" + ch);
+    return this.get<GethookdBrand[]>("/api/v1/brands", { search: escaped });
   }
 
   brandsByCategory(category: string, limit = 10) {
