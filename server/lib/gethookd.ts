@@ -20,7 +20,9 @@ export function isGethookdConfigured(): boolean {
 // Domain types
 // ---------------------------------------------------------------------------
 
-export type PerformanceTitle = "testing" | "scaling" | "winning" | "optimized";
+// Live values are capitalized ("Scaling") but the filter is case-insensitive, so
+// lowercase inputs work. Bands: testing=1, scaling=41, growing=61, optimized=81, winning=91.
+export type PerformanceTitle = "testing" | "scaling" | "growing" | "optimized" | "winning";
 
 export interface GethookdAd {
   id: string | number;
