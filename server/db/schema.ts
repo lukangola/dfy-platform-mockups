@@ -554,7 +554,7 @@ export const competitors = pgTable("competitors", {
   tiktokHandle: text("tiktok_handle"),
   adspyAdvertiserId: text("adspy_advertiser_id"),   // resolved + cached AdSpy advertiser userId (verified)
   adspyVerified: boolean("adspy_verified").notNull().default(false),
-  gethookdBrandId: text("gethookd_brand_id"),       // (removed in the AdSpy switch — later task)
+  gethookdBrandId: text("gethookd_brand_id"),       // legacy column — no longer written (removed in AdSpy switch)
   brandspyActive: boolean("brandspy_active").notNull().default(false),
   source: text("source").notNull(), // "auto" | "manual"
   status: text("status").notNull().default("active"), // active | archived
@@ -605,8 +605,8 @@ export const adCreatives = pgTable("ad_creatives", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
-  source: text("source").notNull().default("facebook_ads"), // "gethookd" (current) | "facebook_ads" (legacy Meta) — always set explicitly by writers
-  externalId: text("external_id").notNull(), // gethookd ad id (legacy: Meta ad_archive_id) — dedup key
+  source: text("source").notNull().default("facebook_ads"), // "adspy" (current) | "facebook_ads" (legacy Meta) — always set explicitly by writers
+  externalId: text("external_id").notNull(), // AdSpy ad id (legacy: Meta ad_archive_id) — dedup key
   advertiserName: text("advertiser_name"),
   pageId: text("page_id"),
   pageUrl: text("page_url"),
@@ -618,7 +618,7 @@ export const adCreatives = pgTable("ad_creatives", {
   landingUrl: text("landing_url"),
   adStart: timestamp("ad_start", { withTimezone: true }),
   adStop: timestamp("ad_stop", { withTimezone: true }),
-  runtimeDays: integer("runtime_days"), // gethookd days_active (legacy: (adStop ?? today) − adStart)
+  runtimeDays: integer("runtime_days"), // AdSpy days_active (legacy: (adStop ?? today) − adStart)
   isActive: boolean("is_active"),
   variationCount: integer("variation_count"),
   // AdSpy engagement — `shares` (snapshot.shareNum) is the rank driver; `likes`
@@ -634,7 +634,7 @@ export const adCreatives = pgTable("ad_creatives", {
   nicheStreamId: uuid("niche_stream_id"),
   competitorId: uuid("competitor_id"),
   discoveryQuery: text("discovery_query"), // angle query that surfaced this niche ad — drives relevance (provenance, not copy)
-  rawJson: jsonb("raw_json"), // full gethookd ad item for re-derivation / debugging
+  rawJson: jsonb("raw_json"), // full AdSpy ad item for re-derivation / debugging
 }, (t) => ({
   uniqSourceExternal: uniqueIndex("ad_creatives_source_external_uniq").on(t.source, t.externalId),
 }));

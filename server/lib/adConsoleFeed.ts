@@ -239,7 +239,7 @@ async function upsertFeedItem(row: {
 }
 
 /**
- * Creative fingerprint for dedup. gethookd (like Meta) stores every placement /
+ * Creative fingerprint for dedup. AdSpy (like Meta) stores every placement /
  * refresh of the same ad as a distinct record with a UNIQUE id but IDENTICAL
  * advertiser + copy (the media URL embeds the ad id, so it's never a reliable
  * dedup key). We collapse on advertiser + normalized copy. Ads with no copy are
