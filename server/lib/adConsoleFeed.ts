@@ -27,15 +27,9 @@ import { and, desc, eq, inArray, or, type SQL } from "drizzle-orm";
 import { db, schema } from "./db.js";
 import { getBrandNicheState } from "./adConsoleNiche.js";
 import { ORGANIC_MIN_DURATION_SEC } from "./adConsoleOrganic.js";
+import { scoreAdspyTraction } from "./adspy.js";
 import { DEFAULT_NICHE_CONFIG, type NicheStreamConfig } from "./nicheConfig.js";
 import type { AdCreative, FeedItem, NicheStream, OrganicPost } from "../db/schema.js";
-
-// ── Ad traction ───────────────────────────────────────────────────────────────
-// AdSpy gives real engagement, so traction = the ad's REAL share count, log-scaled
-// to 0..1 (~31 shares → 0, ~31k → 1). Log keeps one mega-viral outlier from
-// flattening the rest while preserving "more shares = higher" within a tier.
-const AD_SHARES_LO_LOG = 1.5;
-const AD_SHARES_HI_LOG = 4.5;
 
 // Pooled ads are here because they're in the brand's niche or from a tracked
 // competitor — a sparse-copy ad can still be relevant, so never disqualify it.
@@ -140,10 +134,10 @@ function composite(traction: number, relevance: number, recency: number, w: Nich
   return round4(w.traction * traction + w.relevance * relevance + w.recency * recency);
 }
 
-/** Ad traction = real shares, log-scaled to 0..1 (matches scoreAdspyTraction). */
+// AdSpy gives real engagement, so ad traction = the canonical log-scaled share
+// score (see scoreAdspyTraction in adspy.ts) — one source of truth, no drift.
 function adTraction(ad: AdCreative): number {
-  const shares = Math.max(0, ad.shares ?? 0);
-  return round4(clamp01((Math.log10(shares + 1) - AD_SHARES_LO_LOG) / (AD_SHARES_HI_LOG - AD_SHARES_LO_LOG)));
+  return round4(scoreAdspyTraction(ad.shares ?? 0));
 }
 
 function resolveWeights(stream: NicheStream | null): NicheStreamConfig["weights"] {
