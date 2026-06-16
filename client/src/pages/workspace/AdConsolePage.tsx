@@ -23,7 +23,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Radar, Loader2, ShieldAlert, Building2, RefreshCw, Sparkles, Settings2,
   Plus, Trash2, Archive, ArrowUpRight, Wand2, Play,
-  Megaphone, Flame, Lightbulb, X, ExternalLink, Clock, Eye, Bookmark, Share2, Layers,
+  Megaphone, Flame, Lightbulb, X, ExternalLink, Clock, Eye, Bookmark, Share2, Heart,
   CheckCircle2, AlertTriangle, ChevronDown,
 } from "lucide-react";
 import {
@@ -983,25 +983,29 @@ function FeedCardView({
   const hook = ad?.hook ?? organic?.hook ?? null;
   const body = ad?.copy ?? organic?.caption ?? null;
   const format = (ad?.format ?? organic?.format ?? "").toLowerCase();
-  const sourceUrl = ad?.pageUrl ?? organic?.postUrl ?? ad?.landingUrl ?? null;
+  const sourceUrl = ad?.deepLinkUrl ?? ad?.pageUrl ?? organic?.postUrl ?? ad?.landingUrl ?? null;
   // Labelled "View on …" link to the original organic post.
   const platformLabel =
     organic?.source === "tiktok" ? "TikTok" : organic?.source === "instagram" ? "Instagram" : "Original";
   // Deep-link straight to this creative's Meta Ad Library entry (externalId is
   // the ad_archive_id). Lets the operator confirm an ad really came from the
   // competitor's library, and fall back to the advertiser's full library page.
+  // Prefer the AdSpy deep link to the live FB/IG post; fall back to the Meta Ad
+  // Library lookup when a legacy row has no deep link.
   const adLibraryUrl = ad?.externalId
     ? `https://www.facebook.com/ads/library/?id=${ad.externalId}`
     : ad?.pageId
       ? `https://www.facebook.com/ads/library/?view_all_page_id=${ad.pageId}`
       : null;
+  const adLink = ad?.deepLinkUrl ?? adLibraryUrl;
 
   // Traction line: ads → runtime/variations/active, organic → views/likes.
   const tractionBits: Array<{ icon: React.ElementType; label: string }> = [];
   if (ad) {
-    if (ad.runtimeDays != null) tractionBits.push({ icon: Clock, label: `${ad.runtimeDays}d running` });
-    if (ad.variationCount != null && ad.variationCount > 1)
-      tractionBits.push({ icon: Layers, label: `${ad.variationCount} variants` });
+    const sh = compact(ad.shares);
+    if (sh) tractionBits.push({ icon: Share2, label: `${sh} shares` });
+    const lk = compact(ad.likes);
+    if (lk) tractionBits.push({ icon: Heart, label: lk });
   }
   if (organic) {
     const v = compact(organic.views);
@@ -1144,15 +1148,15 @@ function FeedCardView({
           <span className="text-[11px] font-medium text-white/75 truncate">{advertiser}</span>
           {handle && <span className="text-[10px] font-mono text-white/30 truncate">{handle}</span>}
           <div className="ml-auto shrink-0 flex items-center gap-2">
-            {adLibraryUrl && (
+            {adLink && (
               <a
-                href={adLibraryUrl}
+                href={adLink}
                 target="_blank"
                 rel="noreferrer"
                 className="flex items-center gap-1 text-[9px] font-mono text-white/30 hover:text-cyan-300 transition-colors"
-                title="View in Meta Ad Library"
+                title="View the original ad"
               >
-                <ExternalLink size={11} /> Ad Library
+                <ExternalLink size={11} /> Original ad
               </a>
             )}
             {isOrganic && organic?.postUrl ? (

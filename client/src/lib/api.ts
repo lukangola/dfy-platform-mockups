@@ -1713,6 +1713,10 @@ export type AdConsoleAdCreative = {
   runtimeDays: number | null;
   isActive: boolean | null;
   variationCount: number | null;
+  /** AdSpy real engagement + deep link to the live FB/IG post. */
+  shares: number | null;
+  likes: number | null;
+  deepLinkUrl: string | null;
   /** `numeric` → string on the wire. */
   tractionScore: string | null;
   hook: string | null;
