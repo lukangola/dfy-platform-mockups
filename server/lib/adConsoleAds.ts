@@ -21,8 +21,15 @@ import type { Competitor, NicheStream } from "../db/schema.js";
 // Source literal used for every row this module writes.
 const ADSPY_SOURCE = "adspy";
 
-// Every pull is scoped to ads SEEN in the last year (drops dead creatives).
-const ADSPY_SEEN_DAYS = 365;
+// Date scoping for pulls. null = NO date filter (all-time) so we don't miss
+// older high-share creatives the operator sees in the AdSpy web UI; set a day
+// count to re-enable a "seen recently" window. (Operator request 2026-06-16.)
+const ADSPY_SEEN_DAYS: number | null = null;
+
+/** seenBetween window for a pull, or undefined (all-time) when ADSPY_SEEN_DAYS is null. */
+function seenWindow(): [string, string] | undefined {
+  return ADSPY_SEEN_DAYS == null ? undefined : adspySeenBetween(ADSPY_SEEN_DAYS);
+}
 
 // Per-lane page caps (AdSpy returns 10 ads/page; orderBy=total_shares front-loads
 // the winners, so a couple of pages is plenty). Tunable.
@@ -202,7 +209,7 @@ export async function ingestNicheStreamAds(stream: NicheStream, brandQueries: st
         const ads = await client.searchAds({
           searches: [{ type: "texts", value: q }],
           countries: ADSPY_COUNTRIES,
-          seenBetween: adspySeenBetween(ADSPY_SEEN_DAYS),
+          seenBetween: seenWindow(),
           orderBy: "total_shares",
           page,
         });
@@ -239,7 +246,7 @@ async function resolveAdspyAdvertiser(client: AdspyClient, competitor: Competito
     const ads = await client.searchAds({
       searches: [{ type: "advertisers", value: competitor.name }],
       countries: ADSPY_COUNTRIES,
-      seenBetween: adspySeenBetween(ADSPY_SEEN_DAYS),
+      seenBetween: seenWindow(),
       orderBy: "total_shares",
       page,
     });
@@ -287,7 +294,7 @@ export async function ingestCompetitorAds(
       const ads = await client.searchAds({
         userId: advertiserId,
         countries: ADSPY_COUNTRIES,
-        seenBetween: adspySeenBetween(ADSPY_SEEN_DAYS),
+        seenBetween: seenWindow(),
         orderBy: "total_shares",
         page,
       });
@@ -303,7 +310,7 @@ export async function ingestCompetitorAds(
       const ads = await client.searchAds({
         searches: [{ type: "texts", value: competitor.name, locked: true }],
         countries: ADSPY_COUNTRIES,
-        seenBetween: adspySeenBetween(ADSPY_SEEN_DAYS),
+        seenBetween: seenWindow(),
         orderBy: "total_shares",
         page,
       });

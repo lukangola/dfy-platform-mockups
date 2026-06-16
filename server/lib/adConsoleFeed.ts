@@ -53,6 +53,11 @@ const DAY_MS = 86_400_000;
 // standout niche ad interleave — not a hard tier.
 const COMPETITOR_AD_BOOST = 0.3;
 
+// Operator toggle (2026-06-16): when true, the competitor_ads rail is ordered by
+// SHARES alone (log-scaled traction) — highest-share creatives on top, ignoring
+// relevance/recency/competitor boost. Flip to false to restore relevance-first.
+const RANK_ADS_BY_SHARES_ONLY = true;
+
 // Organic ranks 50/50 on relevance (which angle keyword SURFACED the clip — not
 // its caption) and traction (engagement-RATE + reach). Recency is not used.
 const ORGANIC_WEIGHTS: NicheStreamConfig["weights"] = { traction: 0.5, relevance: 0.5, recency: 0 };
@@ -368,8 +373,11 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
             : Math.max(relevanceFromMatch(weighted), RELEVANCE_FLOOR);
     const traction = adTraction(ad);
     const recency = recencyScore(ad.adStop ?? ad.adStart ?? null);
-    // Hard-tier researched-competitor ads above niche-keyword ads (see boost doc).
-    const comp = composite(traction, relevance, recency, weights) + (ad.competitorId ? COMPETITOR_AD_BOOST : 0);
+    // SHARES-ONLY mode: order purely by log-scaled shares so the most-shared
+    // creatives sit on top. Otherwise: relevance-first composite + competitor boost.
+    const comp = RANK_ADS_BY_SHARES_ONLY
+      ? traction
+      : composite(traction, relevance, recency, weights) + (ad.competitorId ? COMPETITOR_AD_BOOST : 0);
     // Card chip shows WHY the ad is here: a niche ad shows the angle that surfaced
     // it; a competitor ad shows a "competitor" tag (the card already names the brand).
     // Competitor's OWN ad (no query) → "competitor"; a name-in-copy clone (query =
