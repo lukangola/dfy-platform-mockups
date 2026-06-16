@@ -43,7 +43,7 @@ const CLIENT_CONSOLE_ITEM = {
 // Settings → Clients). Pinned to the top of the nav when visible.
 const AD_CONSOLE_ITEM = {
   id: "ad-console",
-  label: "Ad Inspiration Console",
+  label: "Ad Inspo Console",
   icon: Radar,
   path: "/workspace/ad-console",
   description: "Competitor + trend command center",
@@ -114,12 +114,10 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
                   <AnimatePresence>
                     {!collapsed && (
                       <motion.span
-                        initial={{ opacity: 0, x: -6 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        exit={{ opacity: 0, x: -6 }}
-                        // Fade/slide (not width) so a label that wraps to two lines
-                        // (e.g. "Ad Inspiration Console") doesn't flicker on reveal.
-                        className="font-mono tracking-wide leading-tight text-left"
+                        initial={{ opacity: 0, width: 0 }}
+                        animate={{ opacity: 1, width: "auto" }}
+                        exit={{ opacity: 0, width: 0 }}
+                        className="font-mono tracking-wide overflow-hidden whitespace-nowrap"
                       >
                         {item.label}
                       </motion.span>
