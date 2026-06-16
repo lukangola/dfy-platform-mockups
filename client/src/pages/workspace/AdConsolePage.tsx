@@ -984,6 +984,10 @@ function FeedCardView({
   const verticalFrame = Boolean(embedUrl) || (isOrganic && Boolean(videoUrl));
   // Organic cards that have a player (embed or live <video>) use the click-to-load facade.
   const canPlay = isOrganic && Boolean(embedUrl || videoUrl);
+  // Static ad creatives (an ad with no playable video) render in a uniform 1:1
+  // square frame with object-contain — square card, whole creative visible (thin
+  // letterbox bars when the ad isn't natively square; never cropped).
+  const isStaticAd = Boolean(ad) && !videoUrl;
   // Organic covers go through the same-origin proxy (IG CDN blocks cross-origin
   // rendering); ad thumbnails (FB CDN) render directly.
   const previewSrc = isOrganic ? adConsoleImg(thumb) : (thumb ?? undefined);
@@ -1044,11 +1048,13 @@ function FeedCardView({
         className={`relative w-full bg-black overflow-hidden ${
           verticalFrame
             ? `aspect-[9/16] ${mediaMaxH} mx-auto`
-            : hasMedia
-              ? ""
-              : hero
-                ? "aspect-[4/3]"
-                : "aspect-video"
+            : isStaticAd
+              ? "aspect-square"
+              : hasMedia
+                ? ""
+                : hero
+                  ? "aspect-[4/3]"
+                  : "aspect-video"
         }`}
       >
         {canPlay && !activated ? (
@@ -1108,7 +1114,11 @@ function FeedCardView({
           <img
             src={thumb}
             alt={advertiser}
-            className={`w-full h-auto ${mediaMaxH} object-contain bg-black block`}
+            className={
+              isStaticAd
+                ? "absolute inset-0 w-full h-full object-contain bg-black"
+                : `w-full h-auto ${mediaMaxH} object-contain bg-black block`
+            }
             loading="lazy"
           />
         ) : (
