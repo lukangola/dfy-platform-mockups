@@ -14,8 +14,7 @@ import { type Request, type Response, Router } from "express";
 import { requireAuth, requireManager } from "../lib/auth.js";
 import { PromptNotConfiguredError } from "../lib/prompts.js";
 import { isApifyConfigured } from "../lib/apify.js";
-import { isGethookdConfigured, getGethookdClient } from "../lib/gethookd.js";
-import { env } from "../lib/env.js";
+import { isAdspyConfigured } from "../lib/adspy.js";
 import { detectBrandNiche, getBrandNicheState } from "../lib/adConsoleNiche.js";
 import { ensureBrandConsoleReady } from "../lib/adConsoleBootstrap.js";
 import {
@@ -45,22 +44,6 @@ adConsoleRouter.use(requireAuth, requireManager);
 
 function sendError(res: Response, status: number, message: string) {
   res.status(status).json({ error: message });
-}
-
-/**
- * Pre-pull credit floor: refuse to start a gethookd ad pull when the remaining
- * balance is below GETHOOKD_CREDIT_RESERVE, preserving the operator's buffer.
- * Sends a 402 and returns true when the pull should be blocked; returns false
- * when it's OK to proceed (including when the balance can't be read — we fail
- * open there and let the hard 402-on-spend stop protect us).
- */
-async function gethookdCreditFloorBlocks(res: Response): Promise<boolean> {
-  const remaining = await getGethookdClient().getRemainingCredits();
-  if (remaining !== null && remaining < env.GETHOOKD_CREDIT_RESERVE) {
-    sendError(res, 402, `gethookd credits below reserve (${remaining} < ${env.GETHOOKD_CREDIT_RESERVE}) — pull refused to preserve your buffer.`);
-    return true;
-  }
-  return false;
 }
 
 // Social-CDN hosts the image proxy is allowed to fetch (SSRF guard).
@@ -303,19 +286,18 @@ adConsoleRouter.post("/brands/:brandId/keyword-sets", async (req: Request, res: 
 // ── Ad ingestion (Phase 3) ─────────────────────────────────────────────────
 
 /**
- * POST /api/ad-console/brands/:brandId/ingest-ads — manual gethookd ad pull.
+ * POST /api/ad-console/brands/:brandId/ingest-ads — manual AdSpy ad pull.
  * Body: { scope?: "niche" | "competitors" | "all" } (default "all").
- * Bounded by the niche stream's per-run caps; spends gethookd credits, so it
- * ONLY runs from this explicit operator action — never on boot/auto. 424 when
- * gethookd isn't configured, the brand has no products, or the classifier
- * prompt is missing (niche-scoped pulls need a classified brand).
+ * Bounded by the niche stream's per-run caps; ONLY runs from this explicit
+ * operator action — never on boot/auto. 424 when AdSpy isn't configured,
+ * the brand has no products, or the classifier prompt is missing
+ * (niche-scoped pulls need a classified brand).
  */
 adConsoleRouter.post("/brands/:brandId/ingest-ads", async (req: Request, res: Response) => {
   try {
-    if (!isGethookdConfigured()) {
-      return sendError(res, 424, "GETHOOKD_API_KEY is not configured — set it before pulling ads.");
+    if (!isAdspyConfigured()) {
+      return sendError(res, 424, "ADSPY_TOKEN is not configured — set it before pulling ads.");
     }
-    if (await gethookdCreditFloorBlocks(res)) return;
     const scopeRaw = (req.body ?? {}).scope;
     const scope = scopeRaw === "niche" || scopeRaw === "competitors" ? scopeRaw : "all";
     const summary = await ingestBrandAds(req.params.brandId, scope);
@@ -432,19 +414,18 @@ adConsoleRouter.post("/brands/:brandId/feed/:feedItemId/skip", async (req: Reque
  * POST /api/ad-console/brands/:brandId/pull-feed — the single operator button.
  * Chains ingest-ads → ingest-organic → rank-feed in the background and returns
  * immediately; the client polls the status endpoint below. Idempotent while a
- * run is in flight (`alreadyRunning=true`). Spends gethookd credits (ads) and
- * Apify credits (organic), so it ONLY fires from this explicit action and 424s
- * when either gethookd or Apify isn't configured.
+ * run is in flight (`alreadyRunning=true`). Pulls ads via AdSpy and organic
+ * via Apify, so it ONLY fires from this explicit action and 424s when either
+ * AdSpy or Apify isn't configured.
  */
 adConsoleRouter.post("/brands/:brandId/pull-feed", async (req: Request, res: Response) => {
   try {
-    if (!isGethookdConfigured()) {
-      return sendError(res, 424, "GETHOOKD_API_KEY is not configured — set it before pulling the feed (ads).");
+    if (!isAdspyConfigured()) {
+      return sendError(res, 424, "ADSPY_TOKEN is not configured — set it before pulling the feed (ads).");
     }
     if (!isApifyConfigured()) {
       return sendError(res, 424, "APIFY_TOKEN is not configured — set it before pulling the feed (organic).");
     }
-    if (await gethookdCreditFloorBlocks(res)) return;
     const { run, alreadyRunning } = startFeedPull(req.params.brandId);
     res.status(202).json({ run, alreadyRunning });
   } catch (err) {
