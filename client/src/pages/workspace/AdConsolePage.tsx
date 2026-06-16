@@ -174,6 +174,23 @@ export default function AdConsolePage() {
   // Competitor-ads rail filter: when on, show only static (non-video) creatives.
   const [staticsOnly, setStaticsOnly] = useState(false);
 
+  // "What is this feed?" explainer — dismissible, remembered per browser.
+  const [explainerDismissed, setExplainerDismissed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("adConsoleExplainerDismissed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  function dismissExplainer() {
+    setExplainerDismissed(true);
+    try {
+      localStorage.setItem("adConsoleExplainerDismissed", "1");
+    } catch {
+      /* private mode — best effort */
+    }
+  }
+
   // Background bootstrap (auto niche + competitors + keywords). Fires once per
   // brand per mount when the brand isn't set up yet; the ref de-dupes re-fires.
   const [bootstrapping, setBootstrapping] = useState(false);
@@ -436,6 +453,18 @@ export default function AdConsolePage() {
 
   const nicheLabel = niche?.stream?.displayName ?? niche?.nicheType ?? null;
 
+  // Distinct search keywords that actually surfaced this feed — shown in the
+  // explainer so the brand sees what went into it. Competitor ads carry the
+  // literal "competitor" sentinel instead of a query, so we drop it.
+  const feedKeywords = Array.from(
+    new Set(
+      feedCards
+        .flatMap((c) => c.item.matchedKeywords ?? [])
+        .map((kw) => kw.trim())
+        .filter((kw) => kw && kw.toLowerCase() !== "competitor"),
+    ),
+  ).slice(0, 10);
+
   // ── Render ────────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen lg:h-screen lg:flex lg:flex-col lg:overflow-hidden">
@@ -559,6 +588,59 @@ export default function AdConsolePage() {
           </div>
         ) : (
           <>
+            {/* "What is this feed?" explainer — dismissible */}
+            <AnimatePresence initial={false}>
+              {!explainerDismissed && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden lg:shrink-0"
+                >
+                  <div className="mb-4 flex items-start gap-3 rounded-xl border border-white/[0.07] bg-white/[0.02] px-4 py-3">
+                    <div className="mt-0.5 shrink-0 rounded-lg border border-cyan-500/20 bg-cyan-500/10 p-1.5">
+                      <Sparkles size={14} className="text-cyan-300" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs leading-relaxed text-white/55">
+                        This is{" "}
+                        <span className="font-medium text-white/80">
+                          {activeBrand ? activeBrand.name : "your brand"}
+                        </span>
+                        ’s personalized inspiration feed. We surface{" "}
+                        <span className="text-indigo-300">competitor ads</span> running in your niche
+                        alongside <span className="text-cyan-300">viral organic videos</span> that are
+                        highly relevant to your brand — your one place for fresh ad &amp; organic content
+                        ideas to recreate.
+                      </p>
+                      {feedKeywords.length > 0 && (
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          <span className="text-[10px] font-mono uppercase tracking-wider text-white/30">
+                            Searched for
+                          </span>
+                          {feedKeywords.map((kw) => (
+                            <span
+                              key={kw}
+                              className="rounded border border-white/[0.08] bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-mono text-white/50"
+                            >
+                              {kw}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={dismissExplainer}
+                      aria-label="Dismiss"
+                      className="-mr-1 -mt-0.5 shrink-0 rounded-md p-1 text-white/25 transition-colors hover:bg-white/[0.05] hover:text-white/60"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             {/* Setup panel (collapsible) */}
             <AnimatePresence initial={false}>
               {setupOpen && (
