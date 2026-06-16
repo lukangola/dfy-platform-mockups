@@ -171,6 +171,9 @@ export default function AdConsolePage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  // Competitor-ads rail filter: when on, show only static (non-video) creatives.
+  const [staticsOnly, setStaticsOnly] = useState(false);
+
   // Background bootstrap (auto niche + competitors + keywords). Fires once per
   // brand per mount when the brand isn't set up yet; the ref de-dupes re-fires.
   const [bootstrapping, setBootstrapping] = useState(false);
@@ -426,6 +429,10 @@ export default function AdConsolePage() {
   // ── Split feed into rails ─────────────────────────────────────────────────────
   const competitorCards = feedCards.filter((c) => c.item.rail === "competitor_ads");
   const organicCards = feedCards.filter((c) => c.item.rail === "trending_organic");
+  // "Statics only" filter on the competitor rail — hides video creatives.
+  const competitorVisible = staticsOnly
+    ? competitorCards.filter((c) => (c.ad?.format ?? "").toLowerCase() === "static")
+    : competitorCards;
 
   const nicheLabel = niche?.stream?.displayName ?? niche?.nicheType ?? null;
 
@@ -584,10 +591,43 @@ export default function AdConsolePage() {
                 accent="indigo"
                 title="Competitor Ads"
                 subtitle="Longest-running creatives in the niche"
-                count={competitorCards.length}
-                empty="No ranked competitor ads yet — pull this week's feed to populate this rail."
+                count={competitorVisible.length}
+                empty={
+                  staticsOnly
+                    ? "No static creatives in this rail — turn off “Statics only” to see videos too."
+                    : "No ranked competitor ads yet — pull this week's feed to populate this rail."
+                }
+                controls={
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={staticsOnly}
+                    onClick={() => setStaticsOnly((v) => !v)}
+                    className="flex items-center gap-2 group"
+                    title="Show only static (non-video) creatives"
+                  >
+                    <span
+                      className={`relative w-7 h-4 rounded-full transition-colors shrink-0 ${
+                        staticsOnly ? "bg-violet-500/60" : "bg-white/[0.12]"
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${
+                          staticsOnly ? "translate-x-3.5" : "translate-x-0.5"
+                        }`}
+                      />
+                    </span>
+                    <span
+                      className={`text-[10px] font-mono tracking-wide transition-colors ${
+                        staticsOnly ? "text-violet-200" : "text-white/40 group-hover:text-white/70"
+                      }`}
+                    >
+                      Statics only
+                    </span>
+                  </button>
+                }
               >
-                {competitorCards.map((card) => (
+                {competitorVisible.map((card) => (
                   <FeedCardView
                     key={card.item.id}
                     card={card}
@@ -749,6 +789,7 @@ function Rail({
   count,
   empty,
   hero,
+  controls,
   children,
 }: {
   icon: React.ElementType;
@@ -758,6 +799,8 @@ function Rail({
   count: number;
   empty: string;
   hero?: boolean;
+  /** Optional control strip rendered directly under the header (e.g. a filter toggle). */
+  controls?: React.ReactNode;
   children: React.ReactNode;
 }) {
   const a = ACCENT[accent];
@@ -778,6 +821,9 @@ function Rail({
           <p className="text-[10px] text-white/30 font-mono truncate">{subtitle}</p>
         </div>
       </header>
+
+      {/* Optional control strip (filters) — fixed directly under the header */}
+      {controls && <div className="px-4 py-2 border-b border-white/[0.06] lg:shrink-0">{controls}</div>}
 
       {/* Cards — scroll within the column on desktop */}
       <div className="p-3 space-y-3 lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
