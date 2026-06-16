@@ -607,13 +607,13 @@ export default function AdConsolePage() {
                     title="Show only static (non-video) creatives"
                   >
                     <span
-                      className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${
-                        staticsOnly ? "bg-violet-500/70" : "bg-white/[0.14]"
+                      className={`relative h-[18px] w-8 shrink-0 rounded-full transition-colors ${
+                        staticsOnly ? "bg-violet-500/70" : "bg-white/[0.18]"
                       }`}
                     >
                       <span
-                        className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
-                          staticsOnly ? "translate-x-3.5" : "translate-x-0.5"
+                        className={`absolute left-0.5 top-0.5 h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${
+                          staticsOnly ? "translate-x-3.5" : "translate-x-0"
                         }`}
                       />
                     </span>
