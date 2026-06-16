@@ -444,8 +444,18 @@ export default function AdConsolePage() {
   }
 
   // ── Split feed into rails ─────────────────────────────────────────────────────
-  const competitorCards = feedCards.filter((c) => c.item.rail === "competitor_ads");
-  const organicCards = feedCards.filter((c) => c.item.rail === "trending_organic");
+  // Guard against empty cards: a feed item whose joined ad/organic row is missing
+  // (orphaned reference) or that has no media would render as a blank "Unknown"
+  // placeholder — drop it so the rail only ever shows real, displayable creatives.
+  const isRenderable = (c: AdConsoleFeedCard): boolean => {
+    if (c.ad) {
+      const media = Array.isArray(c.ad.mediaUrls) ? c.ad.mediaUrls : [];
+      return media.length > 0 || Boolean(c.ad.thumbnailUrl);
+    }
+    return Boolean(c.organic);
+  };
+  const competitorCards = feedCards.filter((c) => c.item.rail === "competitor_ads" && isRenderable(c));
+  const organicCards = feedCards.filter((c) => c.item.rail === "trending_organic" && isRenderable(c));
   // "Statics only" filter on the competitor rail — hides video creatives.
   const competitorVisible = staticsOnly
     ? competitorCards.filter((c) => (c.ad?.format ?? "").toLowerCase() === "static")
@@ -974,9 +984,6 @@ function FeedCardView({
   const verticalFrame = Boolean(embedUrl) || (isOrganic && Boolean(videoUrl));
   // Organic cards that have a player (embed or live <video>) use the click-to-load facade.
   const canPlay = isOrganic && Boolean(embedUrl || videoUrl);
-  // Static ad creatives (an ad with no playable video) render in a uniform 1:1
-  // square frame; videos keep their native aspect.
-  const isStaticAd = Boolean(ad) && !videoUrl;
   // Organic covers go through the same-origin proxy (IG CDN blocks cross-origin
   // rendering); ad thumbnails (FB CDN) render directly.
   const previewSrc = isOrganic ? adConsoleImg(thumb) : (thumb ?? undefined);
@@ -1037,13 +1044,11 @@ function FeedCardView({
         className={`relative w-full bg-black overflow-hidden ${
           verticalFrame
             ? `aspect-[9/16] ${mediaMaxH} mx-auto`
-            : isStaticAd
-              ? "aspect-square"
-              : hasMedia
-                ? ""
-                : hero
-                  ? "aspect-[4/3]"
-                  : "aspect-video"
+            : hasMedia
+              ? ""
+              : hero
+                ? "aspect-[4/3]"
+                : "aspect-video"
         }`}
       >
         {canPlay && !activated ? (
@@ -1103,11 +1108,7 @@ function FeedCardView({
           <img
             src={thumb}
             alt={advertiser}
-            className={
-              isStaticAd
-                ? "absolute inset-0 w-full h-full object-cover bg-black"
-                : `w-full h-auto ${mediaMaxH} object-contain bg-black block`
-            }
+            className={`w-full h-auto ${mediaMaxH} object-contain bg-black block`}
             loading="lazy"
           />
         ) : (
