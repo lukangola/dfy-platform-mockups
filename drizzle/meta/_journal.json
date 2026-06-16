@@ -155,6 +155,13 @@
       "when": 1781551654579,
       "tag": "0021_wealthy_deathbird",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1781629699024,
+      "tag": "0022_pale_giant_girl",
+      "breakpoints": true
     }
   ]
 }

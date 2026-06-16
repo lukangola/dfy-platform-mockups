@@ -552,7 +552,9 @@ export const competitors = pgTable("competitors", {
   fbPageId: text("fb_page_id"),
   igHandle: text("ig_handle"),
   tiktokHandle: text("tiktok_handle"),
-  gethookdBrandId: text("gethookd_brand_id"),       // resolved + cached from gethookd /brands
+  adspyAdvertiserId: text("adspy_advertiser_id"),   // resolved + cached AdSpy advertiser userId (verified)
+  adspyVerified: boolean("adspy_verified").notNull().default(false),
+  gethookdBrandId: text("gethookd_brand_id"),       // (removed in the AdSpy switch — later task)
   brandspyActive: boolean("brandspy_active").notNull().default(false),
   source: text("source").notNull(), // "auto" | "manual"
   status: text("status").notNull().default("active"), // active | archived
@@ -619,7 +621,12 @@ export const adCreatives = pgTable("ad_creatives", {
   runtimeDays: integer("runtime_days"), // gethookd days_active (legacy: (adStop ?? today) − adStart)
   isActive: boolean("is_active"),
   variationCount: integer("variation_count"),
-  tractionScore: numeric("traction_score", { precision: 10, scale: 4 }), // gethookd performance_score/100 (0..1)
+  // AdSpy engagement — `shares` (snapshot.shareNum) is the rank driver; `likes`
+  // for display; `deepLinkUrl` (linkToAd) opens the live FB/IG post.
+  shares: integer("shares"),
+  likes: integer("likes"),
+  deepLinkUrl: text("deep_link_url"),
+  tractionScore: numeric("traction_score", { precision: 10, scale: 4 }), // 0..1 (AdSpy: log-scaled shares)
   // Tier-2 enrichment (deferred) — populated later for top-N items only.
   hook: text("hook"),
   transcript: text("transcript"),
