@@ -23,7 +23,7 @@
  * Re-ranking is idempotent: upsert on (brandId, refKey) refreshes the scores
  * but PRESERVES the swipe `status`, so a re-rank never un-skips an item.
  */
-import { and, desc, eq, inArray, or, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, or, type SQL } from "drizzle-orm";
 import { db, schema } from "./db.js";
 import { getBrandNicheState } from "./adConsoleNiche.js";
 import { ORGANIC_MIN_DURATION_SEC } from "./adConsoleOrganic.js";
@@ -262,13 +262,20 @@ function preferAd(candidate: AdCreative, current: AdCreative): boolean {
   return candidate.id < current.id;
 }
 
-/** Ads eligible for a brand: discovered via its niche stream OR its competitors. */
+/**
+ * Ads eligible for a brand: discovered via its niche stream OR its competitors —
+ * AND sourced from AdSpy (the sole ad source; legacy gethookd/facebook_ads rows
+ * in the pool are excluded so they never rank into the feed).
+ */
 async function loadEligibleAds(streamId: string | null, competitorIds: string[]): Promise<AdCreative[]> {
-  const conds: SQL[] = [];
-  if (streamId) conds.push(eq(schema.adCreatives.nicheStreamId, streamId));
-  if (competitorIds.length > 0) conds.push(inArray(schema.adCreatives.competitorId, competitorIds));
-  if (conds.length === 0) return [];
-  const where = conds.length === 1 ? conds[0] : or(...conds);
+  const provenance: SQL[] = [];
+  if (streamId) provenance.push(eq(schema.adCreatives.nicheStreamId, streamId));
+  if (competitorIds.length > 0) provenance.push(inArray(schema.adCreatives.competitorId, competitorIds));
+  if (provenance.length === 0) return [];
+  const where = and(
+    eq(schema.adCreatives.source, "adspy"),
+    provenance.length === 1 ? provenance[0] : or(...provenance),
+  );
   return db.select().from(schema.adCreatives).where(where);
 }
 
@@ -317,6 +324,25 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
           eq(schema.feedItems.rail, "competitor_ads"),
           eq(schema.feedItems.status, "new"),
           inArray(schema.feedItems.adCreativeId, collapsedIds),
+        ),
+      );
+  }
+
+  // AdSpy is the sole ad source now — drop any not-yet-actioned competitor-rail
+  // cards left over from the legacy (gethookd/facebook_ads) pool so they vanish
+  // from the rail. Keep any the operator already selected/skipped.
+  const legacyAdIds = (
+    await db.select({ id: schema.adCreatives.id }).from(schema.adCreatives).where(ne(schema.adCreatives.source, "adspy"))
+  ).map((r) => r.id);
+  if (legacyAdIds.length > 0) {
+    await db
+      .delete(schema.feedItems)
+      .where(
+        and(
+          eq(schema.feedItems.brandId, brandId),
+          eq(schema.feedItems.rail, "competitor_ads"),
+          eq(schema.feedItems.status, "new"),
+          inArray(schema.feedItems.adCreativeId, legacyAdIds),
         ),
       );
   }

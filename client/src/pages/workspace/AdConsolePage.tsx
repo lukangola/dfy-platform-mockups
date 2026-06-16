@@ -1002,9 +1002,9 @@ function FeedCardView({
   // Traction line: ads → runtime/variations/active, organic → views/likes.
   const tractionBits: Array<{ icon: React.ElementType; label: string }> = [];
   if (ad) {
-    const sh = compact(ad.shares);
+    const sh = ad.shares ? compact(ad.shares) : null;
     if (sh) tractionBits.push({ icon: Share2, label: `${sh} shares` });
-    const lk = compact(ad.likes);
+    const lk = ad.likes ? compact(ad.likes) : null;
     if (lk) tractionBits.push({ icon: Heart, label: lk });
   }
   if (organic) {
