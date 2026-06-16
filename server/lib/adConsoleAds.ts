@@ -1,24 +1,3 @@
-/**
- * Ad Creative Console — gethookd ad ingestion + traction scoring (Phase 3).
- *
- * Pulls competitor + niche ads from the gethookd API (server/lib/gethookd.ts)
- * and writes them into the GLOBAL deduped `ad_creatives` pool (keyed by
- * source + gethookd ad id).
- *
- * The "winning ad" signal (spec §6): gethookd exposes a per-ad
- * `performance_score`, so traction is scored directly via
- * `scoreGethookdTraction` (0..1) rather than the old longevity proxy. gethookd
- * also supplies `days_active` (→ runtimeDays) and `used_count` (→
- * variationCount) directly, so those are taken from the normalized record
- * instead of being recomputed here. The per-brand relevance + composite rank
- * that turns this pool into a feed lands in Phase 5.
- *
- * Credit safety: every pull is bounded by the niche stream's `caps`
- * (adsPerQuery × queriesPerPlatform) and only ever fires from an explicit manual
- * action — never on boot or on any auto/lazy path. No gethookd credits are spent
- * until an operator clicks "pull". A 402 surfaces as CreditExhaustedError, which
- * stops the current phase gracefully.
- */
 import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "./db.js";
 import { DEFAULT_NICHE_CONFIG, type NicheStreamConfig } from "./nicheConfig.js";
@@ -26,24 +5,31 @@ import { listCompetitors } from "./adConsoleCompetitors.js";
 import { ensureBrandNiche, getBrandNicheState } from "./adConsoleNiche.js";
 import { buildBrandSearchQueries, ensureBrandKeywords } from "./adConsoleKeywords.js";
 import {
-  getGethookdClient,
-  normalizeGethookdAd,
-  scoreGethookdTraction,
-  CreditExhaustedError,
-  type GethookdAd,
-  type GethookdBrand,
-  type GethookdClient,
-  type NormalizedGethookdAd,
-} from "./gethookd.js";
+  getAdspyClient,
+  normalizeAdspyAd,
+  scoreAdspyTraction,
+  adspySeenBetween,
+  adMatchesCompetitor,
+  AdspyAuthError,
+  ADSPY_COUNTRIES,
+  type AdspyAd,
+  type AdspyClient,
+  type NormalizedAdspyAd,
+} from "./adspy.js";
 import type { Competitor, NicheStream } from "../db/schema.js";
 
-// Single market for v1 — gethookd `location` filter. US is the larger of the
-// spec's US/CA target.
-const DEFAULT_COUNTRY = "US";
+// Source literal used for every row this module writes.
+const ADSPY_SOURCE = "adspy";
 
-// Source literal used for every row this module writes. Extracted here so the
-// insert value and the update WHERE clause can never drift apart.
-const GETHOOKD_SOURCE = "gethookd";
+// Every pull is scoped to ads SEEN in the last year (drops dead creatives).
+const ADSPY_SEEN_DAYS = 365;
+
+// Per-lane page caps (AdSpy returns 10 ads/page; orderBy=total_shares front-loads
+// the winners, so a couple of pages is plenty). Tunable.
+const ADSPY_KEYWORD_PAGES = 2; // ~20 ads / keyword
+const ADSPY_COMPETITOR_PAGES = 3; // ~30 of a verified advertiser's own ads
+const ADSPY_NAMEINCOPY_PAGES = 2; // ~20 whitelisted/affiliate clones
+const ADSPY_RESOLVE_PAGES = 2; // advertiser-search pages scanned to verify
 
 type Caps = NicheStreamConfig["caps"];
 
@@ -80,56 +66,40 @@ function resolveCaps(stream?: NicheStream | null): Caps {
 type Provenance = { nicheStreamId?: string | null; competitorId?: string | null; discoveryQuery?: string | null };
 
 /**
- * Upsert one ad into the global pool. Insert-or-refresh keyed by
- * (source, external_id): provenance (niche_stream_id / competitor_id) is
- * FIRST-WRITER-WINS — only set on insert, never clobbered on a later re-pull —
- * while the volatile traction signals (runtime, active, variations, score) are
- * refreshed so a still-running ad's traction tracks gethookd over time.
- *
- * `traction` is pre-computed by the caller (scoreGethookdTraction over the raw
- * gethookd ad) and passed in; `runtimeDays`/`variationCount` come straight from
- * the normalized record (gethookd supplies days_active / used_count directly).
+ * Upsert one ad into the global pool, keyed by (source, external_id). Provenance
+ * (competitor_id / discovery_query) is FIRST-WRITER-WINS via coalesce on re-pull;
+ * the volatile signals (shares, likes, active, traction) are always refreshed.
+ * `traction` is pre-computed by the caller (scoreAdspyTraction over the shares).
  */
 async function upsertAdCreative(
-  ad: NormalizedGethookdAd,
+  ad: NormalizedAdspyAd,
   traction: number,
   prov: Provenance,
-  caps?: Caps,
 ): Promise<"inserted" | "updated" | "skipped"> {
-  // Eligibility (spec §7): drop ads that stopped running more than the lookback
-  // window ago — stale, no longer representative of what's working now. Light
-  // version of the old FB check: only applies when an inactive ad has a stop
-  // date AND a caps lookback is in scope; never breaks when caps is absent.
-  if (caps && ad.adStop && !ad.isActive) {
-    const sinceStopDays = (Date.now() - ad.adStop.getTime()) / 86_400_000;
-    if (sinceStopDays > caps.adLookbackDays) return "skipped";
-  }
-
-  // gethookd supplies days_active directly → use it; do NOT recompute. used_count
-  // is meaningful (may be 0/undefined), so we store it as-is (no Math.max(1,…)
-  // floor the FB path applied) — a real 0 is signal, not a default.
-  const runtimeDays = ad.runtimeDays ?? null;
-  const variationCount = ad.variationCount ?? 0;
-
   const [insertedRow] = await db
     .insert(schema.adCreatives)
     .values({
-      source: GETHOOKD_SOURCE,
+      source: ADSPY_SOURCE,
       externalId: ad.externalId,
       advertiserName: ad.advertiserName ?? null,
       pageId: ad.pageId ?? null,
-      pageUrl: ad.pageUrl ?? null,
+      // Store the deep link in both pageUrl (the brief-handoff sourceUrl) and the
+      // dedicated deepLinkUrl column.
+      pageUrl: ad.deepLinkUrl ?? null,
+      deepLinkUrl: ad.deepLinkUrl ?? null,
       mediaUrls: ad.mediaUrls,
       thumbnailUrl: ad.thumbnailUrl ?? null,
       format: ad.format,
       copy: ad.copy ?? null,
       cta: ad.cta ?? null,
       landingUrl: ad.landingUrl ?? null,
-      adStart: ad.adStart ?? null,
-      adStop: ad.adStop ?? null,
-      runtimeDays,
+      adStart: ad.createdOn ?? null,
+      adStop: null,
+      runtimeDays: null,
       isActive: ad.isActive,
-      variationCount,
+      variationCount: null,
+      shares: ad.shares,
+      likes: ad.likes,
       tractionScore: traction.toString(),
       nicheStreamId: prov.nicheStreamId ?? null,
       competitorId: prov.competitorId ?? null,
@@ -141,53 +111,49 @@ async function upsertAdCreative(
 
   if (insertedRow) return "inserted";
 
-  // Already pooled — refresh the volatile signals, preserve provenance.
   await db
     .update(schema.adCreatives)
     .set({
       advertiserName: ad.advertiserName ?? null,
       pageId: ad.pageId ?? null,
-      pageUrl: ad.pageUrl ?? null,
+      pageUrl: ad.deepLinkUrl ?? null,
+      deepLinkUrl: ad.deepLinkUrl ?? null,
       mediaUrls: ad.mediaUrls,
       thumbnailUrl: ad.thumbnailUrl ?? null,
       format: ad.format,
       copy: ad.copy ?? null,
       cta: ad.cta ?? null,
       landingUrl: ad.landingUrl ?? null,
-      adStart: ad.adStart ?? null,
-      adStop: ad.adStop ?? null,
-      runtimeDays,
+      adStart: ad.createdOn ?? null,
       isActive: ad.isActive,
-      variationCount,
+      shares: ad.shares,
+      likes: ad.likes,
       tractionScore: traction.toString(),
-      // Backfill provenance query on re-pull WITHOUT clobbering the first writer
-      // (and never null it out when a competitor pull re-touches a niche ad).
+      // First-writer-wins: never clobber an existing competitor link / provenance,
+      // but backfill it when a later lane is the first to attribute the ad.
+      competitorId: sql`coalesce(${schema.adCreatives.competitorId}, ${prov.competitorId ?? null})`,
       discoveryQuery: sql`coalesce(${schema.adCreatives.discoveryQuery}, ${prov.discoveryQuery ?? null})`,
       rawJson: ad.rawJson,
       updatedAt: new Date(),
     })
-    .where(and(eq(schema.adCreatives.source, GETHOOKD_SOURCE), eq(schema.adCreatives.externalId, ad.externalId)));
+    .where(and(eq(schema.adCreatives.source, ADSPY_SOURCE), eq(schema.adCreatives.externalId, ad.externalId)));
 
   return "updated";
 }
 
 // ── Ingest orchestration ────────────────────────────────────────────────────
 
-/**
- * Normalize + score + upsert a batch of raw gethookd ads, tallying outcomes into
- * `result` (same inserted/updated/skipped scheme the old per-URL loop used). Ads
- * with no usable media are skipped before any DB write.
- */
-async function ingestAds(ads: GethookdAd[], prov: Provenance, caps: Caps, result: AdIngestResult): Promise<void> {
+/** Normalize + score + upsert a batch of raw AdSpy ads, tallying outcomes. Ads with no media are skipped. */
+async function ingestAds(ads: AdspyAd[], prov: Provenance, result: AdIngestResult): Promise<void> {
   for (const raw of ads) {
     result.itemsSeen++;
-    const n = normalizeGethookdAd(raw);
+    const n = normalizeAdspyAd(raw);
     if (!n.mediaUrls.length) {
       result.skipped++;
       continue;
     }
-    const traction = scoreGethookdTraction(raw);
-    const outcome = await upsertAdCreative(n, traction, prov, caps);
+    const traction = scoreAdspyTraction(n.shares);
+    const outcome = await upsertAdCreative(n, traction, prov);
     if (outcome === "inserted") result.inserted++;
     else if (outcome === "updated") result.updated++;
     else result.skipped++;
@@ -208,24 +174,14 @@ function dedupCI(values: string[]): string[] {
 }
 
 /**
- * Pull the niche stream's ads from gethookd. Two phases, both tagged to the niche
- * stream:
- *
- *  1. BREADTH via /explore — the brand's PROBLEM/OUTCOME angle phrases
- *     (`brandQueries`) drive the query, the same pool the organic rail searches.
- *     We deliberately key on the problem/symptom language (not product/category)
- *     to surface the organic-feeling, hook-led ads we want to mirror, filtered to
- *     winning/scaling performance and the caps lookback window. The niche's
- *     organic + pain-point terms fill any remaining query slots.
- *  2. AUTO-LEADER core — the niche's top brands by active-ad count (free
- *     /brands-by-category) are added to BrandSpy and their top ads pulled.
- *
- * The niche→gethookd category mapping is an open item: `stream.niche` is passed
- * straight through as the gethookd `niche` (no invented mapping). A 402 anywhere
- * stops the offending phase gracefully (CreditExhaustedError).
+ * LANE 2 — keyword/angle discovery. Searches Ad COPY (`texts`) for the brand's
+ * problem/outcome angle phrases (`brandQueries`), filled with the niche's organic
+ * + pain-point terms. Scoped to US/CA/UK/AU, ordered by shares. Each ad is tagged
+ * with the query that surfaced it (relevance provenance). An AdspyAuthError stops
+ * the sweep gracefully (token died).
  */
 export async function ingestNicheStreamAds(stream: NicheStream, brandQueries: string[] = []): Promise<AdIngestResult> {
-  const client = getGethookdClient();
+  const client = getAdspyClient();
   const caps = resolveCaps(stream);
   const result = emptyResult();
 
@@ -237,182 +193,141 @@ export async function ingestNicheStreamAds(stream: NicheStream, brandQueries: st
     ? (stream.painPointKeywords as unknown[]).filter((x): x is string => typeof x === "string")
     : [];
 
-  // Brand angle (problem/outcome) phrases first, then niche problem-language fill.
   const queries = dedupCI([...brandQueries, ...nicheOrganic, ...painPoints]).slice(0, caps.queriesPerPlatform);
-
-  // Phase 1: breadth via /explore, driven by the brand's angle phrases. gethookd's
-  // `niche` filter expects its own taxonomy — our raw niche string matches nothing
-  // and zeroes the whole result set — so we DON'T send it; relevance comes from the
-  // text `query`. When the brand has no angle phrases yet, fall back to searching
-  // the niche word itself as the query.
   const sweepQueries = queries.length ? queries : stream.niche ? [stream.niche] : [];
+
   try {
     for (const q of sweepQueries) {
-      const res = await client.explore({
-        query: q,
-        location: DEFAULT_COUNTRY,
-        performanceScores: ["winning", "scaling"],
-        perPage: caps.adsPerQuery,
-      });
-      result.queriesRun++;
-      // Tag each ad with the query that surfaced it → relevance provenance (the
-      // ranker scores niche ads on this, not on re-matching their copy).
-      await ingestAds(res.data, { nicheStreamId: stream.id, competitorId: null, discoveryQuery: q }, caps, result);
+      for (let page = 1; page <= ADSPY_KEYWORD_PAGES; page++) {
+        const ads = await client.searchAds({
+          searches: [{ type: "texts", value: q }],
+          countries: ADSPY_COUNTRIES,
+          seenBetween: adspySeenBetween(ADSPY_SEEN_DAYS),
+          orderBy: "total_shares",
+          page,
+        });
+        if (!ads.length) break;
+        result.queriesRun++;
+        await ingestAds(ads, { nicheStreamId: stream.id, competitorId: null, discoveryQuery: q }, result);
+      }
     }
   } catch (e) {
-    if (!(e instanceof CreditExhaustedError)) throw e;
-    // Credits exhausted mid-breadth — stop here, return what we got.
-    return result;
+    if (e instanceof AdspyAuthError) return result;
+    throw e;
   }
-
-  // Phase 2 (auto-leader via brands-by-category) is DISABLED: gethookd's
-  // `parent_categories` taxonomy doesn't match our raw niche string, so it
-  // returns irrelevant brands (e.g. "Bank Repo Cars") — and BrandSpy slots are
-  // capped, so spying garbage brands burns the cap for no value. The breadth
-  // /explore phase above already populates the niche pool; named competitors are
-  // covered by ingestCompetitorAds. Re-enable once a real niche→category map exists.
 
   return result;
 }
 
-const NAME_NOISE_RE = /\b(coffee|superfoods?|mushrooms?|drinks?|beverages?|organics?|co|inc|llc|ltd|company|brand|the)\b/gi;
-
-/** Normalize a brand/competitor name to lowercased alphanumeric words. */
-function nameWords(s: string): string[] {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .split(" ")
-    .filter((w) => w.length >= 2);
+/** Skip the name-in-copy lane for ultra-short single-word names (too noisy even with exact phrase). */
+function isGenericName(name: string): boolean {
+  const words = name.trim().replace(/[^a-z0-9 ]/gi, "").split(/\s+/).filter(Boolean);
+  return words.length === 1 && words[0].length <= 3;
 }
 
 /**
- * Resolve a competitor name to the RIGHT gethookd brand. The raw `?search=` is
- * brittle: it fuzzy-matches substrings (so "Ryze" returned "Advisoryzen Jobs")
- * and misses brands whose gethookd name differs from ours ("Wunderground Coffee"
- * vs "Wunderground"). We therefore: (1) search a few name variations (raw,
- * slash-normalized, suffix-stripped); (2) require the candidate to share a whole
- * word with the competitor name — never take a no-shared-word fuzzy hit; and
- * (3) among the survivors, prefer the brand with the most active ads (the real
- * brand has thousands; a coincidental match has a handful). Returns null when
- * nothing plausible matches, so we never pull a wrong brand's ads.
+ * Resolve a competitor to its AdSpy advertiser id (actor.userId), VERIFIED only:
+ * search advertisers by name, then accept the first candidate whose ad matches
+ * the competitor's fb_page_id (FB) or ig_handle (IG). Returns null when the
+ * competitor has nothing to verify against, or no candidate verifies — we never
+ * pull a wrong advertiser.
  */
-async function resolveGethookdBrand(
-  client: GethookdClient,
-  name: string,
-  fbPageId?: string | null,
-): Promise<GethookdBrand | null> {
-  const compWords = new Set(nameWords(name));
-  if (compWords.size === 0) return null;
-
-  const cleaned = name.replace(/[\\/]+/g, " ").replace(/\s+/g, " ").trim();
-  const stripped = cleaned.replace(NAME_NOISE_RE, " ").replace(/\s+/g, " ").trim();
-  const queries = Array.from(new Set([name, cleaned, stripped].filter((q) => q.trim().length >= 2)));
-
-  const byId = new Map<number, GethookdBrand>();
-  for (const q of queries) {
-    try {
-      const { data } = await client.searchBrands(q);
-      for (const b of data) byId.set(b.id, b);
-    } catch {
-      /* one query failing shouldn't abort resolution */
+async function resolveAdspyAdvertiser(client: AdspyClient, competitor: Competitor): Promise<string | null> {
+  const hasIdentity = Boolean(competitor.fbPageId?.trim()) || Boolean(competitor.igHandle?.trim());
+  if (!hasIdentity) return null;
+  for (let page = 1; page <= ADSPY_RESOLVE_PAGES; page++) {
+    const ads = await client.searchAds({
+      searches: [{ type: "advertisers", value: competitor.name }],
+      countries: ADSPY_COUNTRIES,
+      seenBetween: adspySeenBetween(ADSPY_SEEN_DAYS),
+      orderBy: "total_shares",
+      page,
+    });
+    if (!ads.length) break;
+    for (const raw of ads) {
+      const n = normalizeAdspyAd(raw);
+      if (adMatchesCompetitor(n, { fbPageId: competitor.fbPageId, igHandle: competitor.igHandle })) {
+        return n.advertiserId ?? null;
+      }
     }
   }
-
-  // Strongest signal: the brand's Meta page id (external_id) === the competitor's
-  // fb_page_id. Exact + name-independent — disambiguates "Ryze" and rescues
-  // odd-named brands the name search only barely surfaces.
-  const fb = fbPageId?.trim();
-  if (fb) {
-    for (const b of Array.from(byId.values())) {
-      if (b.external_id && b.external_id === fb) return b;
-    }
-  }
-
-  let best: GethookdBrand | null = null;
-  let bestScore = -1;
-  for (const b of Array.from(byId.values())) {
-    const bWords = nameWords(b.name);
-    const exact = bWords.join(" ") === Array.from(compWords).join(" ");
-    const overlap = bWords.filter((w) => compWords.has(w)).length;
-    if (!exact && overlap === 0) continue; // no shared whole word → reject the fuzzy hit
-    // Whole-word overlap dominates; active-ad volume breaks ties toward the real brand.
-    const score = (exact ? 1000 : overlap * 100) + Math.log10((b.active_ads ?? 0) + 1);
-    if (score > bestScore) {
-      bestScore = score;
-      best = b;
-    }
-  }
-  return best;
+  return null;
 }
 
 /**
- * Pull one competitor's ads from gethookd. Resolves (and caches) the gethookd
- * brand id from the competitor's name on first use, ensures the brand is in
- * BrandSpy, then pulls its top ads. Best-effort: skips cleanly when the brand
- * can't be resolved; a 402 propagates so the caller can stop the batch.
+ * LANE 1 — one competitor's ads. (1a) The competitor's OWN ads via the verified,
+ * cached AdSpy advertiser id. (1b) Whitelisted/affiliate clones via an exact-phrase
+ * search of the competitor NAME in ad copy. Both are tagged with competitor_id so
+ * they earn full competitor relevance + boost. An AdspyAuthError propagates to stop
+ * the batch.
  */
-export async function ingestCompetitorAds(competitor: Competitor, nicheStreamId: string | null, caps: Caps): Promise<AdIngestResult> {
-  const client = getGethookdClient();
+export async function ingestCompetitorAds(
+  competitor: Competitor,
+  nicheStreamId: string | null,
+): Promise<AdIngestResult> {
+  const client = getAdspyClient();
   const result = emptyResult();
 
-  // Resolve + cache the gethookd brand id from the competitor's name.
-  let brandId = competitor.gethookdBrandId?.trim() || null;
-  if (!brandId) {
-    const match = await resolveGethookdBrand(client, competitor.name, competitor.fbPageId);
-    if (!match) {
-      console.log(`[ad-console] no gethookd brand matched competitor "${competitor.name}"`);
-      return result;
-    }
-    // BrandSpy + /brandspy/{id}/top-ads require gethookd's INTERNAL id, NOT external_id.
-    brandId = String(match.id);
-    await db
-      .update(schema.competitors)
-      .set({ gethookdBrandId: brandId, updatedAt: new Date() })
-      .where(eq(schema.competitors.id, competitor.id));
-    console.log(`[ad-console] resolved "${competitor.name}" → gethookd brand_id=${brandId} ("${match.name}")`);
-  }
-
-  // Ensure the brand is monitored (BrandSpy). A 402 must stop the batch; any
-  // other failure (e.g. plan cap) shouldn't block trying top-ads.
-  if (!competitor.brandspyActive) {
-    try {
-      const ok = await client.addBrandSpy(brandId);
+  // 1a — verified advertiser pull (resolve + cache the AdSpy advertiser id once).
+  let advertiserId = competitor.adspyAdvertiserId?.trim() || null;
+  if (!advertiserId) {
+    advertiserId = await resolveAdspyAdvertiser(client, competitor);
+    if (advertiserId) {
       await db
         .update(schema.competitors)
-        .set({ brandspyActive: ok, updatedAt: new Date() })
+        .set({ adspyAdvertiserId: advertiserId, adspyVerified: true, updatedAt: new Date() })
         .where(eq(schema.competitors.id, competitor.id));
-    } catch (e) {
-      if (e instanceof CreditExhaustedError) throw e;
-      console.warn(`[ad-console] BrandSpy add failed for "${competitor.name}" (trying top-ads anyway):`, e);
+      console.log(`[ad-console] verified "${competitor.name}" → AdSpy advertiser ${advertiserId}`);
+    } else {
+      console.log(`[ad-console] could NOT verify "${competitor.name}" on AdSpy (no own-ad rows this pull)`);
+    }
+  }
+  if (advertiserId) {
+    for (let page = 1; page <= ADSPY_COMPETITOR_PAGES; page++) {
+      const ads = await client.searchAds({
+        userId: advertiserId,
+        countries: ADSPY_COUNTRIES,
+        seenBetween: adspySeenBetween(ADSPY_SEEN_DAYS),
+        orderBy: "total_shares",
+        page,
+      });
+      if (!ads.length) break;
+      result.queriesRun++;
+      await ingestAds(ads, { competitorId: competitor.id, nicheStreamId, discoveryQuery: null }, result);
     }
   }
 
-  const top = await client.brandTopAds(brandId, 20);
-  result.queriesRun++;
-  await ingestAds(top.data, { competitorId: competitor.id, nicheStreamId }, caps, result);
+  // 1b — competitor-name-in-copy (ungated; catches whitelisted/affiliate clones).
+  if (!isGenericName(competitor.name)) {
+    for (let page = 1; page <= ADSPY_NAMEINCOPY_PAGES; page++) {
+      const ads = await client.searchAds({
+        searches: [{ type: "texts", value: competitor.name, locked: true }],
+        countries: ADSPY_COUNTRIES,
+        seenBetween: adspySeenBetween(ADSPY_SEEN_DAYS),
+        orderBy: "total_shares",
+        page,
+      });
+      if (!ads.length) break;
+      result.queriesRun++;
+      // discoveryQuery = name → the ranker shows a "mentions {name}" chip.
+      await ingestAds(ads, { competitorId: competitor.id, nicheStreamId, discoveryQuery: competitor.name }, result);
+    }
+  }
+
   return result;
 }
 
-/**
- * Pull every active (non-archived) competitor for a brand. Best-effort per
- * competitor: one competitor failing (e.g. gethookd 500 / unresolvable brand)
- * shouldn't abort the batch — it's logged and skipped. A CreditExhaustedError
- * (402) DOES stop the batch, since further pulls would only fail the same way.
- */
 export async function ingestBrandCompetitorAds(
   brandId: string,
   nicheStreamId: string | null,
-  caps: Caps,
 ): Promise<{ result: AdIngestResult; competitorsPulled: number }> {
   const competitors = (await listCompetitors(brandId)).filter((c) => c.status !== "archived");
   const agg = emptyResult();
   for (const c of competitors) {
     try {
-      mergeResult(agg, await ingestCompetitorAds(c, nicheStreamId, caps));
+      mergeResult(agg, await ingestCompetitorAds(c, nicheStreamId));
     } catch (e) {
-      if (e instanceof CreditExhaustedError) break;
+      if (e instanceof AdspyAuthError) break;
       console.error(`[ad-console] competitor ad pull failed for "${c.name}":`, e);
     }
   }
@@ -430,7 +345,7 @@ export type BrandAdIngestSummary = {
 /**
  * Brand-level manual pull. Ingests the brand's niche-stream ads (when the niche
  * is a seeded stream) and its competitors' ads into the shared pool, returning
- * per-scope counts. Synchronous (one gethookd request per query) — this is the
+ * per-scope counts. Synchronous (one AdSpy request per query) — this is the
  * explicit, operator-triggered Phase-3 path; the weekly async orchestration lands in a
  * later phase. Throws PromptNotConfiguredError / "no products" up to the route
  * (→ 424) when niche detection can't run for a niche-scoped pull.
@@ -469,7 +384,7 @@ export async function ingestBrandAds(brandId: string, scope: "niche" | "competit
   }
 
   if (wantCompetitors) {
-    const { result, competitorsPulled: n } = await ingestBrandCompetitorAds(brandId, stream?.id ?? null, resolveCaps(stream));
+    const { result, competitorsPulled: n } = await ingestBrandCompetitorAds(brandId, stream?.id ?? null);
     competitorAds = result;
     competitorsPulled = n;
   }
