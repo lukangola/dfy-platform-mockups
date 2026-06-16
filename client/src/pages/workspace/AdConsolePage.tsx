@@ -477,7 +477,7 @@ export default function AdConsolePage() {
           <div>
             <h1 className="text-lg font-semibold text-white/90 flex items-center gap-2">
               <Radar size={18} className="text-cyan-400" />
-              Ad Creative Console
+              Ad Inspiration Console
             </h1>
             <p className="text-xs text-white/30 mt-1 font-mono flex items-center gap-2 flex-wrap">
               <span>{activeBrand ? activeBrand.name : "No brand selected"}</span>
@@ -564,7 +564,7 @@ export default function AdConsolePage() {
           <GuardPanel
             icon={ShieldAlert}
             title="Manager access required"
-            body="The Ad Creative Console is available to managers and admins. Ask an admin to upgrade your role if you need access."
+            body="The Ad Inspiration Console is available to managers and admins. Ask an admin to upgrade your role if you need access."
           />
         ) : !activeBrand ? (
           <GuardPanel
@@ -576,7 +576,7 @@ export default function AdConsolePage() {
           <GuardPanel
             icon={ShieldAlert}
             title="DFY clients only"
-            body="The Ad Creative Console is enabled per brand. An admin can flag this brand as a DFY client under Settings → Clients to turn it on."
+            body="The Ad Inspiration Console is enabled per brand. An admin can flag this brand as a DFY client under Settings → Clients to turn it on."
           />
         ) : loadError ? (
           <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs font-mono text-rose-300">
