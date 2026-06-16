@@ -21,10 +21,14 @@ import type { Competitor, NicheStream } from "../db/schema.js";
 // Source literal used for every row this module writes.
 const ADSPY_SOURCE = "adspy";
 
-// Date scoping for pulls. null = NO date filter (all-time) so we don't miss
-// older high-share creatives the operator sees in the AdSpy web UI; set a day
-// count to re-enable a "seen recently" window. (Operator request 2026-06-16.)
-const ADSPY_SEEN_DAYS: number | null = null;
+// Date scoping for pulls: only ads SEEN within the last 2 years (730 days) — recent
+// enough to be relevant, wide enough to catch evergreen high-share creatives. Set to
+// null for no date filter (all-time). (Operator request 2026-06-17.)
+const ADSPY_SEEN_DAYS: number | null = 730;
+
+// English-only ads. AdSpy uses ISO 639-2/T 3-letter codes — "eng" (verified live;
+// "en" zeroes results).
+const ADSPY_LANG = "eng";
 
 /** seenBetween window for a pull, or undefined (all-time) when ADSPY_SEEN_DAYS is null. */
 function seenWindow(): [string, string] | undefined {
@@ -210,6 +214,7 @@ export async function ingestNicheStreamAds(stream: NicheStream, brandQueries: st
           searches: [{ type: "texts", value: q }],
           countries: ADSPY_COUNTRIES,
           seenBetween: seenWindow(),
+          lang: ADSPY_LANG,
           orderBy: "total_shares",
           page,
         });
@@ -247,6 +252,7 @@ async function resolveAdspyAdvertiser(client: AdspyClient, competitor: Competito
       searches: [{ type: "advertisers", value: competitor.name }],
       countries: ADSPY_COUNTRIES,
       seenBetween: seenWindow(),
+      lang: ADSPY_LANG,
       orderBy: "total_shares",
       page,
     });
@@ -295,6 +301,7 @@ export async function ingestCompetitorAds(
         userId: advertiserId,
         countries: ADSPY_COUNTRIES,
         seenBetween: seenWindow(),
+        lang: ADSPY_LANG,
         orderBy: "total_shares",
         page,
       });
@@ -311,6 +318,7 @@ export async function ingestCompetitorAds(
         searches: [{ type: "texts", value: competitor.name, locked: true }],
         countries: ADSPY_COUNTRIES,
         seenBetween: seenWindow(),
+        lang: ADSPY_LANG,
         orderBy: "total_shares",
         page,
       });

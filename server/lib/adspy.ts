@@ -29,6 +29,8 @@ export interface AdspySearchParams {
   siteType?: "facebook" | "instagram";
   mediaType?: "video" | "photo";
   seenBetween?: [string, string];
+  /** ISO 639-2/T 3-letter language code, e.g. "eng" (verified; "en" zeroes results). */
+  lang?: string;
   username?: string;
   userId?: string;
   orderBy?: string;
@@ -105,6 +107,7 @@ export class AdspyClient {
     if (p.siteType) body.siteType = p.siteType;
     if (p.mediaType) body.mediaType = p.mediaType;
     if (p.seenBetween) body.seenBetween = p.seenBetween;
+    if (p.lang) body.lang = p.lang;
     if (p.username) body.username = p.username;
     if (p.userId) body.userId = p.userId;
     if (p.orderBy) body.orderBy = p.orderBy;
