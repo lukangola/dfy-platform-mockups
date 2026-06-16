@@ -607,11 +607,13 @@ export default function AdConsolePage() {
                         <span className="font-medium text-white/80">
                           {activeBrand ? activeBrand.name : "your brand"}
                         </span>
-                        ’s personalized inspiration feed. We surface{" "}
-                        <span className="text-indigo-300">competitor ads</span> running in your niche
-                        alongside <span className="text-cyan-300">viral organic videos</span> that are
-                        highly relevant to your brand — your one place for fresh ad &amp; organic content
-                        ideas to recreate.
+                        ’s personalized inspiration feed — more than a competitor watch. We pull{" "}
+                        <span className="text-indigo-300">competitor ads</span> and research new ads
+                        around the main angles you’re targeting, then{" "}
+                        <span className="font-medium text-white/80">rank every one by relevance</span>{" "}
+                        to your brand. <span className="text-cyan-300">Viral organic videos</span> are
+                        surfaced and ranked the same way — so the most on-message ideas rise to the top,
+                        ready to recreate.
                       </p>
                       {feedKeywords.length > 0 && (
                         <div className="mt-2 flex flex-wrap items-center gap-1.5">
