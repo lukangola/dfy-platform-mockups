@@ -603,16 +603,16 @@ export default function AdConsolePage() {
                     role="switch"
                     aria-checked={staticsOnly}
                     onClick={() => setStaticsOnly((v) => !v)}
-                    className="flex items-center gap-2 group"
+                    className="group -mx-1 flex select-none items-center gap-2.5 rounded-md px-1 py-0.5 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-violet-400/40"
                     title="Show only static (non-video) creatives"
                   >
                     <span
-                      className={`relative w-7 h-4 rounded-full transition-colors shrink-0 ${
-                        staticsOnly ? "bg-violet-500/60" : "bg-white/[0.12]"
+                      className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${
+                        staticsOnly ? "bg-violet-500/70" : "bg-white/[0.14]"
                       }`}
                     >
                       <span
-                        className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${
+                        className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
                           staticsOnly ? "translate-x-3.5" : "translate-x-0.5"
                         }`}
                       />
