@@ -554,8 +554,6 @@ export const competitors = pgTable("competitors", {
   tiktokHandle: text("tiktok_handle"),
   adspyAdvertiserId: text("adspy_advertiser_id"),   // resolved + cached AdSpy advertiser userId (verified)
   adspyVerified: boolean("adspy_verified").notNull().default(false),
-  gethookdBrandId: text("gethookd_brand_id"),       // legacy column — no longer written (removed in AdSpy switch)
-  brandspyActive: boolean("brandspy_active").notNull().default(false),
   source: text("source").notNull(), // "auto" | "manual"
   status: text("status").notNull().default("active"), // active | archived
   /** Why auto-discovery surfaced this competitor (LLM rationale); null for manual adds. */
