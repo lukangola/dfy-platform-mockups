@@ -30,20 +30,12 @@ import { ORGANIC_MIN_DURATION_SEC } from "./adConsoleOrganic.js";
 import { DEFAULT_NICHE_CONFIG, type NicheStreamConfig } from "./nicheConfig.js";
 import type { AdCreative, FeedItem, NicheStream, OrganicPost } from "../db/schema.js";
 
-// ── Ad traction sub-blend ────────────────────────────────────────────────────
-// gethookd's `performance_score` is its own quality composite, but we enrich it
-// with two always-present signals it under-weights:
-//   - LONGEVITY (days_active): the best available proxy for sustained ad spend.
-//     gethookd's actual spend field is populated for <20% of ads and only as a
-//     coarse "$0–500" band, so it's unusable — but an ad that's run 90+ days is
-//     one the advertiser keeps paying for, i.e. it works.
-//   - SCALING (used_count): an advertiser running many variants of one creative
-//     is scaling a proven winner.
-const TRACTION_PERF_W = 0.5;
-const TRACTION_LONGEVITY_W = 0.35;
-const TRACTION_SCALE_W = 0.15;
-const LONGEVITY_SATURATION_DAYS = 90; // 90+ days live ⇒ full longevity credit
-const VARIATION_SATURATION = 4; // used_count 5+ ⇒ full scaling credit
+// ── Ad traction ───────────────────────────────────────────────────────────────
+// AdSpy gives real engagement, so traction = the ad's REAL share count, log-scaled
+// to 0..1 (~31 shares → 0, ~31k → 1). Log keeps one mega-viral outlier from
+// flattening the rest while preserving "more shares = higher" within a tier.
+const AD_SHARES_LO_LOG = 1.5;
+const AD_SHARES_HI_LOG = 4.5;
 
 // Pooled ads are here because they're in the brand's niche or from a tracked
 // competitor — a sparse-copy ad can still be relevant, so never disqualify it.
@@ -58,7 +50,8 @@ const WORD_WEIGHT = 0.4;
 // Recency decays linearly to 0 across this window. Wider than the organic
 // recency filter so a long-running (older) ad still earns partial recency while
 // its traction score carries the longevity signal.
-const RECENCY_WINDOW_DAYS = 180;
+// 365-day decay — matches the AdSpy `seenBetween` pull window.
+const RECENCY_WINDOW_DAYS = 365;
 const DAY_MS = 86_400_000;
 
 // Competitor-ad boost (added to the otherwise-0..1 composite). A soft +0.3 keeps
@@ -147,16 +140,10 @@ function composite(traction: number, relevance: number, recency: number, w: Nich
   return round4(w.traction * traction + w.relevance * relevance + w.recency * recency);
 }
 
-/**
- * Ad traction = gethookd quality score + longevity (sustained-spend proxy) +
- * scaling (variation count). Longevity/variation come from the pooled columns
- * (`runtimeDays` = days_active, `variationCount` = used_count).
- */
+/** Ad traction = real shares, log-scaled to 0..1 (matches scoreAdspyTraction). */
 function adTraction(ad: AdCreative): number {
-  const perf = clamp01(toNum(ad.tractionScore)); // gethookd performance_score / 100
-  const longevity = clamp01((ad.runtimeDays ?? 0) / LONGEVITY_SATURATION_DAYS);
-  const scale = clamp01(((ad.variationCount ?? 1) - 1) / VARIATION_SATURATION);
-  return round4(clamp01(TRACTION_PERF_W * perf + TRACTION_LONGEVITY_W * longevity + TRACTION_SCALE_W * scale));
+  const shares = Math.max(0, ad.shares ?? 0);
+  return round4(clamp01((Math.log10(shares + 1) - AD_SHARES_LO_LOG) / (AD_SHARES_HI_LOG - AD_SHARES_LO_LOG)));
 }
 
 function resolveWeights(stream: NicheStream | null): NicheStreamConfig["weights"] {
@@ -365,7 +352,15 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
     const comp = composite(traction, relevance, recency, weights) + (ad.competitorId ? COMPETITOR_AD_BOOST : 0);
     // Card chip shows WHY the ad is here: a niche ad shows the angle that surfaced
     // it; a competitor ad shows a "competitor" tag (the card already names the brand).
-    const chips = ad.competitorId ? ["competitor"] : foundQuery ? [foundQuery] : matched;
+    // Competitor's OWN ad (no query) → "competitor"; a name-in-copy clone (query =
+    // the competitor name) → "mentions {name}"; a keyword-lane ad → its query.
+    const chips = ad.competitorId
+      ? foundQuery
+        ? [`mentions ${foundQuery}`]
+        : ["competitor"]
+      : foundQuery
+        ? [foundQuery]
+        : matched;
     await upsertFeedItem({
       brandId,
       itemType: "ad",
