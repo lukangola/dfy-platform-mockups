@@ -32,6 +32,15 @@ describe("AdspyClient.searchAds", () => {
     expect(ads).toHaveLength(2);
   });
 
+  it("sends page:0 (0-indexed — the top-shares page, must not be dropped)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => [] });
+    const c = new AdspyClient({ apiKey: "tok", baseUrl: "https://api.test", fetchImpl });
+    await c.searchAds({ searches: [{ type: "texts", value: "x" }], orderBy: "total_shares", page: 0 });
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit & { headers: Record<string, string> }];
+    const body = JSON.parse(init.body as string);
+    expect(body.page).toBe(0);
+  });
+
   it("throws AdspyAuthError on 401", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({}) });
     const c = new AdspyClient({ apiKey: "tok", baseUrl: "https://api.test", fetchImpl });

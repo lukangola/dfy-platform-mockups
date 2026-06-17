@@ -111,7 +111,10 @@ export class AdspyClient {
     if (p.username) body.username = p.username;
     if (p.userId) body.userId = p.userId;
     if (p.orderBy) body.orderBy = p.orderBy;
-    if (p.page) body.page = p.page;
+    // AdSpy pagination is 0-INDEXED: page 0 is the first page (the highest-ranked
+    // results). Must use !== undefined, not a truthy check — page 0 is the page we
+    // most want and a truthy check would silently drop it.
+    if (p.page !== undefined) body.page = p.page;
 
     const res = await this.fetchImpl(this.baseUrl + "/api/ad", {
       method: "POST",

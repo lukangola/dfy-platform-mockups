@@ -36,7 +36,9 @@ function seenWindow(): [string, string] | undefined {
 }
 
 // Per-lane page caps (AdSpy returns 10 ads/page; orderBy=total_shares front-loads
-// the winners, so a couple of pages is plenty). Tunable.
+// the winners, so a couple of pages is plenty). Tunable. NOTE: AdSpy pages are
+// 0-indexed — every loop below runs page = 0 .. CAP-1 so it includes page 0, the
+// top-shares winners. Starting at page 1 silently drops the single best ad.
 const ADSPY_KEYWORD_PAGES = 2; // ~20 ads / keyword
 const ADSPY_COMPETITOR_PAGES = 3; // ~30 of a verified advertiser's own ads
 const ADSPY_NAMEINCOPY_PAGES = 2; // ~20 whitelisted/affiliate clones
@@ -209,7 +211,7 @@ export async function ingestNicheStreamAds(stream: NicheStream, brandQueries: st
 
   try {
     for (const q of sweepQueries) {
-      for (let page = 1; page <= ADSPY_KEYWORD_PAGES; page++) {
+      for (let page = 0; page < ADSPY_KEYWORD_PAGES; page++) {
         const ads = await client.searchAds({
           searches: [{ type: "texts", value: q }],
           countries: ADSPY_COUNTRIES,
@@ -247,7 +249,7 @@ function isGenericName(name: string): boolean {
 async function resolveAdspyAdvertiser(client: AdspyClient, competitor: Competitor): Promise<string | null> {
   const hasIdentity = Boolean(competitor.fbPageId?.trim()) || Boolean(competitor.igHandle?.trim());
   if (!hasIdentity) return null;
-  for (let page = 1; page <= ADSPY_RESOLVE_PAGES; page++) {
+  for (let page = 0; page < ADSPY_RESOLVE_PAGES; page++) {
     const ads = await client.searchAds({
       searches: [{ type: "advertisers", value: competitor.name }],
       countries: ADSPY_COUNTRIES,
@@ -296,7 +298,7 @@ export async function ingestCompetitorAds(
     }
   }
   if (advertiserId) {
-    for (let page = 1; page <= ADSPY_COMPETITOR_PAGES; page++) {
+    for (let page = 0; page < ADSPY_COMPETITOR_PAGES; page++) {
       const ads = await client.searchAds({
         userId: advertiserId,
         countries: ADSPY_COUNTRIES,
@@ -313,7 +315,7 @@ export async function ingestCompetitorAds(
 
   // 1b — competitor-name-in-copy (ungated; catches whitelisted/affiliate clones).
   if (!isGenericName(competitor.name)) {
-    for (let page = 1; page <= ADSPY_NAMEINCOPY_PAGES; page++) {
+    for (let page = 0; page < ADSPY_NAMEINCOPY_PAGES; page++) {
       const ads = await client.searchAds({
         searches: [{ type: "texts", value: competitor.name, locked: true }],
         countries: ADSPY_COUNTRIES,
