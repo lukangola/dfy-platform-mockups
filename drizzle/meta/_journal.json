@@ -169,6 +169,13 @@
       "when": 1781633123111,
       "tag": "0023_silly_boomer",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1781711563080,
+      "tag": "0024_yellow_alex_power",
+      "breakpoints": true
     }
   ]
 }
