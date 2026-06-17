@@ -1038,16 +1038,22 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            {(product.researchStatus === "failed" || product.researchStatus === "complete") && (
-              <button
-                onClick={handleRetrigger}
-                disabled={retriggering}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg text-[10px] font-mono text-white/50 border border-white/[0.08] hover:bg-white/[0.03] transition-all disabled:opacity-50"
-              >
-                <RefreshCw size={11} className={retriggering ? "animate-spin" : ""} />
-                {retriggering ? "Retrying..." : "Re-run Research"}
-              </button>
-            )}
+            {/* Always offer Re-run — including while "researching"/"pending". Research
+                is fire-and-forget with no resume, so a server restart mid-run leaves
+                a product pinned at "researching" forever; without an escape hatch in
+                that state it's unrecoverable from the UI. */}
+            <button
+              onClick={handleRetrigger}
+              disabled={retriggering}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg text-[10px] font-mono text-white/50 border border-white/[0.08] hover:bg-white/[0.03] transition-all disabled:opacity-50"
+            >
+              <RefreshCw size={11} className={retriggering ? "animate-spin" : ""} />
+              {retriggering
+                ? "Retrying..."
+                : product.researchStatus === "researching" || product.researchStatus === "pending"
+                  ? "Restart Research"
+                  : "Re-run Research"}
+            </button>
             {product.researchStatus === "complete" && (
               <Link href="/workspace/apps/broll">
                 <button
