@@ -367,6 +367,15 @@ export function retriggerResearch(id: string): Promise<{ ok: true }> {
 }
 
 /**
+ * Operator MANUAL edit of the product research markdown (PUT). Overwrites
+ * research.markdown verbatim and preserves the angles + other research fields.
+ * Re-fetch getProduct() afterwards to render the new diagnosis.
+ */
+export function updateProductResearch(id: string, markdown: string): Promise<{ ok: true }> {
+  return put<{ ok: true }>(`/api/products/${id}/research`, { markdown });
+}
+
+/**
  * Rename a product (or, in the future, update other simple fields).
  * Currently the PATCH endpoint only accepts `name`; the heavier fields
  * (mechanism, reference sheet, research, images) each have their own
@@ -416,6 +425,22 @@ export function addProductAngle(
   return post<{ angle: ProductAngle; angles: ProductAngle[] }>(
     `/api/products/${productId}/angles`,
     { description },
+  );
+}
+
+/**
+ * Append a pre-written angle VERBATIM (no AI) — the "paste an angle" mode.
+ * Stores `name` + `block` as-is on research.angles. Use when the operator
+ * already has a finished/approved angle rather than an idea to elaborate.
+ */
+export function addProductAngleManual(
+  productId: string,
+  name: string,
+  block: string,
+): Promise<{ angle: ProductAngle; angles: ProductAngle[] }> {
+  return post<{ angle: ProductAngle; angles: ProductAngle[] }>(
+    `/api/products/${productId}/angles`,
+    { name, block },
   );
 }
 

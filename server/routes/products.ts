@@ -457,6 +457,40 @@ productsRouter.post("/", requireAuth, async (req: Request, res: Response) => {
 });
 
 /**
+ * PUT /api/products/:id/research — operator manual edit of the research markdown.
+ * Body: { markdown }. Overwrites `research.markdown` in place, preserving every
+ * other research field (angles, mechanism, imageCandidates, meta) and flipping
+ * researchStatus to "complete". Does NOT re-extract angles — those are managed
+ * separately via the angle endpoints — so a hand-curated angle set survives a
+ * research rewrite.
+ */
+productsRouter.put("/:id/research", async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { markdown?: string };
+    const markdown = typeof body.markdown === "string" ? body.markdown : "";
+    if (!markdown.trim()) return sendError(res, 400, "markdown is required");
+
+    const [row] = await db
+      .select()
+      .from(schema.products)
+      .where(eq(schema.products.id, req.params.id))
+      .limit(1);
+    if (!row) return sendError(res, 404, "Product not found");
+
+    const research = (row.research ?? {}) as Record<string, unknown>;
+    await db
+      .update(schema.products)
+      .set({ research: { ...research, markdown }, researchStatus: "complete", researchError: null })
+      .where(eq(schema.products.id, row.id));
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[products] edit research markdown failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
  * GET /api/products/:id/angles
  * Returns the 5 strategic angles extracted from the product's research markdown.
  * Cached on products.research.angles after first extraction.
@@ -525,20 +559,21 @@ productsRouter.get("/:id/angles", async (req: Request, res: Response) => {
 
 /**
  * POST /api/products/:id/angles
- * Body: { description: string }
+ * Body: { description } (elaborate)  OR  { name, block } (paste verbatim)
  *
- * Elaborates a user-supplied strategic angle description into a full angle
- * block (matching the shape of the auto-extracted angles) and appends it to
- * products.research.angles. Returns the new angle.
+ * Two modes, both appending ONE angle to products.research.angles and returning
+ * the new angle + full list:
+ *   - ELABORATE: a short `description` → Claude expands it into the full angle
+ *     format, grounded in the product's research markdown.
+ *   - PASTE: `name` + `block` → stored verbatim, no Claude (drop in a
+ *     pre-written / client-approved angle).
  *
- * Only runs Claude for this one angle — does NOT re-run the full product
- * research or re-extract all 5 existing angles.
+ * Either way, only the new angle is touched — the existing angles and research
+ * markdown are left untouched.
  */
 productsRouter.post("/:id/angles", async (req: Request, res: Response) => {
   try {
-    const body = (req.body ?? {}) as { description?: string };
-    const description = body.description?.trim() ?? "";
-    if (!description) return sendError(res, 400, "description is required");
+    const body = (req.body ?? {}) as { description?: string; name?: string; block?: string };
 
     const [row] = await db
       .select()
@@ -551,6 +586,29 @@ productsRouter.post("/:id/angles", async (req: Request, res: Response) => {
       markdown?: string;
       angles?: { name: string; block: string }[];
     };
+
+    // ── Manual paste mode: name + block supplied → store the angle VERBATIM (no
+    // Claude). Lets an operator drop in a pre-written / client-approved angle
+    // as-is. Doesn't require research markdown to exist. ──────────────────────
+    const manualName = body.name?.trim();
+    const manualBlock = body.block?.trim();
+    if (manualName && manualBlock) {
+      const angle: StoredAngle = { id: randomUUID(), name: manualName, block: manualBlock };
+      const existing = Array.isArray(research.angles) ? research.angles : [];
+      const nextAngles = [...existing, angle];
+      await db
+        .update(schema.products)
+        .set({ research: { ...research, angles: nextAngles } })
+        .where(eq(schema.products.id, row.id));
+      return res.json({ angle, angles: nextAngles });
+    }
+
+    // ── Elaborate mode (default): a short description → Claude expands it into
+    // the full angle format, grounded in the product's research markdown. ─────
+    const description = body.description?.trim() ?? "";
+    if (!description) {
+      return sendError(res, 400, "Provide either a `description` (to elaborate) or `name` + `block` (to paste an angle).");
+    }
     const markdown = typeof research.markdown === "string" ? research.markdown : "";
     if (!markdown) {
       return sendError(res, 424, "Research markdown not available yet — run product research first");
