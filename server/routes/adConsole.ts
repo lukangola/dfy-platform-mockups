@@ -14,6 +14,7 @@ import { type Request, type Response, Router } from "express";
 import { requireAuth, requireManager } from "../lib/auth.js";
 import { PromptNotConfiguredError } from "../lib/prompts.js";
 import { isApifyConfigured } from "../lib/apify.js";
+import { isAdspyConfigured } from "../lib/adspy.js";
 import { detectBrandNiche, getBrandNicheState } from "../lib/adConsoleNiche.js";
 import { ensureBrandConsoleReady } from "../lib/adConsoleBootstrap.js";
 import {
@@ -285,17 +286,17 @@ adConsoleRouter.post("/brands/:brandId/keyword-sets", async (req: Request, res: 
 // ── Ad ingestion (Phase 3) ─────────────────────────────────────────────────
 
 /**
- * POST /api/ad-console/brands/:brandId/ingest-ads — manual FB Ad Library pull.
+ * POST /api/ad-console/brands/:brandId/ingest-ads — manual AdSpy ad pull.
  * Body: { scope?: "niche" | "competitors" | "all" } (default "all").
- * Bounded by the niche stream's per-run caps; spends Apify credits, so it ONLY
- * runs from this explicit operator action — never on boot/auto. 424 when Apify
- * isn't configured, the brand has no products, or the classifier prompt is
- * missing (niche-scoped pulls need a classified brand).
+ * Bounded by the niche stream's per-run caps; ONLY runs from this explicit
+ * operator action — never on boot/auto. 424 when AdSpy isn't configured,
+ * the brand has no products, or the classifier prompt is missing
+ * (niche-scoped pulls need a classified brand).
  */
 adConsoleRouter.post("/brands/:brandId/ingest-ads", async (req: Request, res: Response) => {
   try {
-    if (!isApifyConfigured()) {
-      return sendError(res, 424, "APIFY_TOKEN is not configured — set it before pulling ads.");
+    if (!isAdspyConfigured()) {
+      return sendError(res, 424, "ADSPY_TOKEN is not configured — set it before pulling ads.");
     }
     const scopeRaw = (req.body ?? {}).scope;
     const scope = scopeRaw === "niche" || scopeRaw === "competitors" ? scopeRaw : "all";
@@ -413,13 +414,17 @@ adConsoleRouter.post("/brands/:brandId/feed/:feedItemId/skip", async (req: Reque
  * POST /api/ad-console/brands/:brandId/pull-feed — the single operator button.
  * Chains ingest-ads → ingest-organic → rank-feed in the background and returns
  * immediately; the client polls the status endpoint below. Idempotent while a
- * run is in flight (`alreadyRunning=true`). Spends Apify credits, so it ONLY
- * fires from this explicit action and 424s when Apify isn't configured.
+ * run is in flight (`alreadyRunning=true`). Pulls ads via AdSpy and organic
+ * via Apify, so it ONLY fires from this explicit action and 424s when either
+ * AdSpy or Apify isn't configured.
  */
 adConsoleRouter.post("/brands/:brandId/pull-feed", async (req: Request, res: Response) => {
   try {
+    if (!isAdspyConfigured()) {
+      return sendError(res, 424, "ADSPY_TOKEN is not configured — set it before pulling the feed (ads).");
+    }
     if (!isApifyConfigured()) {
-      return sendError(res, 424, "APIFY_TOKEN is not configured — set it before pulling the feed.");
+      return sendError(res, 424, "APIFY_TOKEN is not configured — set it before pulling the feed (organic).");
     }
     const { run, alreadyRunning } = startFeedPull(req.params.brandId);
     res.status(202).json({ run, alreadyRunning });

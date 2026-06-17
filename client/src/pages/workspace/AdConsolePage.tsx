@@ -22,8 +22,8 @@ import { useLocation } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Radar, Loader2, ShieldAlert, Building2, RefreshCw, Sparkles, Settings2,
-  Plus, Trash2, Archive, ArrowUpRight, SkipForward, Wand2, Play,
-  Megaphone, Flame, Lightbulb, X, ExternalLink, Clock, Eye, Heart, Layers,
+  Plus, Trash2, Archive, ArrowUpRight, Wand2, Play,
+  Megaphone, Flame, Lightbulb, X, ExternalLink, Clock, Eye, Bookmark, Share2, Heart,
   CheckCircle2, AlertTriangle, ChevronDown,
 } from "lucide-react";
 import {
@@ -171,6 +171,26 @@ export default function AdConsolePage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  // Competitor-ads rail filter: when on, show only static (non-video) creatives.
+  const [staticsOnly, setStaticsOnly] = useState(false);
+
+  // "What is this feed?" explainer — dismissible, remembered per browser.
+  const [explainerDismissed, setExplainerDismissed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("adConsoleExplainerDismissed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  function dismissExplainer() {
+    setExplainerDismissed(true);
+    try {
+      localStorage.setItem("adConsoleExplainerDismissed", "1");
+    } catch {
+      /* private mode — best effort */
+    }
+  }
+
   // Background bootstrap (auto niche + competitors + keywords). Fires once per
   // brand per mount when the brand isn't set up yet; the ref de-dupes re-fires.
   const [bootstrapping, setBootstrapping] = useState(false);
@@ -201,7 +221,7 @@ export default function AdConsolePage() {
     // above organic, so a single combined top-N query would starve the organic
     // rail (all top slots would be ads). Per-rail limits keep both populated.
     const [comp, org] = await Promise.all([
-      getAdConsoleFeed(activeBrandId, { rail: "competitor_ads", status: "new", limit: 60 }),
+      getAdConsoleFeed(activeBrandId, { rail: "competitor_ads", status: "new", limit: 200 }),
       getAdConsoleFeed(activeBrandId, { rail: "trending_organic", status: "new", limit: 250 }),
     ]);
     setFeedCards([...comp.feed, ...org.feed]);
@@ -235,7 +255,7 @@ export default function AdConsolePage() {
           listAdConsoleCompetitors(activeBrandId),
           listAdConsoleKeywordSets(activeBrandId),
           // Per-rail fetches (ads are score-boosted above organic — see refreshFeed).
-          getAdConsoleFeed(activeBrandId, { rail: "competitor_ads", status: "new", limit: 60 }),
+          getAdConsoleFeed(activeBrandId, { rail: "competitor_ads", status: "new", limit: 200 }),
           getAdConsoleFeed(activeBrandId, { rail: "trending_organic", status: "new", limit: 250 }),
           getAdConsoleIdeas(activeBrandId),
           getAdConsoleFeedPullStatus(activeBrandId),
@@ -424,21 +444,50 @@ export default function AdConsolePage() {
   }
 
   // ── Split feed into rails ─────────────────────────────────────────────────────
-  const competitorCards = feedCards.filter((c) => c.item.rail === "competitor_ads");
-  const organicCards = feedCards.filter((c) => c.item.rail === "trending_organic");
+  // Guard against empty cards: a feed item whose joined ad/organic row is missing
+  // (orphaned reference) or that has no media would render as a blank "Unknown"
+  // placeholder — drop it so the rail only ever shows real, displayable creatives.
+  const isRenderable = (c: AdConsoleFeedCard): boolean => {
+    if (c.ad) {
+      const media = Array.isArray(c.ad.mediaUrls) ? c.ad.mediaUrls : [];
+      return media.length > 0 || Boolean(c.ad.thumbnailUrl);
+    }
+    return Boolean(c.organic);
+  };
+  const competitorCards = feedCards.filter((c) => c.item.rail === "competitor_ads" && isRenderable(c));
+  const organicCards = feedCards.filter((c) => c.item.rail === "trending_organic" && isRenderable(c));
+  // "Statics only" filter on the competitor rail — hides video creatives.
+  const competitorVisible = staticsOnly
+    ? competitorCards.filter((c) => (c.ad?.format ?? "").toLowerCase() === "static")
+    : competitorCards;
 
   const nicheLabel = niche?.stream?.displayName ?? niche?.nicheType ?? null;
 
+  // Distinct search keywords that actually surfaced this feed — shown in the
+  // explainer so the brand sees what went into it. Competitor ads carry the
+  // literal "competitor" sentinel instead of a query, so we drop it.
+  const feedKeywords = Array.from(
+    new Set(
+      feedCards
+        .flatMap((c) => c.item.matchedKeywords ?? [])
+        .map((kw) => kw.trim())
+        .filter((kw) => kw && kw.toLowerCase() !== "competitor"),
+    ),
+  ).slice(0, 10);
+
   // ── Render ────────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen lg:h-screen lg:flex lg:flex-col lg:overflow-hidden">
       {/* Header */}
-      <div className="border-b border-white/[0.06] px-6 py-5 sticky top-0 z-20" style={{ background: "#0D0F12" }}>
+      <div
+        className="border-b border-white/[0.06] px-6 py-5 sticky top-0 z-20 lg:shrink-0"
+        style={{ background: "#0D0F12" }}
+      >
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-lg font-semibold text-white/90 flex items-center gap-2">
               <Radar size={18} className="text-cyan-400" />
-              Ad Creative Console
+              Ad Inspo Console
             </h1>
             <p className="text-xs text-white/30 mt-1 font-mono flex items-center gap-2 flex-wrap">
               <span>{activeBrand ? activeBrand.name : "No brand selected"}</span>
@@ -492,7 +541,7 @@ export default function AdConsolePage() {
         {isRunning(pullRun) && pullRun && <PullProgress run={pullRun} />}
       </div>
 
-      <div className="p-6">
+      <div className="p-6 lg:flex-1 lg:min-h-0 lg:flex lg:flex-col lg:overflow-hidden">
         {/* Notice banner */}
         <AnimatePresence>
           {notice && (
@@ -525,7 +574,7 @@ export default function AdConsolePage() {
           <GuardPanel
             icon={ShieldAlert}
             title="Manager access required"
-            body="The Ad Creative Console is available to managers and admins. Ask an admin to upgrade your role if you need access."
+            body="The Ad Inspo Console is available to managers and admins. Ask an admin to upgrade your role if you need access."
           />
         ) : !activeBrand ? (
           <GuardPanel
@@ -537,7 +586,7 @@ export default function AdConsolePage() {
           <GuardPanel
             icon={ShieldAlert}
             title="DFY clients only"
-            body="The Ad Creative Console is enabled per brand. An admin can flag this brand as a DFY client under Settings → Clients to turn it on."
+            body="The Ad Inspo Console is enabled per brand. An admin can flag this brand as a DFY client under Settings → Clients to turn it on."
           />
         ) : loadError ? (
           <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs font-mono text-rose-300">
@@ -549,6 +598,61 @@ export default function AdConsolePage() {
           </div>
         ) : (
           <>
+            {/* "What is this feed?" explainer — dismissible */}
+            <AnimatePresence initial={false}>
+              {!explainerDismissed && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden lg:shrink-0"
+                >
+                  <div className="mb-4 flex items-start gap-3 rounded-xl border border-white/[0.07] bg-white/[0.02] px-4 py-3">
+                    <div className="mt-0.5 shrink-0 rounded-lg border border-cyan-500/20 bg-cyan-500/10 p-1.5">
+                      <Sparkles size={14} className="text-cyan-300" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs leading-relaxed text-white/55">
+                        This is{" "}
+                        <span className="font-medium text-white/80">
+                          {activeBrand ? activeBrand.name : "your brand"}
+                        </span>
+                        ’s personalized inspiration feed — more than a competitor watch. We pull{" "}
+                        <span className="text-indigo-300">competitor ads</span> and research new ads
+                        around the main angles you’re targeting, then{" "}
+                        <span className="font-medium text-white/80">rank every one by relevance</span>{" "}
+                        to your brand. <span className="text-cyan-300">Viral organic videos</span> are
+                        surfaced and ranked the same way — so the most on-message ideas rise to the top,
+                        ready to recreate.
+                      </p>
+                      {feedKeywords.length > 0 && (
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          <span className="text-[10px] font-mono uppercase tracking-wider text-white/30">
+                            Searched for
+                          </span>
+                          {feedKeywords.map((kw) => (
+                            <span
+                              key={kw}
+                              className="rounded border border-white/[0.08] bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-mono text-white/50"
+                            >
+                              {kw}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={dismissExplainer}
+                      aria-label="Dismiss"
+                      className="-mr-1 -mt-0.5 shrink-0 rounded-md p-1 text-white/25 transition-colors hover:bg-white/[0.05] hover:text-white/60"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             {/* Setup panel (collapsible) */}
             <AnimatePresence initial={false}>
               {setupOpen && (
@@ -556,7 +660,7 @@ export default function AdConsolePage() {
                   initial={{ opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: "auto" }}
                   exit={{ opacity: 0, height: 0 }}
-                  className="overflow-hidden"
+                  className="overflow-hidden lg:shrink-0"
                 >
                   <SetupPanel
                     niche={niche}
@@ -573,18 +677,51 @@ export default function AdConsolePage() {
               )}
             </AnimatePresence>
 
-            {/* Three rails */}
-            <div className="grid gap-4 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1fr)] items-start">
+            {/* Three rails — each column scrolls independently on desktop */}
+            <div className="grid gap-4 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1fr)] items-start lg:items-stretch lg:flex-1 lg:min-h-0">
               {/* Competitor ads — left */}
               <Rail
                 icon={Megaphone}
                 accent="indigo"
                 title="Competitor Ads"
                 subtitle="Longest-running creatives in the niche"
-                count={competitorCards.length}
-                empty="No ranked competitor ads yet — pull this week's feed to populate this rail."
+                count={competitorVisible.length}
+                empty={
+                  staticsOnly
+                    ? "No static creatives in this rail — turn off “Statics only” to see videos too."
+                    : "No ranked competitor ads yet — pull this week's feed to populate this rail."
+                }
+                controls={
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={staticsOnly}
+                    onClick={() => setStaticsOnly((v) => !v)}
+                    className="group -mx-1 flex select-none items-center gap-2.5 rounded-md px-1 py-0.5 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-violet-400/40"
+                    title="Show only static (non-video) creatives"
+                  >
+                    <span
+                      className={`relative h-[18px] w-8 shrink-0 rounded-full transition-colors ${
+                        staticsOnly ? "bg-violet-500/70" : "bg-white/[0.18]"
+                      }`}
+                    >
+                      <span
+                        className={`absolute left-0.5 top-0.5 h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${
+                          staticsOnly ? "translate-x-3.5" : "translate-x-0"
+                        }`}
+                      />
+                    </span>
+                    <span
+                      className={`text-[10px] font-mono tracking-wide transition-colors ${
+                        staticsOnly ? "text-violet-200" : "text-white/40 group-hover:text-white/70"
+                      }`}
+                    >
+                      Statics only
+                    </span>
+                  </button>
+                }
               >
-                {competitorCards.map((card) => (
+                {competitorVisible.map((card) => (
                   <FeedCardView
                     key={card.item.id}
                     card={card}
@@ -734,6 +871,10 @@ const ACCENT: Record<Accent, { text: string; chip: string; ring: string; dot: st
   },
 };
 
+// The primary card action ("Make it mine" / "Save idea") is ONE consistent color
+// across every rail — not the per-rail accent — to match the reference card.
+const PRIMARY_ACTION_BTN = "bg-violet-500/15 text-violet-200 border-violet-500/30";
+
 function Rail({
   icon: Icon,
   accent,
@@ -742,6 +883,7 @@ function Rail({
   count,
   empty,
   hero,
+  controls,
   children,
 }: {
   icon: React.ElementType;
@@ -751,15 +893,17 @@ function Rail({
   count: number;
   empty: string;
   hero?: boolean;
+  /** Optional control strip rendered directly under the header (e.g. a filter toggle). */
+  controls?: React.ReactNode;
   children: React.ReactNode;
 }) {
   const a = ACCENT[accent];
   return (
     <section
-      className={`rounded-xl border ${a.ring} bg-white/[0.02] ${hero ? "lg:bg-white/[0.03]" : ""} flex flex-col`}
+      className={`rounded-xl border ${a.ring} bg-white/[0.02] ${hero ? "lg:bg-white/[0.03]" : ""} flex flex-col lg:h-full lg:min-h-0 lg:overflow-hidden`}
     >
       {/* Rail header */}
-      <header className="px-4 py-3 border-b border-white/[0.06] flex items-center gap-2.5">
+      <header className="px-4 py-3 border-b border-white/[0.06] flex items-center gap-2.5 lg:shrink-0">
         <div className={`w-7 h-7 rounded-lg border ${a.ring} bg-white/[0.03] flex items-center justify-center shrink-0`}>
           <Icon size={14} className={a.text} />
         </div>
@@ -772,8 +916,11 @@ function Rail({
         </div>
       </header>
 
-      {/* Cards */}
-      <div className="p-3 space-y-3">
+      {/* Optional control strip (filters) — fixed directly under the header */}
+      {controls && <div className="px-4 py-2 border-b border-white/[0.06] lg:shrink-0">{controls}</div>}
+
+      {/* Cards — scroll within the column on desktop */}
+      <div className="p-3 space-y-3 lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
         {count === 0 ? (
           <div className="px-3 py-10 text-center text-[11px] text-white/30 font-mono leading-relaxed">{empty}</div>
         ) : (
@@ -846,31 +993,39 @@ function FeedCardView({
   const hook = ad?.hook ?? organic?.hook ?? null;
   const body = ad?.copy ?? organic?.caption ?? null;
   const format = (ad?.format ?? organic?.format ?? "").toLowerCase();
-  const sourceUrl = ad?.pageUrl ?? organic?.postUrl ?? ad?.landingUrl ?? null;
+  const sourceUrl = ad?.deepLinkUrl ?? ad?.pageUrl ?? organic?.postUrl ?? ad?.landingUrl ?? null;
   // Labelled "View on …" link to the original organic post.
   const platformLabel =
     organic?.source === "tiktok" ? "TikTok" : organic?.source === "instagram" ? "Instagram" : "Original";
   // Deep-link straight to this creative's Meta Ad Library entry (externalId is
   // the ad_archive_id). Lets the operator confirm an ad really came from the
   // competitor's library, and fall back to the advertiser's full library page.
+  // Prefer the AdSpy deep link to the live FB/IG post; fall back to the Meta Ad
+  // Library lookup when a legacy row has no deep link.
   const adLibraryUrl = ad?.externalId
     ? `https://www.facebook.com/ads/library/?id=${ad.externalId}`
     : ad?.pageId
       ? `https://www.facebook.com/ads/library/?view_all_page_id=${ad.pageId}`
       : null;
+  const adLink = ad?.deepLinkUrl ?? adLibraryUrl;
 
   // Traction line: ads → runtime/variations/active, organic → views/likes.
   const tractionBits: Array<{ icon: React.ElementType; label: string }> = [];
   if (ad) {
-    if (ad.runtimeDays != null) tractionBits.push({ icon: Clock, label: `${ad.runtimeDays}d running` });
-    if (ad.variationCount != null && ad.variationCount > 1)
-      tractionBits.push({ icon: Layers, label: `${ad.variationCount} variants` });
+    const sh = ad.shares ? compact(ad.shares) : null;
+    if (sh) tractionBits.push({ icon: Share2, label: `${sh} shares` });
+    const lk = ad.likes ? compact(ad.likes) : null;
+    if (lk) tractionBits.push({ icon: Heart, label: lk });
   }
   if (organic) {
     const v = compact(organic.views);
-    const l = compact(organic.likes);
     if (v) tractionBits.push({ icon: Eye, label: v });
-    if (l) tractionBits.push({ icon: Heart, label: l });
+    // Platform virality metric: TikTok → saves/bookmarks, Instagram → shares.
+    const isTikTok = organic.source === "tiktok";
+    const metric = compact(isTikTok ? organic.bookmarks : organic.shares);
+    if (metric) tractionBits.push({ icon: isTikTok ? Bookmark : Share2, label: metric });
+    if (organic.durationSec != null)
+      tractionBits.push({ icon: Clock, label: `${Math.round(organic.durationSec)}s` });
   }
 
   return (
@@ -974,13 +1129,9 @@ function FeedCardView({
           )}
         </div>
         {tractionBits.length > 0 && (
-          // Pin traction to the top-right for any player (video or embed) so it
-          // clears the control bar along the bottom edge; bottom-left for statics.
-          <div
-            className={`absolute ${
-              videoUrl || embedUrl ? "top-2 right-2" : "bottom-2 left-2"
-            } flex items-center gap-1.5 pointer-events-none`}
-          >
+          // Pin traction to the top-right on every card (clears the video control
+          // bar; statics get the badge in the same place for consistency).
+          <div className="absolute top-2 right-2 flex items-center gap-1.5 pointer-events-none">
             {tractionBits.map((t, i) => {
               const TIcon = t.icon;
               return (
@@ -1003,15 +1154,15 @@ function FeedCardView({
           <span className="text-[11px] font-medium text-white/75 truncate">{advertiser}</span>
           {handle && <span className="text-[10px] font-mono text-white/30 truncate">{handle}</span>}
           <div className="ml-auto shrink-0 flex items-center gap-2">
-            {adLibraryUrl && (
+            {adLink && (
               <a
-                href={adLibraryUrl}
+                href={adLink}
                 target="_blank"
                 rel="noreferrer"
                 className="flex items-center gap-1 text-[9px] font-mono text-white/30 hover:text-cyan-300 transition-colors"
-                title="View in Meta Ad Library"
+                title="View the original ad"
               >
-                <ExternalLink size={11} /> Ad Library
+                <ExternalLink size={11} /> Original ad
               </a>
             )}
             {isOrganic && organic?.postUrl ? (
@@ -1054,12 +1205,12 @@ function FeedCardView({
           </div>
         )}
 
-        {/* Actions */}
-        <div className="flex items-center gap-2 pt-1">
+        {/* Actions — stacked full-width (matches the reference card) */}
+        <div className="flex flex-col gap-1.5 pt-1">
           <button
             onClick={onMakeItMine}
             disabled={disabled}
-            className={`flex-1 flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border ${a.chip} hover:brightness-125 transition-all disabled:opacity-40`}
+            className={`w-full flex items-center justify-center gap-1.5 px-2.5 py-2.5 rounded-lg text-[11px] font-mono tracking-wide border ${PRIMARY_ACTION_BTN} hover:brightness-125 transition-all disabled:opacity-40`}
           >
             {busy ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
             Make it mine
@@ -1067,10 +1218,9 @@ function FeedCardView({
           <button
             onClick={onSkip}
             disabled={disabled}
-            className="flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/40 hover:text-white/70 hover:bg-white/[0.05] transition-all disabled:opacity-40"
-            title="Skip"
+            className="w-full flex items-center justify-center px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/40 hover:text-white/70 hover:bg-white/[0.05] transition-all disabled:opacity-40"
           >
-            <SkipForward size={12} />
+            Skip
           </button>
         </div>
       </div>
@@ -1145,12 +1295,12 @@ function IdeaCardView({
           </div>
         )}
 
-        {/* Actions */}
-        <div className="flex items-center gap-2 pt-1">
+        {/* Actions — stacked full-width (matches the reference card) */}
+        <div className="flex flex-col gap-1.5 pt-1">
           <button
             onClick={onSave}
             disabled={disabled}
-            className={`flex-1 flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border ${a.chip} hover:brightness-125 transition-all disabled:opacity-40`}
+            className={`w-full flex items-center justify-center gap-1.5 px-2.5 py-2.5 rounded-lg text-[11px] font-mono tracking-wide border ${PRIMARY_ACTION_BTN} hover:brightness-125 transition-all disabled:opacity-40`}
           >
             {busy ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
             Save idea
@@ -1158,10 +1308,9 @@ function IdeaCardView({
           <button
             onClick={onSkip}
             disabled={disabled}
-            className="flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/40 hover:text-white/70 hover:bg-white/[0.05] transition-all disabled:opacity-40"
-            title="Skip"
+            className="w-full flex items-center justify-center px-2.5 py-2 rounded-lg text-[11px] font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/40 hover:text-white/70 hover:bg-white/[0.05] transition-all disabled:opacity-40"
           >
-            <SkipForward size={12} />
+            Skip
           </button>
         </div>
       </div>

@@ -67,11 +67,12 @@ function compactNumber(n: number): string {
 }
 
 function adTractionBadge(ad: AdCreative): string | null {
-  const days = typeof ad.runtimeDays === "number" ? ad.runtimeDays : null;
-  const vars = typeof ad.variationCount === "number" && ad.variationCount > 1 ? ad.variationCount : null;
-  if (days == null) return vars ? `${vars} variations` : null;
-  const lead = ad.isActive ? `Active ${days} days` : `Ran ${days} days`;
-  return vars ? `${lead} · ${vars} variations` : lead;
+  const shares = typeof ad.shares === "number" && ad.shares > 0 ? ad.shares : null;
+  const likes = typeof ad.likes === "number" && ad.likes > 0 ? ad.likes : null;
+  const parts: string[] = [];
+  if (shares != null) parts.push(`${shares.toLocaleString("en-US")} shares`);
+  if (likes != null) parts.push(`${likes.toLocaleString("en-US")} likes`);
+  return parts.length ? parts.join(" · ") : null;
 }
 
 function organicTractionBadge(post: OrganicPost): string | null {

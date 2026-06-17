@@ -1713,6 +1713,10 @@ export type AdConsoleAdCreative = {
   runtimeDays: number | null;
   isActive: boolean | null;
   variationCount: number | null;
+  /** AdSpy real engagement + deep link to the live FB/IG post. */
+  shares: number | null;
+  likes: number | null;
+  deepLinkUrl: string | null;
   /** `numeric` → string on the wire. */
   tractionScore: string | null;
   hook: string | null;
@@ -1739,6 +1743,10 @@ export type AdConsoleOrganicPost = {
   likes: number | null;
   comments: number | null;
   shares: number | null;
+  /** TikTok saves (collectCount) — the TikTok virality metric. IG has no save count. */
+  bookmarks: number | null;
+  /** Clip length in seconds. */
+  durationSec: number | null;
   postedAt: string | null;
   transcript: string | null;
   format: string;

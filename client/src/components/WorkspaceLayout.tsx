@@ -40,10 +40,10 @@ const CLIENT_CONSOLE_ITEM = {
 
 // Ad Creative Console is gated like the Client Console: managers/admins AND
 // only when the active brand is flagged a DFY client (toggled by an admin under
-// Settings → Clients). Sits with the other operator surfaces, after Apps.
+// Settings → Clients). Pinned to the top of the nav when visible.
 const AD_CONSOLE_ITEM = {
   id: "ad-console",
-  label: "Ad Console",
+  label: "Ad Inspo Console",
   icon: Radar,
   path: "/workspace/ad-console",
   description: "Competitor + trend command center",
@@ -59,13 +59,13 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
   // Both manager consoles are DFY-only: shown to managers/admins only when the
   // active brand is flagged a DFY client.
   const showDfyConsoles = isManager && Boolean(activeBrand?.isDfyClient);
-  // Client Console sits right after Products; Ad Console sits after Apps.
+  // Ad Console is pinned to the top; Client Console sits right after Products.
   const navItems = [
+    ...(showDfyConsoles ? [AD_CONSOLE_ITEM] : []),
     NAV_ITEMS[0], // Products
     ...(showDfyConsoles ? [CLIENT_CONSOLE_ITEM] : []),
     NAV_ITEMS[1], // Brand Info
     NAV_ITEMS[2], // Apps
-    ...(showDfyConsoles ? [AD_CONSOLE_ITEM] : []),
     ...NAV_ITEMS.slice(3), // Assets, Workflows
   ];
 

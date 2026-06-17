@@ -23,11 +23,18 @@
  * Re-ranking is idempotent: upsert on (brandId, refKey) refreshes the scores
  * but PRESERVES the swipe `status`, so a re-rank never un-skips an item.
  */
-import { and, desc, eq, inArray, or, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, or, type SQL } from "drizzle-orm";
 import { db, schema } from "./db.js";
 import { getBrandNicheState } from "./adConsoleNiche.js";
+import { ORGANIC_MIN_DURATION_SEC } from "./adConsoleOrganic.js";
+import { scoreAdspyTraction } from "./adspy.js";
 import { DEFAULT_NICHE_CONFIG, type NicheStreamConfig } from "./nicheConfig.js";
 import type { AdCreative, FeedItem, NicheStream, OrganicPost } from "../db/schema.js";
+
+// Pooled ads are here because they're in the brand's niche or from a tracked
+// competitor — a sparse-copy ad can still be relevant, so never disqualify it.
+// Keyword-copy matches score ABOVE this floor; researched competitors score 1.0.
+const RELEVANCE_FLOOR = 0.4;
 
 // Weighted keyword-match score saturates here (≈ this many two-word hits = 1.0).
 const RELEVANCE_SATURATION = 5;
@@ -37,20 +44,36 @@ const WORD_WEIGHT = 0.4;
 // Recency decays linearly to 0 across this window. Wider than the organic
 // recency filter so a long-running (older) ad still earns partial recency while
 // its traction score carries the longevity signal.
-const RECENCY_WINDOW_DAYS = 180;
+// 365-day decay — matches the AdSpy `seenBetween` pull window.
+const RECENCY_WINDOW_DAYS = 365;
 const DAY_MS = 86_400_000;
 
-// Ads pulled from a RESEARCHED competitor's own ad-library page (competitorId
-// set) are the operator's primary target. Hard-tier them above niche-keyword-
-// discovered ads (whitelisting / affiliate pages, which lack a competitorId) by
-// adding a full point to the otherwise-0..1 composite — so the brand's actual
-// competitors sit on top, with quality still ordering within each tier.
-const COMPETITOR_AD_BOOST = 1;
+// Competitor-ad boost (added to the otherwise-0..1 composite). A soft +0.3 keeps
+// the brand's researched competitors leading the rail while still letting a
+// standout niche ad interleave — not a hard tier.
+const COMPETITOR_AD_BOOST = 0.3;
 
-// Organic ranks on: relevance (which angle keyword SURFACED the clip — not its
-// caption) as the lead signal, then shares (the virality the operator cares
-// about), then recency.
-const ORGANIC_WEIGHTS: NicheStreamConfig["weights"] = { traction: 0.4, relevance: 0.5, recency: 0.1 };
+// Operator toggle (2026-06-16): when true, the competitor_ads rail is ordered by
+// SHARES alone (log-scaled traction) — highest-share creatives on top, ignoring
+// relevance/recency/competitor boost. Flip to false to restore relevance-first.
+const RANK_ADS_BY_SHARES_ONLY = true;
+
+// Organic ranks 50/50 on relevance (which angle keyword SURFACED the clip — not
+// its caption) and traction (engagement-RATE + reach). Recency is not used.
+const ORGANIC_WEIGHTS: NicheStreamConfig["weights"] = { traction: 0.5, relevance: 0.5, recency: 0 };
+
+// Organic traction ranks on the ABSOLUTE platform virality metric (TikTok saves /
+// IG shares) on a log scale — the highest absolute share/save counts rise to the
+// top. Floor at the ingest gate (100); saturate at 100K. (Tunable.)
+const ORGANIC_VOL_LO_LOG = 2; // 100 saves/shares ⇒ 0
+const ORGANIC_VOL_HI_LOG = 5; // 100K saves/shares ⇒ 1
+
+/** Organic traction = ABSOLUTE platform virality volume (TikTok saves / IG shares), log-scaled. */
+function organicTraction(post: OrganicPost): number {
+  const isTikTok = post.source === "tiktok";
+  const primary = Math.max(0, (isTikTok ? post.bookmarks : post.shares) ?? 0);
+  return round4(clamp01((Math.log10(primary + 1) - ORGANIC_VOL_LO_LOG) / (ORGANIC_VOL_HI_LOG - ORGANIC_VOL_LO_LOG)));
+}
 
 function toNum(v: unknown, fallback = 0): number {
   if (typeof v === "number") return Number.isFinite(v) ? v : fallback;
@@ -114,6 +137,12 @@ function recencyScore(date: Date | null | undefined): number {
 
 function composite(traction: number, relevance: number, recency: number, w: NicheStreamConfig["weights"]): number {
   return round4(w.traction * traction + w.relevance * relevance + w.recency * recency);
+}
+
+// AdSpy gives real engagement, so ad traction = the canonical log-scaled share
+// score (see scoreAdspyTraction in adspy.ts) — one source of truth, no drift.
+function adTraction(ad: AdCreative): number {
+  return round4(scoreAdspyTraction(ad.shares ?? 0));
 }
 
 function resolveWeights(stream: NicheStream | null): NicheStreamConfig["weights"] {
@@ -214,13 +243,44 @@ async function upsertFeedItem(row: {
     });
 }
 
-/** Ads eligible for a brand: discovered via its niche stream OR its competitors. */
+/**
+ * Creative fingerprint for dedup. AdSpy (like Meta) stores every placement /
+ * refresh of the same ad as a distinct record with a UNIQUE id but IDENTICAL
+ * advertiser + copy (the media URL embeds the ad id, so it's never a reliable
+ * dedup key). We collapse on advertiser + normalized copy. Ads with no copy are
+ * left unique (keyed by id) so we never merge unrelated blank-copy creatives.
+ */
+function creativeFingerprint(a: AdCreative): string {
+  const copy = (a.copy ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  if (!copy) return `uniq:${a.id}`;
+  return `${(a.advertiserName ?? "").toLowerCase().trim()}|${copy}`;
+}
+
+/** Within a dedup group, prefer competitor-sourced (keeps the boost + provenance), then higher traction, then a stable id. */
+function preferAd(candidate: AdCreative, current: AdCreative): boolean {
+  const cc = Boolean(candidate.competitorId);
+  const cu = Boolean(current.competitorId);
+  if (cc !== cu) return cc;
+  const tc = toNum(candidate.tractionScore);
+  const tu = toNum(current.tractionScore);
+  if (tc !== tu) return tc > tu;
+  return candidate.id < current.id;
+}
+
+/**
+ * Ads eligible for a brand: discovered via its niche stream OR its competitors —
+ * AND sourced from AdSpy (the sole ad source; legacy gethookd/facebook_ads rows
+ * in the pool are excluded so they never rank into the feed).
+ */
 async function loadEligibleAds(streamId: string | null, competitorIds: string[]): Promise<AdCreative[]> {
-  const conds: SQL[] = [];
-  if (streamId) conds.push(eq(schema.adCreatives.nicheStreamId, streamId));
-  if (competitorIds.length > 0) conds.push(inArray(schema.adCreatives.competitorId, competitorIds));
-  if (conds.length === 0) return [];
-  const where = conds.length === 1 ? conds[0] : or(...conds);
+  const provenance: SQL[] = [];
+  if (streamId) provenance.push(eq(schema.adCreatives.nicheStreamId, streamId));
+  if (competitorIds.length > 0) provenance.push(inArray(schema.adCreatives.competitorId, competitorIds));
+  if (provenance.length === 0) return [];
+  const where = and(
+    eq(schema.adCreatives.source, "adspy"),
+    provenance.length === 1 ? provenance[0] : or(...provenance),
+  );
   return db.select().from(schema.adCreatives).where(where);
 }
 
@@ -244,16 +304,91 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
   const competitorIds = competitorRows.map((c) => c.id);
 
   // ── competitor_ads rail ──
-  const ads = await loadEligibleAds(streamId, competitorIds);
+  const allAds = await loadEligibleAds(streamId, competitorIds);
+
+  // Collapse near-identical creatives (same advertiser + copy across many ad ids)
+  // down to one representative so the rail isn't 30 copies of the same ad.
+  const repByFp = new Map<string, AdCreative>();
+  for (const ad of allAds) {
+    const fp = creativeFingerprint(ad);
+    const cur = repByFp.get(fp);
+    if (!cur || preferAd(ad, cur)) repByFp.set(fp, ad);
+  }
+  const ads = Array.from(repByFp.values());
+  const repIds = new Set(ads.map((a) => a.id));
+  const collapsedIds = allAds.filter((a) => !repIds.has(a.id)).map((a) => a.id);
+
+  // Drop not-yet-actioned feed_items for the collapsed duplicates so they vanish
+  // from the rail; keep any the operator already selected/skipped.
+  if (collapsedIds.length > 0) {
+    await db
+      .delete(schema.feedItems)
+      .where(
+        and(
+          eq(schema.feedItems.brandId, brandId),
+          eq(schema.feedItems.rail, "competitor_ads"),
+          eq(schema.feedItems.status, "new"),
+          inArray(schema.feedItems.adCreativeId, collapsedIds),
+        ),
+      );
+  }
+
+  // AdSpy is the sole ad source now — drop any not-yet-actioned competitor-rail
+  // cards left over from the legacy (gethookd/facebook_ads) pool so they vanish
+  // from the rail. Keep any the operator already selected/skipped.
+  const legacyAdIds = (
+    await db.select({ id: schema.adCreatives.id }).from(schema.adCreatives).where(ne(schema.adCreatives.source, "adspy"))
+  ).map((r) => r.id);
+  if (legacyAdIds.length > 0) {
+    await db
+      .delete(schema.feedItems)
+      .where(
+        and(
+          eq(schema.feedItems.brandId, brandId),
+          eq(schema.feedItems.rail, "competitor_ads"),
+          eq(schema.feedItems.status, "new"),
+          inArray(schema.feedItems.adCreativeId, legacyAdIds),
+        ),
+      );
+  }
+
   let adsRanked = 0;
   for (const ad of ads) {
     const hay = normalizeHaystack([ad.copy, ad.advertiserName, ad.cta]);
     const { matched, weighted } = matchKeywords(hay, pools.ad);
-    const relevance = relevanceFromMatch(weighted);
-    const traction = toNum(ad.tractionScore);
+    // Relevance from PROVENANCE, not the ad's copy: a researched competitor's ad is
+    // relevant by definition; a niche ad is scored on the angle QUERY that surfaced
+    // it (like the organic rail) — found by the brand's own angle phrase ⇒ top, by a
+    // niche seed term ⇒ secondary, by some other query ⇒ mid. Only ads with no stored
+    // query (legacy pulls) fall back to copy-matching, floored so they're not buried.
+    const foundQuery = (ad.discoveryQuery ?? "").toLowerCase().trim();
+    const relevance = ad.competitorId
+      ? 1
+      : pools.brandAngle.has(foundQuery)
+        ? 1
+        : pools.niche.has(foundQuery)
+          ? 0.6
+          : foundQuery
+            ? 0.5
+            : Math.max(relevanceFromMatch(weighted), RELEVANCE_FLOOR);
+    const traction = adTraction(ad);
     const recency = recencyScore(ad.adStop ?? ad.adStart ?? null);
-    // Hard-tier researched-competitor ads above niche-keyword ads (see boost doc).
-    const comp = composite(traction, relevance, recency, weights) + (ad.competitorId ? COMPETITOR_AD_BOOST : 0);
+    // SHARES-ONLY mode: order purely by log-scaled shares so the most-shared
+    // creatives sit on top. Otherwise: relevance-first composite + competitor boost.
+    const comp = RANK_ADS_BY_SHARES_ONLY
+      ? traction
+      : composite(traction, relevance, recency, weights) + (ad.competitorId ? COMPETITOR_AD_BOOST : 0);
+    // Card chip shows WHY the ad is here: a niche ad shows the angle that surfaced
+    // it; a competitor ad shows a "competitor" tag (the card already names the brand).
+    // Competitor's OWN ad (no query) → "competitor"; a name-in-copy clone (query =
+    // the competitor name) → "mentions {name}"; a keyword-lane ad → its query.
+    const chips = ad.competitorId
+      ? foundQuery
+        ? [`mentions ${foundQuery}`]
+        : ["competitor"]
+      : foundQuery
+        ? [foundQuery]
+        : matched;
     await upsertFeedItem({
       brandId,
       itemType: "ad",
@@ -262,20 +397,33 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
       refKey: `ad:${ad.id}`,
       relevance,
       composite: comp,
-      matched,
+      matched: chips,
     });
     adsRanked++;
   }
 
   // ── trending_organic rail ──
-  const organic: OrganicPost[] = streamId
+  const allOrganic: OrganicPost[] = streamId
     ? await db.select().from(schema.organicPosts).where(eq(schema.organicPosts.nicheStreamId, streamId))
     : [];
+  // Operator rule: clips must be ≥30s. Enforced at ingest for new pulls; applied
+  // here too so existing sub-30s clips drop out of the rail (unknown length kept).
+  const organic = allOrganic.filter((p) => p.durationSec == null || p.durationSec >= ORGANIC_MIN_DURATION_SEC);
+  const tooShortIds = allOrganic.filter((p) => p.durationSec != null && p.durationSec < ORGANIC_MIN_DURATION_SEC).map((p) => p.id);
+  if (tooShortIds.length > 0) {
+    await db
+      .delete(schema.feedItems)
+      .where(
+        and(
+          eq(schema.feedItems.brandId, brandId),
+          eq(schema.feedItems.rail, "trending_organic"),
+          eq(schema.feedItems.status, "new"),
+          inArray(schema.feedItems.organicPostId, tooShortIds),
+        ),
+      );
+  }
   let organicRanked = 0;
   for (const post of organic) {
-    // Eligibility (shares/duration for IG, bookmarks for TikTok) is enforced at
-    // ingest — everything in the pool already qualifies, so we just rank here.
-
     // Relevance from PROVENANCE, never the caption: the search keyword that
     // surfaced this clip. Found by one of the brand's own angle phrases ⇒ top;
     // by a niche seed term ⇒ secondary; otherwise a small floor.
@@ -289,10 +437,9 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
         : foundQuery
           ? 0.4
           : 0.3;
-    // Traction = shares (the virality signal the operator ranks on): 100→0.25,
-    // 1K→0.5, 10K→0.75, 100K→1.0.
-    const shares = Math.max(0, post.shares ?? 0);
-    const traction = round4(clamp01((Math.log10(shares + 1) - 1) / 4));
+    // Traction = engagement-RATE (saves/views for TikTok, shares/views for IG)
+    // blended with reach — rewards resonance without overranking raw-big clips.
+    const traction = organicTraction(post);
     const recency = recencyScore(post.postedAt ?? null);
     const comp = composite(traction, relevance, recency, ORGANIC_WEIGHTS);
     await upsertFeedItem({
@@ -318,7 +465,7 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
     niche: state.nicheType,
     seeded: state.seeded,
     streamId,
-    competitorAds: { considered: ads.length, ranked: adsRanked },
+    competitorAds: { considered: allAds.length, ranked: adsRanked },
     trendingOrganic: { considered: organic.length, ranked: organicRanked },
   };
 }

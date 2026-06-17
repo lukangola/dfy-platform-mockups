@@ -134,6 +134,41 @@
       "when": 1781312571629,
       "tag": "0018_public_banshee",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1781516194044,
+      "tag": "0019_true_shiva",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1781522991583,
+      "tag": "0020_steady_galactus",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1781551654579,
+      "tag": "0021_wealthy_deathbird",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1781629699024,
+      "tag": "0022_pale_giant_girl",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1781633123111,
+      "tag": "0023_silly_boomer",
+      "breakpoints": true
     }
   ]
 }

@@ -552,6 +552,8 @@ export const competitors = pgTable("competitors", {
   fbPageId: text("fb_page_id"),
   igHandle: text("ig_handle"),
   tiktokHandle: text("tiktok_handle"),
+  adspyAdvertiserId: text("adspy_advertiser_id"),   // resolved + cached AdSpy advertiser userId (verified)
+  adspyVerified: boolean("adspy_verified").notNull().default(false),
   source: text("source").notNull(), // "auto" | "manual"
   status: text("status").notNull().default("active"), // active | archived
   /** Why auto-discovery surfaced this competitor (LLM rationale); null for manual adds. */
@@ -601,8 +603,8 @@ export const adCreatives = pgTable("ad_creatives", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
-  source: text("source").notNull().default("facebook_ads"), // "facebook_ads"
-  externalId: text("external_id").notNull(), // Meta ad_archive_id — dedup key
+  source: text("source").notNull().default("facebook_ads"), // "adspy" (current) | "facebook_ads" (legacy Meta) — always set explicitly by writers
+  externalId: text("external_id").notNull(), // AdSpy ad id (legacy: Meta ad_archive_id) — dedup key
   advertiserName: text("advertiser_name"),
   pageId: text("page_id"),
   pageUrl: text("page_url"),
@@ -614,17 +616,23 @@ export const adCreatives = pgTable("ad_creatives", {
   landingUrl: text("landing_url"),
   adStart: timestamp("ad_start", { withTimezone: true }),
   adStop: timestamp("ad_stop", { withTimezone: true }),
-  runtimeDays: integer("runtime_days"), // (adStop ?? today) − adStart, clipped to 365d
+  runtimeDays: integer("runtime_days"), // AdSpy days_active (legacy: (adStop ?? today) − adStart)
   isActive: boolean("is_active"),
   variationCount: integer("variation_count"),
-  tractionScore: numeric("traction_score", { precision: 10, scale: 4 }), // intrinsic longevity score
+  // AdSpy engagement — `shares` (snapshot.shareNum) is the rank driver; `likes`
+  // for display; `deepLinkUrl` (linkToAd) opens the live FB/IG post.
+  shares: integer("shares"),
+  likes: integer("likes"),
+  deepLinkUrl: text("deep_link_url"),
+  tractionScore: numeric("traction_score", { precision: 10, scale: 4 }), // 0..1 (AdSpy: log-scaled shares)
   // Tier-2 enrichment (deferred) — populated later for top-N items only.
   hook: text("hook"),
   transcript: text("transcript"),
   // Discovery provenance (first writer wins).
   nicheStreamId: uuid("niche_stream_id"),
   competitorId: uuid("competitor_id"),
-  rawJson: jsonb("raw_json"), // full Apify item for re-derivation / debugging
+  discoveryQuery: text("discovery_query"), // angle query that surfaced this niche ad — drives relevance (provenance, not copy)
+  rawJson: jsonb("raw_json"), // full AdSpy ad item for re-derivation / debugging
 }, (t) => ({
   uniqSourceExternal: uniqueIndex("ad_creatives_source_external_uniq").on(t.source, t.externalId),
 }));
@@ -651,7 +659,9 @@ export const organicPosts = pgTable("organic_posts", {
   views: integer("views"),
   likes: integer("likes"),
   comments: integer("comments"),
-  shares: integer("shares"),
+  shares: integer("shares"), // IG reshares / TikTok shareCount — the IG virality metric
+  bookmarks: integer("bookmarks"), // TikTok saves (collectCount) — the TikTok virality metric (IG has no save count)
+  durationSec: integer("duration_sec"), // clip length in seconds
   postedAt: timestamp("posted_at", { withTimezone: true }),
   transcript: text("transcript"), // FREE for IG; deferred (paid) for TikTok
   format: text("format").notNull().default("video"), // reels/tiktok are video

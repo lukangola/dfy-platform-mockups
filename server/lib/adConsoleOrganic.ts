@@ -53,7 +53,8 @@ const IG_FULL_PAGE_REELS = 11; // ~per-page yield; a near-full last batch ⇒ mo
 // place of the view floor — IG hides/understates views and shares is the
 // stronger organic signal.
 const IG_MIN_SHARES = 100;
-const ORGANIC_MIN_DURATION_SEC = 10;
+// Operator rule: only clips ≥30s (long enough to be a real, mirror-worthy video).
+export const ORGANIC_MIN_DURATION_SEC = 30;
 // TikTok virality gate: saves/bookmarks (the strongest "I'll come back to this"
 // signal). Views are ignored per operator rule.
 const TIKTOK_MIN_BOOKMARKS = 100;
@@ -378,10 +379,13 @@ async function upsertOrganicPost(
   caps: Caps,
   brandHandles: Set<string>,
 ): Promise<"inserted" | "updated" | "skipped"> {
-  // Eligibility (spec §7): drop posts older than the recency window.
-  if (post.postedAt) {
+  // Recency gate: only applied when a POSITIVE window is configured. 0 / unset =
+  // no limit (operator rule) — the best evergreen clips are often old, so we keep
+  // them and let engagement (saves/shares) decide.
+  const recencyDays = caps.organicRecencyDays ?? 0;
+  if (recencyDays > 0 && post.postedAt) {
     const ageDays = (Date.now() - post.postedAt.getTime()) / 86_400_000;
-    if (ageDays > (caps.organicRecencyDays || 60)) return "skipped";
+    if (ageDays > recencyDays) return "skipped";
   }
 
   // Shared quality gates: videos only, no ads/paid-partnership, no posts authored
@@ -391,12 +395,13 @@ async function upsertOrganicPost(
   const handleKey = normalizeHandleKey(post.handle);
   if (handleKey && brandHandles.has(handleKey)) return "skipped";
 
+  // Watchable-length gate applies to BOTH platforms (operator rule: ≥30s).
+  if ((post.durationSec ?? 0) < ORGANIC_MIN_DURATION_SEC) return "skipped";
   // Per-platform virality bar (views ignored on both — engagement is the signal):
-  //  - Instagram: ≥100 shares AND a watchable length (>10s).
+  //  - Instagram: ≥100 shares.
   //  - TikTok: ≥100 saves/bookmarks.
   if (post.source === "instagram") {
     if ((post.shares ?? 0) < IG_MIN_SHARES) return "skipped";
-    if ((post.durationSec ?? 0) <= ORGANIC_MIN_DURATION_SEC) return "skipped";
   } else {
     if ((post.bookmarks ?? 0) < TIKTOK_MIN_BOOKMARKS) return "skipped";
   }
@@ -419,6 +424,8 @@ async function upsertOrganicPost(
       likes: post.likes,
       comments: post.comments,
       shares: post.shares,
+      bookmarks: post.bookmarks,
+      durationSec: post.durationSec != null ? Math.round(post.durationSec) : null,
       postedAt: post.postedAt,
       transcript: post.transcript,
       format: "video",
@@ -445,6 +452,8 @@ async function upsertOrganicPost(
       likes: post.likes,
       comments: post.comments,
       shares: post.shares,
+      bookmarks: post.bookmarks,
+      durationSec: post.durationSec != null ? Math.round(post.durationSec) : null,
       postedAt: post.postedAt,
       // Only fill a transcript we now have — never wipe one a prior pull captured.
       ...(post.transcript ? { transcript: post.transcript } : {}),

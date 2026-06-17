@@ -166,8 +166,8 @@ function describeAdCard(card: FeedCard): string | null {
   const ad = card.ad;
   if (!ad) return null;
   const bits: string[] = [`AD — ${ad.advertiserName ?? "unknown advertiser"}`];
-  if (typeof ad.runtimeDays === "number") bits.push(`ran ${ad.runtimeDays}d${ad.isActive ? ", active" : ""}`);
-  if (typeof ad.variationCount === "number" && ad.variationCount > 1) bits.push(`${ad.variationCount} variations`);
+  if (typeof ad.shares === "number" && ad.shares > 0) bits.push(`${ad.shares.toLocaleString("en-US")} shares`);
+  if (typeof ad.likes === "number" && ad.likes > 0) bits.push(`${ad.likes.toLocaleString("en-US")} likes`);
   if (ad.format) bits.push(ad.format);
   const copy = (ad.hook ?? ad.copy ?? "").trim().slice(0, COPY_EXCERPT_CHARS);
   return `- ${bits.join(" · ")}${copy ? `\n  copy: ${copy}` : ""}`;

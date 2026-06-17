@@ -59,6 +59,9 @@ export const env = {
   // Apify API token — powers real Reddit harvesting for resonance mining.
   // When unset, the resonance miner falls back to the web_search path.
   APIFY_TOKEN: process.env.APIFY_TOKEN ?? "",
+  // AdSpy ad-intelligence API — the Ad Inspo Console's competitor/keyword ad source.
+  ADSPY_TOKEN: process.env.ADSPY_TOKEN ?? "",
+  ADSPY_BASE_URL: process.env.ADSPY_BASE_URL ?? "https://api.adspy.com",
   DATABASE_URL: process.env.DATABASE_URL!,
   // Railway / Fly / Render / Heroku all inject `PORT`. Our existing dev
   // setup uses `API_PORT=3001`. Honor `PORT` first so the production host
