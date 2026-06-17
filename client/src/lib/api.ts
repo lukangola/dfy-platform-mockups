@@ -1994,6 +1994,46 @@ export function extractAdConsoleKeywords(
   return post<{ keywordSet: AdConsoleKeywordSet }>(`${AD_CONSOLE}/brands/${brandId}/keyword-sets`, args);
 }
 
+// ── Search-term manager (operator-curated keywords driving the pull) ──
+
+export type AdConsoleSearchLane = "ad" | "organic";
+export type AdConsoleSearchTerms = {
+  /** Ad-library search terms. */
+  ad: string[];
+  /** Organic (IG/TikTok) search terms. */
+  organic: string[];
+  /** True when ≥1 angle keyword set exists — drives the empty-state "Generate" affordance. */
+  hasKeywordSets: boolean;
+};
+
+/** The brand's effective, operator-editable search terms (materialized from angle keywords). */
+export function getAdConsoleKeywords(brandId: string): Promise<AdConsoleSearchTerms> {
+  return get<AdConsoleSearchTerms>(`${AD_CONSOLE}/brands/${brandId}/keywords`);
+}
+
+/** Add an operator search term to a lane. Returns the updated lists. */
+export function addAdConsoleKeyword(
+  brandId: string,
+  lane: AdConsoleSearchLane,
+  keyword: string,
+): Promise<AdConsoleSearchTerms> {
+  return post<AdConsoleSearchTerms>(`${AD_CONSOLE}/brands/${brandId}/keywords`, { lane, keyword });
+}
+
+/** Remove an operator search term from a lane (persists). Returns the updated lists. */
+export function removeAdConsoleKeyword(
+  brandId: string,
+  lane: AdConsoleSearchLane,
+  keyword: string,
+): Promise<AdConsoleSearchTerms> {
+  return del<AdConsoleSearchTerms>(`${AD_CONSOLE}/brands/${brandId}/keywords`, { lane, keyword });
+}
+
+/** Generate keyword sets from angles (LLM, no Apify), then materialize search terms. Poll getAdConsoleKeywords. */
+export function generateAdConsoleKeywords(brandId: string): Promise<{ started: true }> {
+  return post<{ started: true }>(`${AD_CONSOLE}/brands/${brandId}/keywords/generate`, {});
+}
+
 // ── Ingestion (Phase 3/4) — spends Apify credits, 424 if Apify unconfigured ──
 
 export function ingestAdConsoleAds(

@@ -32,6 +32,8 @@ import {
   listAdConsoleCompetitors, addAdConsoleCompetitor,
   updateAdConsoleCompetitor, deleteAdConsoleCompetitor,
   listAdConsoleKeywordSets,
+  getAdConsoleKeywords, addAdConsoleKeyword, removeAdConsoleKeyword, generateAdConsoleKeywords,
+  type AdConsoleSearchTerms, type AdConsoleSearchLane,
   getAdConsoleFeed, selectAdConsoleFeedItem, skipAdConsoleFeedItem,
   rankAdConsoleFeed,
   startAdConsoleFeedPull, getAdConsoleFeedPullStatus,
@@ -1443,6 +1445,222 @@ function BriefModal({
 // Setup panel — niche + competitor watchlist
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Operator-facing keyword manager (Niche & Signal). Shows the brand's effective
+ * search terms — the actual ad + organic queries that drive the pull — as
+ * removable chips, with an inline add per lane. Fully transparent + editable;
+ * edits persist server-side and survive re-extraction. Empty state offers a
+ * one-click generate (LLM only, no ad credits).
+ */
+function KeywordLane({
+  label,
+  lane,
+  items,
+  input,
+  setInput,
+  onAdd,
+  onRemove,
+  busyLane,
+  removing,
+}: {
+  label: string;
+  lane: AdConsoleSearchLane;
+  items: string[];
+  input: string;
+  setInput: (v: string) => void;
+  onAdd: () => void;
+  onRemove: (kw: string) => void;
+  busyLane: AdConsoleSearchLane | null;
+  removing: string | null;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <span className="text-[9px] font-mono uppercase tracking-wider text-white/30">
+        {label} <span className="text-white/20">({items.length})</span>
+      </span>
+      <div className="flex flex-wrap gap-1">
+        {items.length === 0 && <span className="text-[10px] font-mono text-white/20 italic">none</span>}
+        {items.map((kw) => {
+          const isRemoving = removing === `${lane}:${kw}`;
+          return (
+            <span
+              key={kw}
+              className="group flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-md text-[10px] font-mono bg-white/[0.04] border border-white/[0.06] text-white/70"
+            >
+              {kw}
+              <button
+                onClick={() => onRemove(kw)}
+                disabled={isRemoving}
+                className="text-white/30 hover:text-rose-300 disabled:opacity-50"
+                aria-label={`Remove ${kw}`}
+              >
+                {isRemoving ? <Loader2 size={10} className="animate-spin" /> : <X size={11} />}
+              </button>
+            </span>
+          );
+        })}
+      </div>
+      <div className="flex items-center gap-1">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              onAdd();
+            }
+          }}
+          placeholder={`Add ${lane} keyword…`}
+          disabled={busyLane === lane}
+          className="flex-1 bg-[#0D0F12] border border-white/[0.08] rounded-md px-2 py-1 text-[10px] font-mono text-white/80 placeholder:text-white/20 outline-none focus:border-cyan-500/40 disabled:opacity-50"
+        />
+        <button
+          onClick={onAdd}
+          disabled={busyLane === lane || !input.trim()}
+          className="flex items-center justify-center w-6 h-6 rounded-md border border-white/[0.08] bg-white/[0.02] text-white/50 hover:text-white/80 disabled:opacity-40"
+          aria-label={`Add ${lane} keyword`}
+        >
+          {busyLane === lane ? <Loader2 size={11} className="animate-spin" /> : <Plus size={12} />}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function KeywordManager({ brandId, onNotice }: { brandId: string; onNotice: (n: Notice) => void }) {
+  const [terms, setTerms] = useState<AdConsoleSearchTerms | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const [busyLane, setBusyLane] = useState<AdConsoleSearchLane | null>(null);
+  const [removing, setRemoving] = useState<string | null>(null);
+  const [adInput, setAdInput] = useState("");
+  const [organicInput, setOrganicInput] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      setTerms(await getAdConsoleKeywords(brandId));
+    } catch (err) {
+      onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setLoading(false);
+    }
+  }, [brandId, onNotice]);
+
+  useEffect(() => {
+    setLoading(true);
+    void load();
+  }, [load]);
+
+  async function handleAdd(lane: AdConsoleSearchLane) {
+    const value = (lane === "ad" ? adInput : organicInput).trim();
+    if (!value || busyLane) return;
+    setBusyLane(lane);
+    try {
+      setTerms(await addAdConsoleKeyword(brandId, lane, value));
+      if (lane === "ad") setAdInput("");
+      else setOrganicInput("");
+    } catch (err) {
+      onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusyLane(null);
+    }
+  }
+
+  async function handleRemove(lane: AdConsoleSearchLane, kw: string) {
+    if (removing) return;
+    setRemoving(`${lane}:${kw}`);
+    try {
+      setTerms(await removeAdConsoleKeyword(brandId, lane, kw));
+    } catch (err) {
+      onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setRemoving(null);
+    }
+  }
+
+  async function handleGenerate() {
+    if (generating) return;
+    setGenerating(true);
+    try {
+      await generateAdConsoleKeywords(brandId);
+      // Extraction runs in the background (~25s for 5 angles); poll until populated.
+      for (let i = 0; i < 24; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const t = await getAdConsoleKeywords(brandId);
+        setTerms(t);
+        if (t.ad.length > 0 || t.organic.length > 0) break;
+      }
+      onNotice({ kind: "success", text: "Keywords generated from your angles." });
+    } catch (err) {
+      onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  const total = (terms?.ad.length ?? 0) + (terms?.organic.length ?? 0);
+
+  return (
+    <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] font-mono uppercase tracking-wider text-white/40">Search keywords</span>
+        {!loading && <span className="text-[10px] font-mono text-white/25">{total} term{total === 1 ? "" : "s"}</span>}
+      </div>
+
+      {loading ? (
+        <div className="flex items-center gap-1.5 text-[10px] font-mono text-white/30">
+          <Loader2 size={11} className="animate-spin" /> Loading…
+        </div>
+      ) : total === 0 && !terms?.hasKeywordSets && !generating ? (
+        <div className="space-y-2">
+          <p className="text-[10px] text-white/30 font-mono leading-relaxed">
+            No keywords yet. Generate them from this brand's angles — LLM only, no ad credits used.
+          </p>
+          <button
+            onClick={() => void handleGenerate()}
+            disabled={generating}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-mono tracking-wide border border-cyan-500/20 bg-cyan-500/[0.06] text-cyan-200/80 hover:text-cyan-100 transition-all disabled:opacity-50"
+          >
+            <Sparkles size={12} /> Generate keywords
+          </button>
+        </div>
+      ) : generating && total === 0 ? (
+        <div className="flex items-center gap-1.5 text-[10px] font-mono text-cyan-300/80">
+          <Loader2 size={11} className="animate-spin" /> Generating keywords from angles…
+        </div>
+      ) : (
+        <>
+          <KeywordLane
+            label="Ad search"
+            lane="ad"
+            items={terms?.ad ?? []}
+            input={adInput}
+            setInput={setAdInput}
+            onAdd={() => void handleAdd("ad")}
+            onRemove={(kw) => void handleRemove("ad", kw)}
+            busyLane={busyLane}
+            removing={removing}
+          />
+          <KeywordLane
+            label="Organic search"
+            lane="organic"
+            items={terms?.organic ?? []}
+            input={organicInput}
+            setInput={setOrganicInput}
+            onAdd={() => void handleAdd("organic")}
+            onRemove={(kw) => void handleRemove("organic", kw)}
+            busyLane={busyLane}
+            removing={removing}
+          />
+          <p className="text-[9px] text-white/20 font-mono leading-relaxed">
+            These are the exact terms the next pull searches. Edits persist and survive re-extraction.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function SetupPanel({
   brandId,
   niche,
@@ -1609,6 +1827,8 @@ function SetupPanel({
         <p className="text-[10px] text-white/25 font-mono leading-relaxed">
           Niche, competitors &amp; angle keywords are detected automatically in the background — they sharpen which ads &amp; posts rank into your feed.
         </p>
+
+        <KeywordManager brandId={brandId} onNotice={onNotice} />
       </div>
 
       {/* Competitors */}

@@ -31,6 +31,11 @@ import {
   listBrandKeywordSets,
   runKeywordExtract,
   startKeywordExtract,
+  ensureBrandKeywords,
+  getBrandSearchTerms,
+  addBrandSearchTerm,
+  removeBrandSearchTerm,
+  type SearchLane,
 } from "../lib/adConsoleKeywords.js";
 import { listBrandFeed, rankBrandFeed } from "../lib/adConsoleFeed.js";
 import { selectFeedItem, skipFeedItem } from "../lib/adConsoleBrief.js";
@@ -279,6 +284,93 @@ adConsoleRouter.post("/brands/:brandId/keyword-sets", async (req: Request, res: 
   } catch (err) {
     if (err instanceof PromptNotConfiguredError) return sendError(res, 424, err.message);
     console.error("[ad-console] start keyword extract failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+// ── Search-term manager (operator-curated keywords that drive the pull) ───────
+
+function parseLane(v: unknown): SearchLane | null {
+  return v === "ad" || v === "organic" ? v : null;
+}
+
+/**
+ * GET /api/ad-console/brands/:brandId/keywords — the brand's effective search
+ * terms (ad + organic lanes), materialized from the angle keyword sets on first
+ * read and operator-editable thereafter. `hasKeywordSets` tells the UI whether to
+ * offer "Generate" when the lists are empty.
+ */
+adConsoleRouter.get("/brands/:brandId/keywords", async (req: Request, res: Response) => {
+  try {
+    const terms = await getBrandSearchTerms(req.params.brandId);
+    res.json(terms);
+  } catch (err) {
+    console.error("[ad-console] get search terms failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
+ * POST /api/ad-console/brands/:brandId/keywords — add one operator term.
+ * Body: { lane: "ad" | "organic", keyword }. Returns the updated lists.
+ */
+adConsoleRouter.post("/brands/:brandId/keywords", async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { lane?: unknown; keyword?: unknown };
+    const lane = parseLane(body.lane);
+    const keyword = typeof body.keyword === "string" ? body.keyword.trim() : "";
+    if (!lane) return sendError(res, 400, "lane must be 'ad' or 'organic'");
+    if (!keyword) return sendError(res, 400, "keyword is required");
+    const terms = await addBrandSearchTerm(req.params.brandId, lane, keyword);
+    res.json(terms);
+  } catch (err) {
+    console.error("[ad-console] add search term failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
+ * DELETE /api/ad-console/brands/:brandId/keywords — remove one operator term.
+ * Body: { lane: "ad" | "organic", keyword }. The removal persists (survives
+ * re-extraction). Returns the updated lists.
+ */
+adConsoleRouter.delete("/brands/:brandId/keywords", async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { lane?: unknown; keyword?: unknown };
+    const lane = parseLane(body.lane);
+    const keyword = typeof body.keyword === "string" ? body.keyword.trim() : "";
+    if (!lane) return sendError(res, 400, "lane must be 'ad' or 'organic'");
+    if (!keyword) return sendError(res, 400, "keyword is required");
+    const terms = await removeBrandSearchTerm(req.params.brandId, lane, keyword);
+    res.json(terms);
+  } catch (err) {
+    console.error("[ad-console] remove search term failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
+ * POST /api/ad-console/brands/:brandId/keywords/generate — extract angle keyword
+ * sets (LLM, no Apify) for any angle that lacks one, then materialize the search
+ * terms. Fire-and-forget; the Console polls GET /keywords until populated. 424
+ * when the extractor prompt isn't configured.
+ */
+adConsoleRouter.post("/brands/:brandId/keywords/generate", async (req: Request, res: Response) => {
+  const brandId = req.params.brandId;
+  try {
+    void (async () => {
+      try {
+        await ensureBrandKeywords(brandId);
+        // Re-read forces materialization of the freshly-extracted terms.
+        await getBrandSearchTerms(brandId);
+      } catch (err) {
+        console.error("[ad-console] keyword generate worker crashed:", err);
+      }
+    })();
+    res.status(202).json({ started: true });
+  } catch (err) {
+    if (err instanceof PromptNotConfiguredError) return sendError(res, 424, err.message);
+    console.error("[ad-console] start keyword generate failed:", err);
     sendError(res, 500, err instanceof Error ? err.message : String(err));
   }
 });

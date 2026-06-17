@@ -79,6 +79,16 @@ export const brands = pgTable("brands", {
    * niche is a config-only change.
    */
   nicheType: text("niche_type"),
+  /**
+   * Ad Console operator-curated search terms. Once materialized (seeded from the
+   * brand's angle keyword sets), this becomes the SOURCE OF TRUTH for the search
+   * queries the weekly pull issues — the operator can add/remove terms in the
+   * Console for full transparency and control. NULL = not yet materialized;
+   * buildBrandSearchQueries then falls back to deriving from the keyword sets.
+   * Shape: { ad: string[]; organic: string[] } — the two lanes searched
+   * (ad-library vs organic).
+   */
+  searchTerms: jsonb("search_terms"),
 });
 
 export const products = pgTable("products", {

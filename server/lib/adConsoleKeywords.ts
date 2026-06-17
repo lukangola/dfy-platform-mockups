@@ -470,15 +470,15 @@ export type BrandSearchQueries = {
 };
 
 /**
- * Build the brand's ad + organic SEARCH queries from its completed angle keyword
- * sets. These DRIVE the Apify pulls (spec §6.1) so the feed reflects THIS brand's
- * angles, not generic niche seeds:
+ * DERIVE the brand's ad + organic search queries from its completed angle keyword
+ * sets (the auto-extraction result):
  *   - adQueries      ← product/solution keywords (Section 3)
  *   - organicQueries ← problem + outcome keywords (Sections 1+2)
- * Returns empty arrays when no set is complete yet — callers then fall back to
- * the niche seed terms.
+ * Returns empty arrays when no set is complete yet. This is the SEED for the
+ * operator-curated `brands.search_terms`; prefer `buildBrandSearchQueries` /
+ * `getBrandSearchTerms` which honour operator edits over this derivation.
  */
-export async function buildBrandSearchQueries(brandId: string): Promise<BrandSearchQueries> {
+async function deriveBrandSearchQueries(brandId: string): Promise<BrandSearchQueries> {
   const sets = await db
     .select({
       problem: schema.brandKeywordSets.problemKeywords,
@@ -505,4 +505,92 @@ export async function buildBrandSearchQueries(brandId: string): Promise<BrandSea
     adQueries: selectQueries(productPerAngle, MAX_BRAND_QUERIES),
     organicQueries: selectQueries(painPerAngle, MAX_BRAND_QUERIES),
   };
+}
+
+// ── Operator-curated search terms (brands.search_terms) ──────────────────────
+//
+// The Console exposes the brand's actual search queries for transparency + edit.
+// `search_terms` is materialized once from the auto-derived queries, then becomes
+// the SOURCE OF TRUTH — operator adds/removes win, and a re-extraction never wipes
+// them (the operator owns the list once it exists).
+
+/** The two search lanes the operator can curate. */
+export type SearchLane = "ad" | "organic";
+export type BrandSearchTerms = { ad: string[]; organic: string[] };
+
+/** Read `brands.search_terms`, or null when not yet materialized / malformed. */
+async function readStoredSearchTerms(brandId: string): Promise<BrandSearchTerms | null> {
+  const [b] = await db
+    .select({ searchTerms: schema.brands.searchTerms })
+    .from(schema.brands)
+    .where(eq(schema.brands.id, brandId))
+    .limit(1);
+  const st = b?.searchTerms as unknown;
+  if (st && typeof st === "object" && Array.isArray((st as BrandSearchTerms).ad) && Array.isArray((st as BrandSearchTerms).organic)) {
+    return st as BrandSearchTerms;
+  }
+  return null;
+}
+
+async function writeStoredSearchTerms(brandId: string, terms: BrandSearchTerms): Promise<void> {
+  await db.update(schema.brands).set({ searchTerms: terms }).where(eq(schema.brands.id, brandId));
+}
+
+/**
+ * The brand's effective search terms: the stored operator-curated list if it
+ * exists, else the derivation from keyword sets — materialized (persisted) so the
+ * operator has a stable editable list. Empty derivations are NOT persisted, so a
+ * later keyword extraction can still seed the list.
+ */
+async function materializeSearchTerms(brandId: string): Promise<BrandSearchTerms> {
+  const stored = await readStoredSearchTerms(brandId);
+  if (stored) return stored;
+  const derived = await deriveBrandSearchQueries(brandId);
+  const terms: BrandSearchTerms = { ad: derived.adQueries, organic: derived.organicQueries };
+  if (terms.ad.length > 0 || terms.organic.length > 0) await writeStoredSearchTerms(brandId, terms);
+  return terms;
+}
+
+/** Console read: the effective terms + whether any keyword set exists (for the empty-state affordance). */
+export async function getBrandSearchTerms(
+  brandId: string,
+): Promise<BrandSearchTerms & { hasKeywordSets: boolean }> {
+  const [terms, sets] = await Promise.all([materializeSearchTerms(brandId), listBrandKeywordSets(brandId)]);
+  return { ...terms, hasKeywordSets: sets.some((s) => s.status === "complete") };
+}
+
+/** Add an operator term to one lane (case-insensitive dedupe). Returns the updated list. */
+export async function addBrandSearchTerm(brandId: string, lane: SearchLane, keyword: string): Promise<BrandSearchTerms> {
+  const kw = keyword.trim();
+  if (!kw) throw new Error("Keyword cannot be empty");
+  const cur = await materializeSearchTerms(brandId);
+  const terms: BrandSearchTerms = { ad: [...cur.ad], organic: [...cur.organic] };
+  const lc = kw.toLowerCase();
+  if (!terms[lane].some((t) => t.toLowerCase() === lc)) terms[lane].push(kw);
+  await writeStoredSearchTerms(brandId, terms);
+  return terms;
+}
+
+/** Remove an operator term from one lane (case-insensitive). Persists the removal. Returns the updated list. */
+export async function removeBrandSearchTerm(brandId: string, lane: SearchLane, keyword: string): Promise<BrandSearchTerms> {
+  const cur = await materializeSearchTerms(brandId);
+  const lc = keyword.trim().toLowerCase();
+  const terms: BrandSearchTerms = {
+    ad: lane === "ad" ? cur.ad.filter((t) => t.toLowerCase() !== lc) : [...cur.ad],
+    organic: lane === "organic" ? cur.organic.filter((t) => t.toLowerCase() !== lc) : [...cur.organic],
+  };
+  await writeStoredSearchTerms(brandId, terms);
+  return terms;
+}
+
+/**
+ * Build the brand's ad + organic SEARCH queries that DRIVE the pulls. Prefers the
+ * operator-curated `search_terms`; falls back to deriving from keyword sets when
+ * the operator has never opened the keyword manager. Empty arrays ⇒ callers fall
+ * back to the niche seed terms.
+ */
+export async function buildBrandSearchQueries(brandId: string): Promise<BrandSearchQueries> {
+  const stored = await readStoredSearchTerms(brandId);
+  if (stored) return { adQueries: stored.ad, organicQueries: stored.organic };
+  return deriveBrandSearchQueries(brandId);
 }
