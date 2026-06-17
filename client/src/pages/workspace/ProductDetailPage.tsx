@@ -19,8 +19,8 @@ import {
 import {
   getProduct, retriggerResearch, uploadProductImage,
   setProductMainImage, addProductImageCandidate, deleteProductImageCandidate,
-  generateReferenceSheet, deleteProduct, addProductAngle, deleteProductAngle,
-  updateProductMechanism, patchProduct, generateAngleArtifact,
+  generateReferenceSheet, deleteProduct, addProductAngle, addProductAngleManual, deleteProductAngle,
+  updateProductResearch, updateProductMechanism, patchProduct, generateAngleArtifact,
   updateAngleArtifactContent,
   getProductFeedback, updateFeedbackStatus,
   type Product, type ProductImageCandidate, type ProductMechanism,
@@ -744,6 +744,25 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
   const [addAngleDescription, setAddAngleDescription] = useState("");
   const [addAngleBusy, setAddAngleBusy] = useState(false);
   const [addAngleError, setAddAngleError] = useState<string | null>(null);
+  // Add-angle mode: "idea" → AI elaborates a description; "paste" → store a
+  // pre-written angle (name + block) verbatim.
+  const [addAngleMode, setAddAngleMode] = useState<"idea" | "paste">("idea");
+  const [addAngleName, setAddAngleName] = useState("");
+  const [addAngleBlock, setAddAngleBlock] = useState("");
+
+  // Inline research-markdown edit.
+  const [editResearch, setEditResearch] = useState(false);
+  const [researchDraft, setResearchDraft] = useState("");
+  const [savingResearch, setSavingResearch] = useState(false);
+  const [researchEditError, setResearchEditError] = useState<string | null>(null);
+
+  function resetAddAngle() {
+    setAddAngleOpen(false);
+    setAddAngleDescription("");
+    setAddAngleName("");
+    setAddAngleBlock("");
+    setAddAngleError(null);
+  }
 
   async function handleAddAngle() {
     const desc = addAngleDescription.trim();
@@ -753,12 +772,44 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
     try {
       await addProductAngle(productId, desc);
       await refresh();
-      setAddAngleDescription("");
-      setAddAngleOpen(false);
+      resetAddAngle();
     } catch (err) {
       setAddAngleError(err instanceof Error ? err.message : String(err));
     } finally {
       setAddAngleBusy(false);
+    }
+  }
+
+  async function handleAddAngleManual() {
+    const name = addAngleName.trim();
+    const block = addAngleBlock.trim();
+    if (!name || !block || addAngleBusy) return;
+    setAddAngleBusy(true);
+    setAddAngleError(null);
+    try {
+      await addProductAngleManual(productId, name, block);
+      await refresh();
+      resetAddAngle();
+    } catch (err) {
+      setAddAngleError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAddAngleBusy(false);
+    }
+  }
+
+  async function handleSaveResearch() {
+    const md = researchDraft.trim();
+    if (!md || savingResearch) return;
+    setSavingResearch(true);
+    setResearchEditError(null);
+    try {
+      await updateProductResearch(productId, md);
+      await refresh();
+      setEditResearch(false);
+    } catch (err) {
+      setResearchEditError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingResearch(false);
     }
   }
 
@@ -1240,14 +1291,82 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
                 title="Research · Phase 1 — Strategic Diagnosis"
                 icon={FileText}
                 subtitle="Product context, ingredient analysis, competitive map, root-cause + real-world dysfunction language."
+                forceOpen={editResearch || undefined}
+                headerRight={
+                  !editResearch ? (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setResearchDraft(research.markdown ?? "");
+                        setResearchEditError(null);
+                        setEditResearch(true);
+                      }}
+                      className="flex items-center gap-2 px-3 py-2 rounded-lg text-[10px] font-mono text-white/60 border border-white/[0.08] hover:text-cyan-400 hover:border-cyan-500/40 transition-all"
+                    >
+                      <Pencil size={11} /> Edit research
+                    </button>
+                  ) : null
+                }
               >
                 {metaLine}
-                <article className="prose-report max-w-none">
-                  <Streamdown>{phase1}</Streamdown>
-                </article>
+                {editResearch ? (
+                  <div className="space-y-3">
+                    <p className="text-[10px] font-mono text-white/40 leading-relaxed">
+                      Edit or paste the full research markdown (both phases). Saving overwrites the research text; your strategic angles below are kept untouched.
+                    </p>
+                    <textarea
+                      rows={24}
+                      value={researchDraft}
+                      onChange={(e) => setResearchDraft(e.target.value)}
+                      disabled={savingResearch}
+                      placeholder="# Strategic Product & Market Analysis&#10;&#10;## Overview&#10;…"
+                      className="w-full bg-[#0D0F12] border border-white/[0.08] rounded-lg px-3 py-2 text-xs font-mono text-white/80 placeholder:text-white/20 outline-none focus:border-cyan-500/40 disabled:opacity-50 resize-y leading-relaxed"
+                    />
+                    {researchEditError && (
+                      <div className="text-[10px] font-mono text-rose-300 border border-rose-500/30 bg-rose-500/10 rounded-lg px-3 py-2">
+                        {researchEditError}
+                      </div>
+                    )}
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => {
+                          setEditResearch(false);
+                          setResearchEditError(null);
+                        }}
+                        disabled={savingResearch}
+                        className="text-[10px] font-mono uppercase tracking-wider text-white/50 hover:text-white/80 px-3 py-2 disabled:opacity-40"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleSaveResearch}
+                        disabled={savingResearch || !researchDraft.trim()}
+                        className="flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-mono font-semibold uppercase tracking-wider transition-all disabled:opacity-40"
+                        style={{ background: "linear-gradient(135deg, #00D4FF 0%, #0099CC 100%)", color: "#0D0F12" }}
+                      >
+                        {savingResearch ? (
+                          <>
+                            <Loader2 size={11} className="animate-spin" /> Saving…
+                          </>
+                        ) : (
+                          <>
+                            <Save size={11} /> Save research
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <article className="prose-report max-w-none">
+                    <Streamdown>{phase1}</Streamdown>
+                  </article>
+                )}
               </CollapsibleSection>
 
-              {phase2 && (
+              {/* Always render the angles section once research exists (not gated
+                  on a "Phase 2" heading) so operators can add/paste angles even
+                  for hand-pasted research that doesn't carry the split marker. */}
+              {(
                 <CollapsibleSection
                   title="Research · Phase 2 — Strategic Angles"
                   icon={Target}
@@ -1295,18 +1414,61 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
                             Add a Strategic Angle
                           </h3>
                           <p className="text-[10px] font-mono text-white/40 leading-relaxed">
-                            Describe the angle you want in plain text — the target audience, the claim, the mechanism, whatever the angle is about. We'll elaborate it into the same 200–350 word format as the extracted angles, grounded in this product's research. Only the new angle runs; the others are untouched.
+                            {addAngleMode === "idea"
+                              ? "Describe the angle in plain text — audience, claim, mechanism — and we'll elaborate it into the same 200–350 word format as the extracted angles, grounded in this product's research. Only the new angle runs; the others are untouched."
+                              : "Paste a finished / client-approved angle. It's stored verbatim — no AI runs. Give it a short name and the full angle body."}
                           </p>
                         </div>
                       </div>
-                      <textarea
-                        rows={4}
-                        value={addAngleDescription}
-                        onChange={(e) => setAddAngleDescription(e.target.value)}
-                        placeholder="e.g. 'Focus on time-strapped parents who want a coffee replacement that doesn't leave them jittery before school run — anchor the pitch on the clean-energy mechanism and the no-crash afternoon.'"
-                        disabled={addAngleBusy}
-                        className="w-full bg-[#0D0F12] border border-white/[0.08] rounded-lg px-3 py-2 text-xs font-mono text-white/80 placeholder:text-white/20 outline-none focus:border-cyan-500/40 disabled:opacity-50 resize-none"
-                      />
+
+                      {/* Mode toggle: AI-elaborate an idea, or paste a ready angle. */}
+                      <div className="flex items-center gap-1 rounded-lg border border-white/[0.08] bg-[#0D0F12] p-1 w-max">
+                        {(["idea", "paste"] as const).map((m) => (
+                          <button
+                            key={m}
+                            onClick={() => {
+                              setAddAngleMode(m);
+                              setAddAngleError(null);
+                            }}
+                            disabled={addAngleBusy}
+                            className={`px-3 py-1.5 rounded-md text-[10px] font-mono transition-colors disabled:opacity-40 ${
+                              addAngleMode === m ? "bg-cyan-500/15 text-cyan-300" : "text-white/40 hover:text-white/70"
+                            }`}
+                          >
+                            {m === "idea" ? "✦ Generate from idea" : "↧ Paste an angle"}
+                          </button>
+                        ))}
+                      </div>
+
+                      {addAngleMode === "idea" ? (
+                        <textarea
+                          rows={4}
+                          value={addAngleDescription}
+                          onChange={(e) => setAddAngleDescription(e.target.value)}
+                          placeholder="e.g. 'Focus on time-strapped parents who want a coffee replacement that doesn't leave them jittery before school run — anchor the pitch on the clean-energy mechanism and the no-crash afternoon.'"
+                          disabled={addAngleBusy}
+                          className="w-full bg-[#0D0F12] border border-white/[0.08] rounded-lg px-3 py-2 text-xs font-mono text-white/80 placeholder:text-white/20 outline-none focus:border-cyan-500/40 disabled:opacity-50 resize-none"
+                        />
+                      ) : (
+                        <div className="space-y-2">
+                          <input
+                            value={addAngleName}
+                            onChange={(e) => setAddAngleName(e.target.value)}
+                            placeholder="Angle name — e.g. 'Inclusive Shade Matching'"
+                            disabled={addAngleBusy}
+                            className="w-full bg-[#0D0F12] border border-white/[0.08] rounded-lg px-3 py-2 text-xs font-mono text-white/80 placeholder:text-white/20 outline-none focus:border-cyan-500/40 disabled:opacity-50"
+                          />
+                          <textarea
+                            rows={8}
+                            value={addAngleBlock}
+                            onChange={(e) => setAddAngleBlock(e.target.value)}
+                            placeholder="Paste the full angle body…"
+                            disabled={addAngleBusy}
+                            className="w-full bg-[#0D0F12] border border-white/[0.08] rounded-lg px-3 py-2 text-xs font-mono text-white/80 placeholder:text-white/20 outline-none focus:border-cyan-500/40 disabled:opacity-50 resize-y leading-relaxed"
+                          />
+                        </div>
+                      )}
+
                       {addAngleError && (
                         <div className="text-[10px] font-mono text-rose-300 border border-rose-500/30 bg-rose-500/10 rounded-lg px-3 py-2">
                           {addAngleError}
@@ -1314,19 +1476,20 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
                       )}
                       <div className="flex items-center justify-end gap-2">
                         <button
-                          onClick={() => {
-                            setAddAngleOpen(false);
-                            setAddAngleDescription("");
-                            setAddAngleError(null);
-                          }}
+                          onClick={resetAddAngle}
                           disabled={addAngleBusy}
                           className="text-[10px] font-mono uppercase tracking-wider text-white/50 hover:text-white/80 px-3 py-2 disabled:opacity-40"
                         >
                           Cancel
                         </button>
                         <button
-                          onClick={handleAddAngle}
-                          disabled={addAngleBusy || !addAngleDescription.trim()}
+                          onClick={addAngleMode === "idea" ? handleAddAngle : handleAddAngleManual}
+                          disabled={
+                            addAngleBusy ||
+                            (addAngleMode === "idea"
+                              ? !addAngleDescription.trim()
+                              : !addAngleName.trim() || !addAngleBlock.trim())
+                          }
                           className="flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-mono font-semibold uppercase tracking-wider transition-all disabled:opacity-40"
                           style={{
                             background: "linear-gradient(135deg, #00D4FF 0%, #0099CC 100%)",
@@ -1336,12 +1499,12 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
                           {addAngleBusy ? (
                             <>
                               <Loader2 size={11} className="animate-spin" />
-                              Elaborating…
+                              {addAngleMode === "idea" ? "Elaborating…" : "Adding…"}
                             </>
                           ) : (
                             <>
                               <Plus size={11} />
-                              Generate & Add
+                              {addAngleMode === "idea" ? "Generate & Add" : "Add Angle"}
                             </>
                           )}
                         </button>
@@ -1444,10 +1607,14 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
                         );
                       })}
                     </div>
-                  ) : (
+                  ) : phase2 ? (
                     <article className="prose-report max-w-none">
                       <Streamdown>{phase2}</Streamdown>
                     </article>
+                  ) : (
+                    <p className="text-[11px] font-mono text-white/40 py-2">
+                      No strategic angles yet — generate one from an idea or paste an existing angle with the button above.
+                    </p>
                   )}
                 </CollapsibleSection>
               )}
