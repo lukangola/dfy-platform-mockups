@@ -2034,6 +2034,11 @@ export function generateAdConsoleKeywords(brandId: string): Promise<{ started: t
   return post<{ started: true }>(`${AD_CONSOLE}/brands/${brandId}/keywords/generate`, {});
 }
 
+/** Force re-extraction from angles (improved prompt) + reset to the fresh terms. Discards manual edits. Poll getAdConsoleKeywords. */
+export function regenerateAdConsoleKeywords(brandId: string): Promise<{ started: true }> {
+  return post<{ started: true }>(`${AD_CONSOLE}/brands/${brandId}/keywords/regenerate`, {});
+}
+
 // ── Ingestion (Phase 3/4) — spends Apify credits, 424 if Apify unconfigured ──
 
 export function ingestAdConsoleAds(

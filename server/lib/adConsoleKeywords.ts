@@ -391,7 +391,10 @@ export type EnsureKeywordsResult = {
  * the FIRST pull pays for extraction, later pulls are a cheap no-op query. Never
  * throws: per-angle failures are recorded on the row and counted here.
  */
-export async function ensureBrandKeywords(brandId: string): Promise<EnsureKeywordsResult> {
+export async function ensureBrandKeywords(
+  brandId: string,
+  opts?: { force?: boolean },
+): Promise<EnsureKeywordsResult> {
   const pairs = await listBrandAngles(brandId);
   const existing = await db
     .select({ angleId: schema.brandKeywordSets.angleId, status: schema.brandKeywordSets.status })
@@ -399,7 +402,11 @@ export async function ensureBrandKeywords(brandId: string): Promise<EnsureKeywor
     .where(eq(schema.brandKeywordSets.brandId, brandId));
   const complete = new Set(existing.filter((s) => s.status === "complete").map((s) => s.angleId));
 
-  const todo = pairs.filter((p) => !complete.has(p.angle.id)).slice(0, MAX_ANGLES_TO_EXTRACT);
+  // force ⇒ re-extract EVERY angle (used by "Regenerate" after the prompt
+  // improves); otherwise skip angles that already have a complete set.
+  const todo = pairs
+    .filter((p) => opts?.force || !complete.has(p.angle.id))
+    .slice(0, MAX_ANGLES_TO_EXTRACT);
   let extracted = 0;
   let failed = 0;
 
@@ -425,6 +432,20 @@ export async function ensureBrandKeywords(brandId: string): Promise<EnsureKeywor
       `${complete.size} already complete, extracted ${extracted}, failed ${failed}`,
   );
   return { totalAngles: pairs.length, alreadyComplete: complete.size, extracted, failed };
+}
+
+/**
+ * Force a full re-extraction of every angle (e.g. after the extraction prompt
+ * improves) and RESET the operator-curated search terms to the fresh derivation.
+ * Clears `search_terms` FIRST so the Console shows the rebuild in progress, then
+ * re-extracts, then re-materializes. Discards prior manual edits by design — the
+ * operator re-tunes from the improved base.
+ */
+export async function regenerateBrandKeywords(brandId: string): Promise<EnsureKeywordsResult> {
+  await db.update(schema.brands).set({ searchTerms: null }).where(eq(schema.brands.id, brandId));
+  const result = await ensureBrandKeywords(brandId, { force: true });
+  await materializeSearchTerms(brandId);
+  return result;
 }
 
 /** Case-insensitive dedupe, preserving first occurrence + original casing. */

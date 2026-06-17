@@ -32,6 +32,7 @@ import {
   runKeywordExtract,
   startKeywordExtract,
   ensureBrandKeywords,
+  regenerateBrandKeywords,
   getBrandSearchTerms,
   addBrandSearchTerm,
   removeBrandSearchTerm,
@@ -371,6 +372,30 @@ adConsoleRouter.post("/brands/:brandId/keywords/generate", async (req: Request, 
   } catch (err) {
     if (err instanceof PromptNotConfiguredError) return sendError(res, 424, err.message);
     console.error("[ad-console] start keyword generate failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
+ * POST /api/ad-console/brands/:brandId/keywords/regenerate — force re-extract
+ * every angle's keywords (uses the improved prompt) and RESET the curated search
+ * terms to the fresh derivation. Discards manual edits. Fire-and-forget; the
+ * Console polls GET /keywords. 424 when the extractor prompt isn't configured.
+ */
+adConsoleRouter.post("/brands/:brandId/keywords/regenerate", async (req: Request, res: Response) => {
+  const brandId = req.params.brandId;
+  try {
+    void (async () => {
+      try {
+        await regenerateBrandKeywords(brandId);
+      } catch (err) {
+        console.error("[ad-console] keyword regenerate worker crashed:", err);
+      }
+    })();
+    res.status(202).json({ started: true });
+  } catch (err) {
+    if (err instanceof PromptNotConfiguredError) return sendError(res, 424, err.message);
+    console.error("[ad-console] start keyword regenerate failed:", err);
     sendError(res, 500, err instanceof Error ? err.message : String(err));
   }
 });

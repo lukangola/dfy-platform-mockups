@@ -32,7 +32,7 @@ import {
   listAdConsoleCompetitors, addAdConsoleCompetitor,
   updateAdConsoleCompetitor, deleteAdConsoleCompetitor,
   listAdConsoleKeywordSets,
-  getAdConsoleKeywords, addAdConsoleKeyword, removeAdConsoleKeyword, generateAdConsoleKeywords,
+  getAdConsoleKeywords, addAdConsoleKeyword, removeAdConsoleKeyword, generateAdConsoleKeywords, regenerateAdConsoleKeywords,
   type AdConsoleSearchTerms, type AdConsoleSearchLane,
   getAdConsoleFeed, selectAdConsoleFeedItem, skipAdConsoleFeedItem,
   rankAdConsoleFeed,
@@ -1535,6 +1535,8 @@ function KeywordManager({ brandId, onNotice }: { brandId: string; onNotice: (n: 
   const [removing, setRemoving] = useState<string | null>(null);
   const [adInput, setAdInput] = useState("");
   const [organicInput, setOrganicInput] = useState("");
+  const [regenerating, setRegenerating] = useState(false);
+  const [confirmRegen, setConfirmRegen] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -1598,14 +1600,67 @@ function KeywordManager({ brandId, onNotice }: { brandId: string; onNotice: (n: 
     }
   }
 
+  async function handleRegenerate() {
+    if (regenerating) return;
+    setConfirmRegen(false);
+    setRegenerating(true);
+    try {
+      await regenerateAdConsoleKeywords(brandId);
+      // Re-extraction runs server-side (~25s for 5 angles). Terms stay non-empty
+      // throughout (old → new), so poll a fixed window and refresh live — no
+      // early break.
+      for (let i = 0; i < 14; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        setTerms(await getAdConsoleKeywords(brandId));
+      }
+      onNotice({ kind: "success", text: "Keywords regenerated from your angles." });
+    } catch (err) {
+      onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setRegenerating(false);
+    }
+  }
+
   const total = (terms?.ad.length ?? 0) + (terms?.organic.length ?? 0);
 
   return (
     <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 space-y-3">
       <div className="flex items-center justify-between">
         <span className="text-[10px] font-mono uppercase tracking-wider text-white/40">Search keywords</span>
-        {!loading && <span className="text-[10px] font-mono text-white/25">{total} term{total === 1 ? "" : "s"}</span>}
+        <div className="flex items-center gap-2">
+          {!loading && <span className="text-[10px] font-mono text-white/25">{total} term{total === 1 ? "" : "s"}</span>}
+          {!loading && total > 0 && !confirmRegen && (
+            <button
+              onClick={() => setConfirmRegen(true)}
+              disabled={regenerating}
+              title="Re-extract all keywords with the latest prompt (discards manual edits)"
+              className="flex items-center gap-1 text-[10px] font-mono text-white/40 hover:text-white/70 disabled:opacity-50"
+            >
+              {regenerating ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
+              Regenerate
+            </button>
+          )}
+        </div>
       </div>
+      {confirmRegen && (
+        <div className="flex items-center justify-between gap-2 rounded-md border border-amber-500/20 bg-amber-500/[0.06] px-2 py-1.5">
+          <span className="text-[10px] font-mono text-amber-200/80">Replace all keywords with a fresh extraction?</span>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => void handleRegenerate()}
+              className="px-2 py-0.5 rounded text-[10px] font-mono text-amber-100 bg-amber-500/15 hover:bg-amber-500/25"
+            >
+              Yes
+            </button>
+            <button
+              onClick={() => setConfirmRegen(false)}
+              className="px-2 py-0.5 rounded text-[10px] font-mono text-white/50 hover:text-white/80"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center gap-1.5 text-[10px] font-mono text-white/30">
