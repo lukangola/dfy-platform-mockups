@@ -212,10 +212,81 @@ const SKINCARE_SEED: NicheSeed = {
   config: DEFAULT_CONFIG,
 };
 
+const CLEANING_SEED: NicheSeed = {
+  niche: "cleaning",
+  displayName: "Cleaning",
+  keywords: {
+    adLibrary: [
+      "cleaning products",
+      "natural cleaner",
+      "non toxic cleaner",
+      "all purpose cleaner",
+      "laundry detergent",
+      "dish soap",
+      "cleaning tablets",
+      "eco friendly cleaning",
+      "plastic free cleaning",
+      "refillable cleaner",
+      "bathroom cleaner",
+      "hand soap",
+    ],
+    organic: [
+      "cleaning routine",
+      "clean with me",
+      "non toxic home swaps",
+      "natural cleaning hacks",
+      "eco friendly cleaning routine",
+      "deep clean my house",
+      "satisfying cleaning",
+      "switching to non toxic cleaning",
+    ],
+    hashtags: [
+      "#cleantok",
+      "#cleanwithme",
+      "#cleaningmotivation",
+      "#nontoxicliving",
+      "#nontoxiccleaning",
+      "#ecofriendly",
+      "#cleaninghacks",
+      "#cleaningroutine",
+      "#plasticfree",
+      "#sustainableliving",
+    ],
+  },
+  leadingAdvertisers: [
+    // Name-only seeds (per SeedAdvertiser doc): the ingest resolves each by name
+    // against AdSpy rather than us hardcoding handles/IDs.
+    { name: "Blueland" },
+    { name: "Branch Basics" },
+    { name: "Grove Collaborative" },
+    { name: "Cleancult" },
+    { name: "Koala Eco" },
+    { name: "Method" },
+    { name: "Mrs. Meyer's Clean Day" },
+    { name: "Dr. Bronner's" },
+  ],
+  painPointKeywords: [
+    "toxic cleaning chemicals",
+    "harsh chemical fumes",
+    "single use plastic waste",
+    "skin irritation from cleaners",
+    "unsafe around kids and pets",
+    "streaky surfaces",
+    "expensive cleaning supplies",
+    "cluttered under the sink",
+    "ineffective natural cleaners",
+    "grease and grime buildup",
+    "strong artificial fragrance",
+    "wasteful refill packaging",
+  ],
+  config: DEFAULT_CONFIG,
+};
+
 /** Registry of all configured niches, keyed by canonical niche key. */
 export const NICHE_SEEDS: Record<string, NicheSeed> = {
   supplement: SUPPLEMENT_SEED,
   skincare: SKINCARE_SEED,
+  cleaning: CLEANING_SEED,
 };
 
 /** Closed set the brand niche classifier output is coerced against. */

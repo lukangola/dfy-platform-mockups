@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import {
   adConsoleImg,
-  getAdConsoleNiche, bootstrapAdConsole,
+  getAdConsoleNiche, bootstrapAdConsole, detectAdConsoleNiche,
   listAdConsoleCompetitors, addAdConsoleCompetitor,
   updateAdConsoleCompetitor, deleteAdConsoleCompetitor,
   listAdConsoleKeywordSets,
@@ -670,6 +670,7 @@ export default function AdConsolePage() {
                     bootstrapping={bootstrapping}
                     onCompetitorsChange={refreshCompetitors}
                     onFeedRanked={refreshFeed}
+                    onNicheChange={setNiche}
                     onNotice={flash}
                     brandId={activeBrandId!}
                   />
@@ -1451,6 +1452,7 @@ function SetupPanel({
   bootstrapping,
   onCompetitorsChange,
   onFeedRanked,
+  onNicheChange,
   onNotice,
 }: {
   brandId: string;
@@ -1462,9 +1464,11 @@ function SetupPanel({
   bootstrapping: boolean;
   onCompetitorsChange: () => Promise<void>;
   onFeedRanked: () => Promise<void>;
+  onNicheChange: (state: AdConsoleNicheState) => void;
   onNotice: (n: Notice) => void;
 }) {
   const [ranking, setRanking] = useState(false);
+  const [redetecting, setRedetecting] = useState(false);
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
   const [newFb, setNewFb] = useState("");
@@ -1487,6 +1491,25 @@ function SetupPanel({
       onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
     } finally {
       setRanking(false);
+    }
+  }
+
+  async function handleRedetect() {
+    if (redetecting) return;
+    setRedetecting(true);
+    try {
+      const { classification, state } = await detectAdConsoleNiche(brandId);
+      onNicheChange(state);
+      const label = state.stream?.displayName ?? classification.niche;
+      onNotice(
+        classification.seeded
+          ? { kind: "success", text: `Re-detected niche: ${label}.` }
+          : { kind: "error", text: `Detected "${classification.niche}" — not a seeded niche, so no niche stream attaches.` },
+      );
+    } catch (err) {
+      onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setRedetecting(false);
     }
   }
 
@@ -1572,6 +1595,15 @@ function SetupPanel({
           >
             {ranking ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
             Re-rank feed
+          </button>
+          <button
+            onClick={() => void handleRedetect()}
+            disabled={redetecting}
+            title="Re-classify this brand's niche from its products & research"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/50 hover:text-white/80 transition-all disabled:opacity-50"
+          >
+            {redetecting ? <Loader2 size={12} className="animate-spin" /> : <Radar size={12} />}
+            Re-detect niche
           </button>
         </div>
         <p className="text-[10px] text-white/25 font-mono leading-relaxed">
