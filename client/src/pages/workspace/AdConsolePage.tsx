@@ -1580,18 +1580,28 @@ function KeywordManager({ brandId, onNotice }: { brandId: string; onNotice: (n: 
     }
   }
 
+  // Poll until the term list STABILIZES (two identical non-empty reads) or the
+  // cap is hit. Extraction writes the authoritative list at the end, so the
+  // derived-for-display value keeps changing until it lands, then holds — this
+  // avoids capturing a mid-extraction partial.
+  async function pollTerms() {
+    let prev = "";
+    for (let i = 0; i < 24; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const t = await getAdConsoleKeywords(brandId);
+      setTerms(t);
+      const sig = JSON.stringify([t.ad, t.organic]);
+      if ((t.ad.length > 0 || t.organic.length > 0) && sig === prev) break;
+      prev = sig;
+    }
+  }
+
   async function handleGenerate() {
     if (generating) return;
     setGenerating(true);
     try {
       await generateAdConsoleKeywords(brandId);
-      // Extraction runs in the background (~25s for 5 angles); poll until populated.
-      for (let i = 0; i < 24; i++) {
-        await new Promise((r) => setTimeout(r, 3000));
-        const t = await getAdConsoleKeywords(brandId);
-        setTerms(t);
-        if (t.ad.length > 0 || t.organic.length > 0) break;
-      }
+      await pollTerms();
       onNotice({ kind: "success", text: "Keywords generated from your angles." });
     } catch (err) {
       onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
@@ -1606,13 +1616,7 @@ function KeywordManager({ brandId, onNotice }: { brandId: string; onNotice: (n: 
     setRegenerating(true);
     try {
       await regenerateAdConsoleKeywords(brandId);
-      // Re-extraction runs server-side (~25s for 5 angles). Terms stay non-empty
-      // throughout (old → new), so poll a fixed window and refresh live — no
-      // early break.
-      for (let i = 0; i < 14; i++) {
-        await new Promise((r) => setTimeout(r, 3000));
-        setTerms(await getAdConsoleKeywords(brandId));
-      }
+      await pollTerms();
       onNotice({ kind: "success", text: "Keywords regenerated from your angles." });
     } catch (err) {
       onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });

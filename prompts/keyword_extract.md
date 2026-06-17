@@ -35,7 +35,7 @@ Keep it ONLY if both are true. That means real words that appear in competitor a
 
 # REQUIRE these
 
-- **The bare product category, always** — the plain category noun AND its common qualifiers. For a sunscreen: "sunscreen", "spf", "mineral sunscreen", "sunscreen for face", "sunscreen for dark skin".
+- **The bare product category, always** — the plain category noun on its own (e.g. "sunscreen", "spf") AND its common qualifiers ("mineral sunscreen", "sunscreen for face", "sunscreen for dark skin"). The plain noun MUST appear in EVERY section — including Product / Solution — as one of the first terms, NOT only qualified variants like "mineral sunscreen".
 - **Real adjacent topics & problems people actually search**, tied to this angle — e.g. "white cast", "sunburn", "spf review", "sunscreen routine", "best sunscreen".
 - A spread from broad (category) to specific (category + this angle's qualifier). Lead each section with the broadest, most-searched terms.
 

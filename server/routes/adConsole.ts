@@ -33,6 +33,7 @@ import {
   startKeywordExtract,
   ensureBrandKeywords,
   regenerateBrandKeywords,
+  persistDerivedSearchTerms,
   getBrandSearchTerms,
   addBrandSearchTerm,
   removeBrandSearchTerm,
@@ -362,8 +363,8 @@ adConsoleRouter.post("/brands/:brandId/keywords/generate", async (req: Request, 
     void (async () => {
       try {
         await ensureBrandKeywords(brandId);
-        // Re-read forces materialization of the freshly-extracted terms.
-        await getBrandSearchTerms(brandId);
+        // Authoritatively write the terms from the freshly-extracted sets.
+        await persistDerivedSearchTerms(brandId);
       } catch (err) {
         console.error("[ad-console] keyword generate worker crashed:", err);
       }

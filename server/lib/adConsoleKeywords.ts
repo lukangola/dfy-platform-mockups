@@ -438,13 +438,15 @@ export async function ensureBrandKeywords(
  * Force a full re-extraction of every angle (e.g. after the extraction prompt
  * improves) and RESET the operator-curated search terms to the fresh derivation.
  * Clears `search_terms` FIRST so the Console shows the rebuild in progress, then
- * re-extracts, then re-materializes. Discards prior manual edits by design — the
- * operator re-tunes from the improved base.
+ * re-extracts, then authoritatively rewrites the terms from the fresh sets.
+ * Discards prior manual edits by design — the operator re-tunes from the improved
+ * base. The final write goes through `persistDerivedSearchTerms` (unconditional),
+ * so a concurrent poll can't leave a stale/half-built list behind.
  */
 export async function regenerateBrandKeywords(brandId: string): Promise<EnsureKeywordsResult> {
   await db.update(schema.brands).set({ searchTerms: null }).where(eq(schema.brands.id, brandId));
   const result = await ensureBrandKeywords(brandId, { force: true });
-  await materializeSearchTerms(brandId);
+  await persistDerivedSearchTerms(brandId);
   return result;
 }
 
@@ -585,17 +587,30 @@ async function writeStoredSearchTerms(brandId: string, terms: BrandSearchTerms):
 }
 
 /**
- * The brand's effective search terms: the stored operator-curated list if it
- * exists, else the derivation from keyword sets — materialized (persisted) so the
- * operator has a stable editable list. Empty derivations are NOT persisted, so a
- * later keyword extraction can still seed the list.
+ * The brand's effective search terms for DISPLAY/EDIT: the stored operator list
+ * if present, else the live derivation from the keyword sets. READ-ONLY — it
+ * never persists. This is deliberate: a poll during a re-extraction must not be
+ * able to freeze a half-built list. The authoritative write is owned solely by
+ * `persistDerivedSearchTerms` (called by generate/regenerate AFTER extraction)
+ * and by the operator's add/remove edits.
  */
-async function materializeSearchTerms(brandId: string): Promise<BrandSearchTerms> {
+async function effectiveSearchTerms(brandId: string): Promise<BrandSearchTerms> {
   const stored = await readStoredSearchTerms(brandId);
   if (stored) return stored;
   const derived = await deriveBrandSearchQueries(brandId);
+  return { ad: derived.adQueries, organic: derived.organicQueries };
+}
+
+/**
+ * Authoritatively (over)write `search_terms` from the CURRENT full derivation.
+ * Called by generate/regenerate AFTER extraction completes, so the stored list
+ * always reflects the freshly-extracted sets — never a stale or half-built one,
+ * regardless of any concurrent reads. Unconditional overwrite (ignores existing).
+ */
+export async function persistDerivedSearchTerms(brandId: string): Promise<BrandSearchTerms> {
+  const derived = await deriveBrandSearchQueries(brandId);
   const terms: BrandSearchTerms = { ad: derived.adQueries, organic: derived.organicQueries };
-  if (terms.ad.length > 0 || terms.organic.length > 0) await writeStoredSearchTerms(brandId, terms);
+  await writeStoredSearchTerms(brandId, terms);
   return terms;
 }
 
@@ -603,7 +618,7 @@ async function materializeSearchTerms(brandId: string): Promise<BrandSearchTerms
 export async function getBrandSearchTerms(
   brandId: string,
 ): Promise<BrandSearchTerms & { hasKeywordSets: boolean }> {
-  const [terms, sets] = await Promise.all([materializeSearchTerms(brandId), listBrandKeywordSets(brandId)]);
+  const [terms, sets] = await Promise.all([effectiveSearchTerms(brandId), listBrandKeywordSets(brandId)]);
   return { ...terms, hasKeywordSets: sets.some((s) => s.status === "complete") };
 }
 
@@ -611,7 +626,7 @@ export async function getBrandSearchTerms(
 export async function addBrandSearchTerm(brandId: string, lane: SearchLane, keyword: string): Promise<BrandSearchTerms> {
   const kw = keyword.trim();
   if (!kw) throw new Error("Keyword cannot be empty");
-  const cur = await materializeSearchTerms(brandId);
+  const cur = await effectiveSearchTerms(brandId);
   const terms: BrandSearchTerms = { ad: [...cur.ad], organic: [...cur.organic] };
   const lc = kw.toLowerCase();
   if (!terms[lane].some((t) => t.toLowerCase() === lc)) terms[lane].push(kw);
@@ -621,7 +636,7 @@ export async function addBrandSearchTerm(brandId: string, lane: SearchLane, keyw
 
 /** Remove an operator term from one lane (case-insensitive). Persists the removal. Returns the updated list. */
 export async function removeBrandSearchTerm(brandId: string, lane: SearchLane, keyword: string): Promise<BrandSearchTerms> {
-  const cur = await materializeSearchTerms(brandId);
+  const cur = await effectiveSearchTerms(brandId);
   const lc = keyword.trim().toLowerCase();
   const terms: BrandSearchTerms = {
     ad: lane === "ad" ? cur.ad.filter((t) => t.toLowerCase() !== lc) : [...cur.ad],
