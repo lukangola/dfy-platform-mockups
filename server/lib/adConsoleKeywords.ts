@@ -441,13 +441,40 @@ function dedupeCI(values: string[]): string[] {
 }
 
 /**
- * Round-robin across angles (one keyword from each in turn) so the query set is
- * diverse rather than 12 keywords from a single angle, and put multi-word phrases
- * before bare single words. A phrase like "mushroom coffee" is a far better
- * ad-library search than "coffee" — that's the whole point of #137: angle-
- * specific phrases, NOT a generic one-word "supplements" search.
+ * Category anchors: short (1–2 word) terms SHARED across angles — the
+ * category-defining queries (e.g. "sunscreen", "spf"). A term shared by ≥2
+ * angles is a strong category signal; for a single-angle brand we treat its
+ * own 1–2 word terms as anchors. Sorted by frequency, then brevity.
  */
-function selectQueries(perAngle: string[][], limit: number): string[] {
+function categoryAnchors(perAngle: string[][]): string[] {
+  const freq = new Map<string, number>();
+  for (const angle of perAngle) {
+    const seen = new Set<string>();
+    for (const kw of angle) {
+      const k = kw.trim().toLowerCase();
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      freq.set(k, (freq.get(k) ?? 0) + 1);
+    }
+  }
+  const minAngles = perAngle.length >= 2 ? 2 : 1;
+  return Array.from(freq.entries())
+    .filter(([k, n]) => n >= minAngles && k.split(/\s+/).length <= 2)
+    .sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)
+    .map(([k]) => k);
+}
+
+/**
+ * Round-robin across angles (one keyword from each in turn) for a DIVERSE query
+ * set, but FIRST guarantee the category anchors (shared short terms like
+ * "sunscreen") so the per-lane cap can never slice them out — that was the bug
+ * where "sunscreen" lived in the data yet never reached the search. Multi-word
+ * phrases are preferred over bare single words among the non-anchor remainder.
+ *
+ * Exported for unit testing.
+ */
+export function selectQueries(perAngle: string[][], limit: number): string[] {
+  const anchors = categoryAnchors(perAngle).slice(0, Math.max(3, Math.ceil(limit / 2)));
   const phrases: string[] = [];
   const singles: string[] = [];
   const maxLen = perAngle.reduce((m, a) => Math.max(m, a.length), 0);
@@ -459,7 +486,7 @@ function selectQueries(perAngle: string[][], limit: number): string[] {
       else singles.push(kw);
     }
   }
-  return dedupeCI([...phrases, ...singles]).slice(0, limit);
+  return dedupeCI([...anchors, ...phrases, ...singles]).slice(0, limit);
 }
 
 export type BrandSearchQueries = {
