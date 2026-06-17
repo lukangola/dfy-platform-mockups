@@ -26,7 +26,7 @@
 import { and, desc, eq, inArray, ne, or, type SQL } from "drizzle-orm";
 import { db, schema } from "./db.js";
 import { getBrandNicheState } from "./adConsoleNiche.js";
-import { ORGANIC_MIN_DURATION_SEC } from "./adConsoleOrganic.js";
+import { ORGANIC_MIN_DURATION_SEC, isLikelyEnglish } from "./adConsoleOrganic.js";
 import { scoreAdspyTraction } from "./adspy.js";
 import { DEFAULT_NICHE_CONFIG, type NicheStreamConfig } from "./nicheConfig.js";
 import type { AdCreative, FeedItem, NicheStream, OrganicPost } from "../db/schema.js";
@@ -406,11 +406,16 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
   const allOrganic: OrganicPost[] = streamId
     ? await db.select().from(schema.organicPosts).where(eq(schema.organicPosts.nicheStreamId, streamId))
     : [];
-  // Operator rule: clips must be ≥30s. Enforced at ingest for new pulls; applied
-  // here too so existing sub-30s clips drop out of the rail (unknown length kept).
-  const organic = allOrganic.filter((p) => p.durationSec == null || p.durationSec >= ORGANIC_MIN_DURATION_SEC);
-  const tooShortIds = allOrganic.filter((p) => p.durationSec != null && p.durationSec < ORGANIC_MIN_DURATION_SEC).map((p) => p.id);
-  if (tooShortIds.length > 0) {
+  // Operator rules applied at rank too (so existing posts drop without a re-pull):
+  //  - clips must be ≥30s (unknown length kept),
+  //  - captions must be English (non-English dropped).
+  const organic = allOrganic.filter(
+    (p) => (p.durationSec == null || p.durationSec >= ORGANIC_MIN_DURATION_SEC) && isLikelyEnglish(p.caption),
+  );
+  const droppedIds = allOrganic
+    .filter((p) => (p.durationSec != null && p.durationSec < ORGANIC_MIN_DURATION_SEC) || !isLikelyEnglish(p.caption))
+    .map((p) => p.id);
+  if (droppedIds.length > 0) {
     await db
       .delete(schema.feedItems)
       .where(
@@ -418,7 +423,7 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
           eq(schema.feedItems.brandId, brandId),
           eq(schema.feedItems.rail, "trending_organic"),
           eq(schema.feedItems.status, "new"),
-          inArray(schema.feedItems.organicPostId, tooShortIds),
+          inArray(schema.feedItems.organicPostId, droppedIds),
         ),
       );
   }

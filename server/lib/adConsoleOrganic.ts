@@ -70,6 +70,51 @@ export const MIN_ORGANIC_VIEWS = 100_000;
 
 type Caps = NicheStreamConfig["caps"];
 
+// ── English-only gate (operator rule) ────────────────────────────────────────
+// Non-Latin scripts that are definitively not English: Cyrillic, Hebrew, Arabic,
+// Devanagari, Thai, Hiragana/Katakana, CJK, Hangul.
+const NON_LATIN_RE =
+  /[Ѐ-ӿ֐-׿؀-ۿऀ-ॿ฀-๿぀-ヿ㐀-鿿가-힯]/g;
+const EN_STOPWORDS = new Set(
+  "the an and or but is are was to of in on for with this that you your my how why what when best not no do does have has get got just really love like make new review tips routine try need want about from can will good great use".split(" "),
+);
+// Function words that strongly mark a NON-English Latin language (es / pt / fr / de / it).
+const FOREIGN_STOPWORDS = new Set([
+  "que", "de", "la", "el", "los", "las", "una", "con", "por", "para", "pero", "muy", "más", "como", "esta", "este", "piel", "protector", "solar", "crema",
+  "da", "do", "uma", "você", "pele", "protetor", "filtro", "não", "mais", "muito",
+  "les", "des", "une", "avec", "pour", "très", "cette", "peau", "crème", "solaire", "vous", "pas", "ne", "est",
+  "der", "die", "das", "und", "ein", "eine", "mit", "für", "aber", "sehr", "wie", "haut", "sonnencreme", "nicht", "ich", "auch",
+  "di", "ma", "molto", "più", "questa", "pelle", "non", "sono",
+]);
+
+/**
+ * Lightweight English detector for organic captions — dependency-free and biased
+ * to KEEP when unsure, so English clips are never dropped. A clip is filtered out
+ * only when the caption is in a non-Latin script (≥4 non-Latin chars) or is
+ * clearly a Latin non-English language (≥2 foreign function words and no English
+ * ones). Hashtag/emoji-only or very short captions are kept (the search keyword
+ * was English, so they're English-targeted).
+ */
+export function isLikelyEnglish(caption: string | null | undefined): boolean {
+  if (!caption) return true;
+  const cleaned = caption
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[@#][\w.]+/g, " ")
+    .toLowerCase();
+  if ((cleaned.match(NON_LATIN_RE) ?? []).length >= 4) return false;
+  const words = (cleaned.match(/[a-zà-öø-ÿ]+/g) ?? []).filter((w) => w.length >= 2);
+  if (words.length < 3) return true; // too little text to judge
+  let en = 0;
+  let foreign = 0;
+  for (const w of words) {
+    if (EN_STOPWORDS.has(w)) en++;
+    else if (FOREIGN_STOPWORDS.has(w)) foreign++;
+  }
+  if (en > 0 && en >= foreign) return true;
+  if (foreign >= 2 && foreign > en) return false;
+  return true; // ambiguous → keep
+}
+
 /**
  * The view count we gate + score on. IG often hides the play count and returns
  * only likes; we estimate views ≈ likes × 10 (~10% like-rate) so a strong reel
@@ -392,6 +437,8 @@ async function upsertOrganicPost(
   // by a known brand (competitors + leading advertisers).
   if (post.format !== "video") return "skipped";
   if (post.isAd) return "skipped";
+  // English-only feed (operator rule): drop non-English captions.
+  if (!isLikelyEnglish(post.caption)) return "skipped";
   const handleKey = normalizeHandleKey(post.handle);
   if (handleKey && brandHandles.has(handleKey)) return "skipped";
 
