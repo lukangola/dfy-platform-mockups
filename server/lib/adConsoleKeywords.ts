@@ -16,6 +16,7 @@
  * Generated async (status lifecycle pending → running → complete | failed),
  * mirroring the other LLM-action tables so the Console can poll.
  */
+import { randomUUID } from "node:crypto";
 import { and, asc, eq } from "drizzle-orm";
 import { generateText } from "./anthropic.js";
 import { db, schema } from "./db.js";
@@ -338,9 +339,30 @@ async function listBrandAngles(brandId: string): Promise<BrandAnglePair[]> {
     .where(eq(schema.products.brandId, brandId));
   const pairs: BrandAnglePair[] = [];
   for (const p of products) {
-    const research = (p.research ?? {}) as { angles?: unknown };
+    const research = (p.research ?? {}) as Record<string, unknown> & { angles?: unknown };
     const angles = Array.isArray(research.angles) ? (research.angles as StoredAngle[]) : [];
-    for (const a of angles) {
+
+    // Self-heal: stamp a stable id onto any angle missing one, and persist it.
+    // The keyword set is keyed on the angle id, and the products-route backfill
+    // (ensureAngleIds) only fires on the operator's product-detail GET — so an
+    // angle that's never been opened there arrives here id-less and would be
+    // silently dropped. Healing in place means the pull path can always extract.
+    let changed = false;
+    const healed = angles.map((a) => {
+      if (a && typeof a === "object" && (typeof a.id !== "string" || !a.id.trim())) {
+        changed = true;
+        return { ...a, id: randomUUID() };
+      }
+      return a;
+    });
+    if (changed) {
+      await db
+        .update(schema.products)
+        .set({ research: { ...research, angles: healed } })
+        .where(eq(schema.products.id, p.id));
+    }
+
+    for (const a of healed) {
       // Need a stable id (the keyword set is keyed on it) and a name.
       if (!a || typeof a.id !== "string" || !a.id.trim() || typeof a.name !== "string" || !a.name.trim()) continue;
       pairs.push({
