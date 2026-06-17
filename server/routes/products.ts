@@ -559,21 +559,32 @@ productsRouter.get("/:id/angles", async (req: Request, res: Response) => {
 
 /**
  * POST /api/products/:id/angles
- * Body: { description } (elaborate)  OR  { name, block } (paste verbatim)
+ * Body: { description } (elaborate)  OR
+ *       { name, block, statements?, messages?, adCopy? } (paste verbatim)
  *
  * Two modes, both appending ONE angle to products.research.angles and returning
  * the new angle + full list:
  *   - ELABORATE: a short `description` → Claude expands it into the full angle
  *     format, grounded in the product's research markdown.
  *   - PASTE: `name` + `block` → stored verbatim, no Claude (drop in a
- *     pre-written / client-approved angle).
+ *     pre-written / client-approved angle). Any of `statements` / `messages` /
+ *     `adCopy` provided are stored as the angle's complete sub-artifacts in the
+ *     same call, so a full angle can be pasted in one go.
  *
  * Either way, only the new angle is touched — the existing angles and research
  * markdown are left untouched.
  */
 productsRouter.post("/:id/angles", async (req: Request, res: Response) => {
   try {
-    const body = (req.body ?? {}) as { description?: string; name?: string; block?: string };
+    const body = (req.body ?? {}) as {
+      description?: string;
+      name?: string;
+      block?: string;
+      // Optional per-angle artifacts, pasted alongside a manual angle.
+      statements?: string;
+      messages?: string;
+      adCopy?: string;
+    };
 
     const [row] = await db
       .select()
@@ -593,7 +604,26 @@ productsRouter.post("/:id/angles", async (req: Request, res: Response) => {
     const manualName = body.name?.trim();
     const manualBlock = body.block?.trim();
     if (manualName && manualBlock) {
-      const angle: StoredAngle = { id: randomUUID(), name: manualName, block: manualBlock };
+      // Optional per-angle artifacts pasted alongside the angle — stored as
+      // "complete" so they render immediately (no generation needed). Any of the
+      // three (statements / messages / adCopy) can be omitted.
+      const now = new Date().toISOString();
+      const artifacts: Partial<Record<AngleArtifactKind, AngleArtifact>> = {};
+      const kinds: [AngleArtifactKind, string | undefined][] = [
+        ["statements", body.statements],
+        ["messages", body.messages],
+        ["adCopy", body.adCopy],
+      ];
+      for (const [kind, raw] of kinds) {
+        const content = raw?.trim();
+        if (content) artifacts[kind] = { content, status: "complete", generatedAt: now };
+      }
+      const angle: StoredAngle = {
+        id: randomUUID(),
+        name: manualName,
+        block: manualBlock,
+        ...(Object.keys(artifacts).length ? { artifacts } : {}),
+      };
       const existing = Array.isArray(research.angles) ? research.angles : [];
       const nextAngles = [...existing, angle];
       await db

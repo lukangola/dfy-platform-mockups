@@ -749,6 +749,10 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
   const [addAngleMode, setAddAngleMode] = useState<"idea" | "paste">("idea");
   const [addAngleName, setAddAngleName] = useState("");
   const [addAngleBlock, setAddAngleBlock] = useState("");
+  // Optional per-angle artifacts pasted alongside a manual angle.
+  const [addAngleStatements, setAddAngleStatements] = useState("");
+  const [addAngleMessages, setAddAngleMessages] = useState("");
+  const [addAngleAdCopy, setAddAngleAdCopy] = useState("");
 
   // Inline research-markdown edit.
   const [editResearch, setEditResearch] = useState(false);
@@ -761,6 +765,9 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
     setAddAngleDescription("");
     setAddAngleName("");
     setAddAngleBlock("");
+    setAddAngleStatements("");
+    setAddAngleMessages("");
+    setAddAngleAdCopy("");
     setAddAngleError(null);
   }
 
@@ -787,7 +794,11 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
     setAddAngleBusy(true);
     setAddAngleError(null);
     try {
-      await addProductAngleManual(productId, name, block);
+      await addProductAngleManual(productId, name, block, {
+        statements: addAngleStatements.trim() || undefined,
+        messages: addAngleMessages.trim() || undefined,
+        adCopy: addAngleAdCopy.trim() || undefined,
+      });
       await refresh();
       resetAddAngle();
     } catch (err) {
@@ -1466,6 +1477,52 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
                             disabled={addAngleBusy}
                             className="w-full bg-[#0D0F12] border border-white/[0.08] rounded-lg px-3 py-2 text-xs font-mono text-white/80 placeholder:text-white/20 outline-none focus:border-cyan-500/40 disabled:opacity-50 resize-y leading-relaxed"
                           />
+
+                          <div className="pt-1 text-[10px] font-mono uppercase tracking-wider text-white/30">
+                            Optional — paste any of these now, or generate them later
+                          </div>
+
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-mono uppercase tracking-wider text-white/40">
+                              Real-life customer statements
+                            </label>
+                            <textarea
+                              rows={5}
+                              value={addAngleStatements}
+                              onChange={(e) => setAddAngleStatements(e.target.value)}
+                              placeholder="Paste the customer resonance statements for this angle… (optional)"
+                              disabled={addAngleBusy}
+                              className="w-full bg-[#0D0F12] border border-white/[0.08] rounded-lg px-3 py-2 text-xs font-mono text-white/80 placeholder:text-white/20 outline-none focus:border-cyan-500/40 disabled:opacity-50 resize-y leading-relaxed"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-mono uppercase tracking-wider text-white/40">
+                              Messages
+                            </label>
+                            <textarea
+                              rows={5}
+                              value={addAngleMessages}
+                              onChange={(e) => setAddAngleMessages(e.target.value)}
+                              placeholder="Paste the first-person transformation messages for this angle… (optional)"
+                              disabled={addAngleBusy}
+                              className="w-full bg-[#0D0F12] border border-white/[0.08] rounded-lg px-3 py-2 text-xs font-mono text-white/80 placeholder:text-white/20 outline-none focus:border-cyan-500/40 disabled:opacity-50 resize-y leading-relaxed"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-mono uppercase tracking-wider text-white/40">
+                              Angle / ad copy
+                            </label>
+                            <textarea
+                              rows={5}
+                              value={addAngleAdCopy}
+                              onChange={(e) => setAddAngleAdCopy(e.target.value)}
+                              placeholder="Paste the primary ad copy for this angle… (optional)"
+                              disabled={addAngleBusy}
+                              className="w-full bg-[#0D0F12] border border-white/[0.08] rounded-lg px-3 py-2 text-xs font-mono text-white/80 placeholder:text-white/20 outline-none focus:border-cyan-500/40 disabled:opacity-50 resize-y leading-relaxed"
+                            />
+                          </div>
                         </div>
                       )}
 

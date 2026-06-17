@@ -430,17 +430,20 @@ export function addProductAngle(
 
 /**
  * Append a pre-written angle VERBATIM (no AI) — the "paste an angle" mode.
- * Stores `name` + `block` as-is on research.angles. Use when the operator
- * already has a finished/approved angle rather than an idea to elaborate.
+ * Stores `name` + `block` as-is on research.angles. Any of the optional
+ * artifacts (statements / messages / adCopy) provided are saved as the angle's
+ * complete sub-artifacts in the same call, so a whole angle can be pasted in one
+ * go. Use when the operator already has a finished/approved angle.
  */
 export function addProductAngleManual(
   productId: string,
   name: string,
   block: string,
+  artifacts?: { statements?: string; messages?: string; adCopy?: string },
 ): Promise<{ angle: ProductAngle; angles: ProductAngle[] }> {
   return post<{ angle: ProductAngle; angles: ProductAngle[] }>(
     `/api/products/${productId}/angles`,
-    { name, block },
+    { name, block, ...(artifacts ?? {}) },
   );
 }
 
