@@ -463,13 +463,8 @@ function dedupeCI(values: string[]): string[] {
   return out;
 }
 
-/**
- * Category anchors: short (1–2 word) terms SHARED across angles — the
- * category-defining queries (e.g. "sunscreen", "spf"). A term shared by ≥2
- * angles is a strong category signal; for a single-angle brand we treat its
- * own 1–2 word terms as anchors. Sorted by frequency, then brevity.
- */
-function categoryAnchors(perAngle: string[][]): string[] {
+/** Cross-angle frequency: how many of the brand's angles contain each (lowercased) term. */
+function termFrequency(perAngle: string[][]): Map<string, number> {
   const freq = new Map<string, number>();
   for (const angle of perAngle) {
     const seen = new Set<string>();
@@ -480,36 +475,60 @@ function categoryAnchors(perAngle: string[][]): string[] {
       freq.set(k, (freq.get(k) ?? 0) + 1);
     }
   }
-  const minAngles = perAngle.length >= 2 ? 2 : 1;
-  return Array.from(freq.entries())
-    .filter(([k, n]) => n >= minAngles && k.split(/\s+/).length <= 2)
-    .sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)
-    .map(([k]) => k);
+  return freq;
 }
 
 /**
- * Round-robin across angles (one keyword from each in turn) for a DIVERSE query
- * set, but FIRST guarantee the category anchors (shared short terms like
- * "sunscreen") so the per-lane cap can never slice them out — that was the bug
- * where "sunscreen" lived in the data yet never reached the search. Multi-word
- * phrases are preferred over bare single words among the non-anchor remainder.
- *
- * Exported for unit testing.
+ * Build a BALANCED query set per lane — the search must mix BREADTH with ANGLE
+ * specificity, not return 12 near-identical "X sunscreen" type-variants:
+ *   1. A few BROAD anchors — short terms many angles share ("sunscreen", "spf").
+ *   2. Each angle's DISTINCTIVE terms — low cross-angle frequency, so its own
+ *      angle-specific query leads ("sunscreen for rosacea", "no white cast
+ *      sunscreen"). Round-robined so EVERY angle is represented before fill.
+ *   3. Generic type-variants fill the remaining slots.
+ * Anchors are capped low (~limit/4) so they seed the list without crowding out
+ * the per-angle terms. Exported for unit testing.
  */
 export function selectQueries(perAngle: string[][], limit: number): string[] {
-  const anchors = categoryAnchors(perAngle).slice(0, Math.max(3, Math.ceil(limit / 2)));
-  const phrases: string[] = [];
-  const singles: string[] = [];
-  const maxLen = perAngle.reduce((m, a) => Math.max(m, a.length), 0);
-  for (let i = 0; i < maxLen; i++) {
-    for (const angle of perAngle) {
-      const kw = angle[i];
-      if (!kw) continue;
-      if (kw.trim().includes(" ")) phrases.push(kw);
-      else singles.push(kw);
+  const freq = termFrequency(perAngle);
+  const N = perAngle.length;
+
+  // 1. Broad anchors: short (≤2 words), shared by a majority of angles.
+  const anchors =
+    N >= 2
+      ? Array.from(freq.entries())
+          .filter(([k, n]) => n >= Math.max(2, Math.ceil(N / 2)) && k.split(/\s+/).length <= 2)
+          .sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)
+          .map(([k]) => k)
+          .slice(0, Math.max(2, Math.ceil(limit / 4)))
+      : [];
+  const anchorSet = new Set(anchors);
+
+  // 2. Per-angle, distinctive-first: each angle's terms (minus anchors) ordered
+  //    by ASCENDING cross-angle frequency, so its most angle-specific term leads.
+  //    Array.sort is stable, so the prompt's broad→specific order breaks ties.
+  const perAngleSorted = perAngle.map((angle) => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const kw of angle) {
+      const t = kw.trim();
+      const k = t.toLowerCase();
+      if (!k || seen.has(k) || anchorSet.has(k)) continue;
+      seen.add(k);
+      out.push(t);
+    }
+    return out.sort((a, b) => (freq.get(a.toLowerCase()) ?? 0) - (freq.get(b.toLowerCase()) ?? 0));
+  });
+
+  // 3. Round-robin one term per angle per pass → guarantees every angle contributes.
+  const out: string[] = [...anchors];
+  const maxLen = perAngleSorted.reduce((m, a) => Math.max(m, a.length), 0);
+  for (let i = 0; i < maxLen && out.length < limit + 6; i++) {
+    for (const angle of perAngleSorted) {
+      if (angle[i]) out.push(angle[i]);
     }
   }
-  return dedupeCI([...anchors, ...phrases, ...singles]).slice(0, limit);
+  return dedupeCI(out).slice(0, limit);
 }
 
 export type BrandSearchQueries = {
