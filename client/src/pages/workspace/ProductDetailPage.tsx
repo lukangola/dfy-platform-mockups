@@ -1363,7 +1363,10 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
                 )}
               </CollapsibleSection>
 
-              {phase2 && (
+              {/* Always render the angles section once research exists (not gated
+                  on a "Phase 2" heading) so operators can add/paste angles even
+                  for hand-pasted research that doesn't carry the split marker. */}
+              {(
                 <CollapsibleSection
                   title="Research · Phase 2 — Strategic Angles"
                   icon={Target}
@@ -1604,10 +1607,14 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
                         );
                       })}
                     </div>
-                  ) : (
+                  ) : phase2 ? (
                     <article className="prose-report max-w-none">
                       <Streamdown>{phase2}</Streamdown>
                     </article>
+                  ) : (
+                    <p className="text-[11px] font-mono text-white/40 py-2">
+                      No strategic angles yet — generate one from an idea or paste an existing angle with the button above.
+                    </p>
                   )}
                 </CollapsibleSection>
               )}
