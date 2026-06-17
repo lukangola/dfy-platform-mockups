@@ -505,9 +505,19 @@ productsRouter.get("/:id/angles", async (req: Request, res: Response) => {
     if (!row) return sendError(res, 404, "Product not found");
 
     const research = (row.research ?? {}) as Record<string, unknown>;
-    const cached = (research as { angles?: { name: string; block: string }[] }).angles;
+    const cached = (research as { angles?: StoredAngle[] }).angles;
     if (Array.isArray(cached) && cached.length > 0) {
-      return res.json({ angles: cached, cached: true });
+      // Heal any id-less cached angles (legacy / imported before stable IDs) so
+      // every consumer gets an addressable angle — the per-angle artifact, message
+      // testing, and ad-console keyword flows all key on the id. Persist if changed.
+      const { angles: healed, changed } = ensureAngleIds(cached);
+      if (changed) {
+        await db
+          .update(schema.products)
+          .set({ research: { ...research, angles: healed } })
+          .where(eq(schema.products.id, row.id));
+      }
+      return res.json({ angles: healed, cached: true });
     }
 
     const markdown = typeof research.markdown === "string" ? research.markdown : "";
