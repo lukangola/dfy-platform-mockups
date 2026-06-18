@@ -166,6 +166,25 @@ export default function CopyEngineAppPage() {
   const [savingToAssets, setSavingToAssets] = useState(false);
   const [savedToAssets, setSavedToAssets] = useState(false);
 
+  const [pipelineCardId, setPipelineCardId] = useState<string | null>(null);
+
+  // Deep-link prefill from the Ad Pipeline ("Recreate now"). Runs once on mount.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get("mode") === "rewrite") setMode("rewrite");
+    const product = p.get("product");
+    const angle = p.get("angle");
+    const language = p.get("language");
+    const source = p.get("source");
+    const card = p.get("pipelineCardId");
+    if (product) setSelectedProductId(product);
+    if (angle) setSelectedAngleName(angle);
+    if (language) setSelectedLanguage(language);
+    if (source) setSourceCopy(source);
+    if (card) setPipelineCardId(card);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const draftEndRef = useRef<HTMLDivElement>(null);
 
   // Load products for the active brand.
@@ -321,7 +340,10 @@ export default function CopyEngineAppPage() {
         vars.source_copy = sourceCopy.trim();
       }
 
-      const res = await generateText(action, vars, { maxTokens: 8000 });
+      const res = await generateText(action, vars, {
+        maxTokens: 8000,
+        ...(pipelineCardId ? { meta: { pipelineCardId } } : {}),
+      });
       setDraft(res.text);
       setSavedToAssets(false);
       // Scroll the output to top after a fresh draft.
@@ -413,6 +435,7 @@ export default function CopyEngineAppPage() {
             language: selectedLang.label,
             languageCode: selectedLang.code,
             generatedAt: new Date().toISOString(),
+            ...(pipelineCardId ? { pipelineCardId } : {}),
           },
         },
       ]);
