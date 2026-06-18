@@ -28,6 +28,7 @@ import { staticAdsIterationsRouter } from "./routes/staticAdsIterations.js";
 import { backfillMissingThumbnails, runDeconstruction, runNicheClassification, staticAdReferencesRouter } from "./routes/staticAdReferences.js";
 import { uploadsRouter } from "./routes/uploads.js";
 import { adConsoleRouter } from "./routes/adConsole.js";
+import { adPipelineRouter } from "./routes/adPipeline.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -133,6 +134,7 @@ async function startServer() {
   // Ad Creative Console — niche detection (Phase 0), competitors, feed.
   // Managers + admins on any brand; gated inside the router with requireManager.
   app.use("/api/ad-console", adConsoleRouter);
+  app.use("/api/ad-pipeline", adPipelineRouter);
 
   // Dev: API-only on API_PORT. Vite serves the UI and proxies /api/* here.
   // Prod: same process also serves built assets.
