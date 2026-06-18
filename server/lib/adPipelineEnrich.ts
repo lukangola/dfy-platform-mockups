@@ -4,7 +4,12 @@
  * (reusing runDeconstruction). Run state is kept in-memory per card, mirroring
  * adConsolePull.ts — transient progress for a single-instance tool.
  */
+import { eq } from "drizzle-orm";
+import { db, schema } from "./db.js";
+import { transcribeAudio } from "./fal.js";
 import { pickVideoUrl } from "./adPipeline.js";
+import { runDeconstruction } from "../routes/staticAdReferences.js";
+import { buildStaticAdThumbnail } from "./staticAdThumbnails.js";
 
 export type EnrichmentPlan =
   | { kind: "use_existing_transcript"; transcript: string }
@@ -29,11 +34,6 @@ export function enrichmentPlan(card: {
   const audioUrl = pickVideoUrl(card.referenceMediaUrls);
   return audioUrl ? { kind: "transcribe", audioUrl } : { kind: "noop" };
 }
-
-import { db, schema } from "./db.js";
-import { eq } from "drizzle-orm";
-import { transcribeAudio } from "./fal.js";
-import { runDeconstruction } from "../routes/staticAdReferences.js";
 
 export type EnrichJobStatus = "pending" | "running" | "complete" | "failed";
 
@@ -82,6 +82,7 @@ async function runEnrichment(job: EnrichJob): Promise<void> {
     .where(eq(schema.adPipelineCards.id, cardId))
     .limit(1);
   if (!card) {
+    await setCard(cardId, { bgJobStatus: "failed", bgJobError: "card not found" });
     job.status = "failed";
     job.error = "card not found";
     return;
@@ -101,12 +102,19 @@ async function runEnrichment(job: EnrichJob): Promise<void> {
       const t = await transcribeAudio({ audioUrl: plan.audioUrl });
       await setCard(cardId, { originalScript: t.text || null, bgJobStatus: "complete" });
     } else if (plan.kind === "deconstruct") {
+      let thumbnailUrl: string | null = null;
+      try {
+        thumbnailUrl = await buildStaticAdThumbnail(plan.imageUrl, `pipeline-${cardId.slice(0, 8)}.png`);
+      } catch (thumbErr) {
+        console.warn(`[ad-pipeline] thumbnail build failed (non-fatal):`, thumbErr);
+      }
       const [ref] = await db
         .insert(schema.staticAdReferences)
         .values({
           title: `${brief.niche ?? "ad"} — pipeline ${cardId.slice(0, 8)}`,
           niche: brief.niche || "other",
           imageUrl: plan.imageUrl,
+          thumbnailUrl,
           deconstructionStatus: "pending",
         })
         .returning();
@@ -114,6 +122,14 @@ async function runEnrichment(job: EnrichJob): Promise<void> {
       await setCard(cardId, { staticReferenceId: ref.id });
       // Await so the card's bgJobStatus reflects deconstruction completion.
       await runDeconstruction(ref.id);
+      const [updatedRef] = await db
+        .select({ status: schema.staticAdReferences.deconstructionStatus })
+        .from(schema.staticAdReferences)
+        .where(eq(schema.staticAdReferences.id, ref.id))
+        .limit(1);
+      if (updatedRef?.status !== "complete") {
+        throw new Error(`deconstruction failed for static reference ${ref.id}`);
+      }
       await setCard(cardId, { bgJobStatus: "complete" });
     } else {
       // noop — nothing to enrich (e.g. video with no media). Mark complete so the
