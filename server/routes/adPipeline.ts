@@ -18,6 +18,8 @@ import {
 } from "../lib/adPipeline.js";
 import { getEnrichJob } from "../lib/adPipelineEnrich.js";
 
+const VALID_STAGES = new Set<AdPipelineStage>(["idea", "in_production", "ready"]);
+
 export const adPipelineRouter: Router = Router();
 
 adPipelineRouter.use(requireAuth, requireManager);
@@ -66,7 +68,7 @@ adPipelineRouter.post("/brands/:brandId/cards", async (req: Request, res: Respon
 
 adPipelineRouter.get("/cards/:cardId", async (req: Request, res: Response) => {
   try {
-    const brandId = String(req.query.brandId ?? "");
+    const brandId = typeof req.query.brandId === "string" ? req.query.brandId : "";
     if (!brandId) return sendError(res, 400, "brandId query param is required");
     const card = await getCardWithOutput(brandId, req.params.cardId);
     if (!card) return sendError(res, 404, "Card not found");
@@ -87,6 +89,9 @@ adPipelineRouter.put("/cards/:cardId", async (req: Request, res: Response) => {
       language?: string | null;
     };
     if (!body.brandId) return sendError(res, 400, "brandId is required");
+    if (body.stage && !VALID_STAGES.has(body.stage)) {
+      return sendError(res, 400, "Invalid stage");
+    }
     const card = await updateCard(body.brandId, req.params.cardId, {
       stage: body.stage,
       productId: body.productId,

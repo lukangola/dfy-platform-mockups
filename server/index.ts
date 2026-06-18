@@ -134,6 +134,7 @@ async function startServer() {
   // Ad Creative Console — niche detection (Phase 0), competitors, feed.
   // Managers + admins on any brand; gated inside the router with requireManager.
   app.use("/api/ad-console", adConsoleRouter);
+  // Ad Pipeline Kanban — Idea → In Production → Ready; managers + admins, gated inside the router.
   app.use("/api/ad-pipeline", adPipelineRouter);
 
   // Dev: API-only on API_PORT. Vite serves the UI and proxies /api/* here.
