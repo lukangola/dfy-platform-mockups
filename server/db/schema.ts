@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, integer, jsonb, numeric, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, index, integer, jsonb, numeric, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 export const generations = pgTable("generations", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -767,10 +767,12 @@ export const adPipelineCards = pgTable("ad_pipeline_cards", {
   staticReferenceId: uuid("static_reference_id"), // static: the created static_ad_reference
   productId: uuid("product_id"), // chosen at recreate time (null while in Idea)
   angleName: text("angle_name"), // chosen at recreate time
-  language: text("language").default("en"),
+  language: text("language").notNull().default("en"),
   bgJobStatus: text("bg_job_status").notNull().default("pending"), // pending|running|complete|failed
   bgJobError: text("bg_job_error"),
-});
+}, (t) => ({
+  brandIdx: index("ad_pipeline_cards_brand_idx").on(t.brandId),
+}));
 
 /**
  * LLM-GENERATED weekly creative ideas — the "This Week's Ideas" rail (spec §5,
