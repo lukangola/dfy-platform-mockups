@@ -23,7 +23,7 @@
  * Re-ranking is idempotent: upsert on (brandId, refKey) refreshes the scores
  * but PRESERVES the swipe `status`, so a re-rank never un-skips an item.
  */
-import { and, desc, eq, inArray, ne, or, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, or, sql, type SQL } from "drizzle-orm";
 import { db, schema } from "./db.js";
 import { getBrandNicheState } from "./adConsoleNiche.js";
 import { ORGANIC_MIN_DURATION_SEC, isLikelyEnglish } from "./adConsoleOrganic.js";
@@ -218,6 +218,10 @@ async function upsertFeedItem(row: {
   relevance: number;
   composite: number;
   matched: string[];
+  /** When set, the item enters/stays at this status — used to BURY every refresh
+   *  of an ad whose fingerprint the operator already skipped. Only ever downgrades
+   *  a `new` row (a CASE guard never clobbers an explicit selected/skipped). */
+  status?: "skipped" | "selected";
 }): Promise<void> {
   await db
     .insert(schema.feedItems)
@@ -231,6 +235,7 @@ async function upsertFeedItem(row: {
       relevanceScore: String(row.relevance),
       compositeScore: String(row.composite),
       matchedKeywords: row.matched,
+      ...(row.status ? { status: row.status } : {}),
     })
     .onConflictDoUpdate({
       target: [schema.feedItems.brandId, schema.feedItems.refKey],
@@ -239,6 +244,11 @@ async function upsertFeedItem(row: {
         compositeScore: String(row.composite),
         matchedKeywords: row.matched,
         updatedAt: new Date(),
+        // Bury a fingerprint-skipped refresh, but never overwrite an operator's
+        // explicit selected/skipped on this exact row.
+        ...(row.status
+          ? { status: sql`case when ${schema.feedItems.status} = 'new' then ${row.status} else ${schema.feedItems.status} end` }
+          : {}),
       },
     });
 }
@@ -352,6 +362,22 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
       );
   }
 
+  // Fingerprints the operator has already SKIPPED — so EVERY refresh of that same
+  // ad (a fresh AdSpy id with identical advertiser+copy) stays buried, not just the
+  // exact id they swiped. Computed once from this brand's skipped ad feed_items.
+  const skippedAdRows = await db
+    .select({ ad: schema.adCreatives })
+    .from(schema.feedItems)
+    .innerJoin(schema.adCreatives, eq(schema.feedItems.adCreativeId, schema.adCreatives.id))
+    .where(
+      and(
+        eq(schema.feedItems.brandId, brandId),
+        eq(schema.feedItems.itemType, "ad"),
+        eq(schema.feedItems.status, "skipped"),
+      ),
+    );
+  const skippedFingerprints = new Set(skippedAdRows.map((r) => creativeFingerprint(r.ad)));
+
   let adsRanked = 0;
   for (const ad of ads) {
     const hay = normalizeHaystack([ad.copy, ad.advertiserName, ad.cta]);
@@ -398,6 +424,7 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
       relevance,
       composite: comp,
       matched: chips,
+      status: skippedFingerprints.has(creativeFingerprint(ad)) ? "skipped" : undefined,
     });
     adsRanked++;
   }
