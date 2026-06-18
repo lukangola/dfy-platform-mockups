@@ -384,6 +384,24 @@ export const invites = pgTable("invites", {
   acceptedAt: timestamp("accepted_at", { withTimezone: true }),
 });
 
+/**
+ * Admin-issued password reset. An admin generates a one-time, expiring token for
+ * a team member (POST /api/team/members/:userId/reset-password); the admin shares
+ * the resulting /reset-password?token=… link, and the user sets a new password
+ * (GET/POST /api/auth/reset/:token). No email infra — the link is shared manually,
+ * mirroring invites. Single-use (`usedAt`) + short TTL; redeeming it also clears
+ * the user's existing sessions so any old logins are invalidated.
+ */
+export const passwordResets = pgTable("password_resets", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  userId: uuid("user_id").notNull(),
+  token: text("token").notNull().unique(),
+  createdByUserId: uuid("created_by_user_id").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  usedAt: timestamp("used_at", { withTimezone: true }),
+});
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Session = typeof sessions.$inferSelect;
@@ -394,6 +412,8 @@ export type TeamMember = typeof teamMembers.$inferSelect;
 export type NewTeamMember = typeof teamMembers.$inferInsert;
 export type Invite = typeof invites.$inferSelect;
 export type NewInvite = typeof invites.$inferInsert;
+export type PasswordReset = typeof passwordResets.$inferSelect;
+export type NewPasswordReset = typeof passwordResets.$inferInsert;
 export type BrandMember = typeof brandMembers.$inferSelect;
 export type NewBrandMember = typeof brandMembers.$inferInsert;
 /**

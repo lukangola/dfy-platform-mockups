@@ -24,7 +24,7 @@
  *                                           validates the token without
  *                                           consuming it.
  */
-import { and, eq, gt } from "drizzle-orm";
+import { and, eq, gt, isNull } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { db, schema } from "../lib/db.js";
 import {
@@ -258,6 +258,63 @@ authRouter.post("/logout", async (req: Request, res: Response) => {
     res.json({ ok: true });
   } catch (err) {
     console.error("[auth] logout failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+// ── /api/auth/reset/:token ─────────────────────────────────────────
+// Public — the user lands here from an admin-issued reset link.
+
+/** Validate a reset token without consuming it; returns the target email to confirm on the page. */
+async function loadValidReset(token: string) {
+  const [reset] = await db
+    .select()
+    .from(schema.passwordResets)
+    .where(
+      and(
+        eq(schema.passwordResets.token, token),
+        gt(schema.passwordResets.expiresAt, new Date()),
+        isNull(schema.passwordResets.usedAt),
+      ),
+    )
+    .limit(1);
+  return reset ?? null;
+}
+
+authRouter.get("/reset/:token", async (req: Request, res: Response) => {
+  try {
+    const reset = await loadValidReset(req.params.token);
+    if (!reset) return sendError(res, 404, "This reset link is invalid or has expired.");
+    const [u] = await db
+      .select({ email: schema.users.email })
+      .from(schema.users)
+      .where(eq(schema.users.id, reset.userId))
+      .limit(1);
+    if (!u) return sendError(res, 404, "That account no longer exists.");
+    res.json({ email: u.email });
+  } catch (err) {
+    console.error("[auth] reset preview failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+authRouter.post("/reset/:token", async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { password?: string };
+    const check = validatePassword(body.password);
+    if (!check.ok) return sendError(res, 400, check.error);
+
+    const reset = await loadValidReset(req.params.token);
+    if (!reset) return sendError(res, 404, "This reset link is invalid or has expired.");
+
+    const passwordHash = await hashPassword(check.value);
+    await db.update(schema.users).set({ passwordHash }).where(eq(schema.users.id, reset.userId));
+    await db.update(schema.passwordResets).set({ usedAt: new Date() }).where(eq(schema.passwordResets.id, reset.id));
+    // Force re-login everywhere: drop the user's existing sessions.
+    await db.delete(schema.sessions).where(eq(schema.sessions.userId, reset.userId));
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[auth] reset failed:", err);
     sendError(res, 500, err instanceof Error ? err.message : String(err));
   }
 });

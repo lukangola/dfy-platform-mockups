@@ -29,7 +29,7 @@ import DFYWorkflowPage from "./pages/workspace/DFYWorkflowPage";
 import ClientConsolePage from "./pages/workspace/ClientConsolePage";
 import AdConsolePage from "./pages/workspace/AdConsolePage";
 import SettingsPage from "./pages/workspace/SettingsPage";
-import { AcceptInvitePage, LoginPage, RegisterPage } from "./pages/AuthPages";
+import { AcceptInvitePage, LoginPage, RegisterPage, ResetPasswordPage } from "./pages/AuthPages";
 import ClientSharePage from "./pages/ClientSharePage";
 
 /**
@@ -68,6 +68,7 @@ function Router() {
       <Route path="/login" component={LoginPage} />
       <Route path="/register" component={RegisterPage} />
       <Route path="/accept-invite" component={AcceptInvitePage} />
+      <Route path="/reset-password" component={ResetPasswordPage} />
 
       {/* Public docs — no auth, shareable to anyone. Hand-authored
           per-app walkthroughs live under /docs/<app-slug>. */}

@@ -21,7 +21,7 @@
  *   member — can read team info but can't mutate. Self-removal is allowed
  *            (acts as "leave the team").
  */
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { db, schema } from "../lib/db.js";
 import { generateInviteToken, requireAdmin, requireAuth } from "../lib/auth.js";
@@ -31,6 +31,7 @@ import type { Role } from "../db/schema.js";
 export const teamRouter: Router = Router();
 
 const INVITE_TTL_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+const RESET_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — admin shares the link manually
 
 function sendError(res: Response, status: number, message: string) {
   res.status(status).json({ error: message });
@@ -229,6 +230,40 @@ teamRouter.patch("/members/:userId", requireAdmin, async (req: Request, res: Res
     res.json({ ok: true });
   } catch (err) {
     console.error("[team] role change failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+// ── POST /api/team/members/:userId/reset-password ──────────────────
+// Admin issues a one-time password-reset link for a team member. Returns the
+// token; the admin shares /reset-password?token=… manually (no email infra).
+// Any prior UNUSED reset for that user is invalidated so only the newest link
+// works.
+teamRouter.post("/members/:userId/reset-password", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { team, user } = req.auth!;
+    const targetUserId = req.params.userId;
+
+    const [target] = await db
+      .select()
+      .from(schema.teamMembers)
+      .where(and(eq(schema.teamMembers.userId, targetUserId), eq(schema.teamMembers.teamId, team.id)))
+      .limit(1);
+    if (!target) return sendError(res, 404, "Member not found on this team");
+
+    await db
+      .delete(schema.passwordResets)
+      .where(and(eq(schema.passwordResets.userId, targetUserId), isNull(schema.passwordResets.usedAt)));
+
+    const token = generateInviteToken();
+    const expiresAt = new Date(Date.now() + RESET_TTL_MS);
+    const [created] = await db
+      .insert(schema.passwordResets)
+      .values({ userId: targetUserId, token, createdByUserId: user.id, expiresAt })
+      .returning();
+    res.json({ token: created.token, expiresAt: created.expiresAt });
+  } catch (err) {
+    console.error("[team] password reset issue failed:", err);
     sendError(res, 500, err instanceof Error ? err.message : String(err));
   }
 });

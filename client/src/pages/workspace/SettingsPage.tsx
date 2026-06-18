@@ -17,7 +17,7 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  AlertTriangle, Building2, Check, ChevronDown, Copy, Crown, FolderOpen, Headset, Loader2, Mail,
+  AlertTriangle, Building2, Check, ChevronDown, Copy, Crown, FolderOpen, Headset, KeyRound, Loader2, Mail,
   RefreshCw, Shield, ShieldCheck, Trash2, UserMinus, UserPlus, Users, X,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
@@ -30,6 +30,7 @@ import {
   removeTeamMember,
   getMemberBrands,
   setMemberBrands,
+  createPasswordReset,
   setBrandDfyClient,
   type Brand,
   type MemberBrandAccess,
@@ -51,6 +52,11 @@ function buildInviteUrl(token: string) {
   return `${origin}/accept-invite?token=${token}`;
 }
 
+function buildResetUrl(token: string) {
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  return `${origin}/reset-password?token=${token}`;
+}
+
 export default function SettingsPage() {
   const { user, role, logout } = useAuth();
   // Settings sub-tabs. "clients" is admin-only (flag DFY brands); members and
@@ -60,6 +66,10 @@ export default function SettingsPage() {
   // Manage-workspaces modal — null when closed; object holds the
   // target member's userId + display name while open.
   const [workspaceModal, setWorkspaceModal] = useState<{ userId: string; name: string } | null>(null);
+  // Generated password-reset link to copy + hand to the member (admin only).
+  const [resetBanner, setResetBanner] = useState<{ name: string; url: string } | null>(null);
+  const [resetBusyUserId, setResetBusyUserId] = useState<string | null>(null);
+  const [resetCopied, setResetCopied] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -237,6 +247,44 @@ export default function SettingsPage() {
                 <div className="text-[10px] font-mono text-white/40 uppercase tracking-widest mb-3">
                   Members ({team.members.length})
                 </div>
+                {resetBanner && (
+                  <div className="mb-3 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] p-3 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-mono text-amber-200/90">
+                        Reset link for <span className="text-white/90">{resetBanner.name}</span>
+                        {resetCopied && <span className="text-emerald-300"> · copied to clipboard</span>}
+                      </span>
+                      <button onClick={() => setResetBanner(null)} className="text-white/40 hover:text-white/80" title="Dismiss">
+                        <X size={13} />
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        readOnly
+                        value={resetBanner.url}
+                        onFocusCapture={(e) => e.currentTarget.select()}
+                        className="flex-1 bg-[#0D0F12] border border-white/[0.08] rounded px-2 py-1.5 text-[10px] font-mono text-white/70 outline-none"
+                      />
+                      <button
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(resetBanner.url);
+                            setResetCopied(true);
+                            setTimeout(() => setResetCopied(false), 2500);
+                          } catch {
+                            /* clipboard blocked — link is selectable above */
+                          }
+                        }}
+                        className="flex items-center gap-1 px-2.5 py-1.5 rounded text-[10px] font-mono text-cyan-300 border border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20"
+                      >
+                        {resetCopied ? <Check size={11} /> : <Copy size={11} />} Copy
+                      </button>
+                    </div>
+                    <p className="text-[10px] font-mono text-white/30 leading-relaxed">
+                      Send this to {resetBanner.name}. It expires in 24h, works once, and signs them out everywhere — they open it, set a new password, and sign in.
+                    </p>
+                  </div>
+                )}
                 <div className="space-y-2">
                   {team.members.map((member) => {
                     const isSelf = member.userId === user?.id;
@@ -278,6 +326,35 @@ export default function SettingsPage() {
                             title={`Manage workspaces for ${member.name}`}
                           >
                             <FolderOpen size={12} />
+                          </button>
+                        )}
+                        {team.role === "admin" && !isSelf && (
+                          <button
+                            onClick={async () => {
+                              setResetBusyUserId(member.userId);
+                              setActionError(null);
+                              try {
+                                const { token } = await createPasswordReset(member.userId);
+                                const url = buildResetUrl(token);
+                                setResetBanner({ name: member.name, url });
+                                try {
+                                  await navigator.clipboard.writeText(url);
+                                  setResetCopied(true);
+                                  setTimeout(() => setResetCopied(false), 2500);
+                                } catch {
+                                  /* clipboard may be blocked — the banner still shows the link */
+                                }
+                              } catch (err) {
+                                setActionError(err instanceof Error ? err.message : String(err));
+                              } finally {
+                                setResetBusyUserId(null);
+                              }
+                            }}
+                            disabled={resetBusyUserId === member.userId}
+                            className="p-2 rounded text-white/40 hover:text-amber-300 hover:bg-amber-500/10 transition-all disabled:opacity-50"
+                            title={`Generate a password-reset link for ${member.name}`}
+                          >
+                            {resetBusyUserId === member.userId ? <Loader2 size={12} className="animate-spin" /> : <KeyRound size={12} />}
                           </button>
                         )}
                         {team.role === "admin" && !isSelf && (

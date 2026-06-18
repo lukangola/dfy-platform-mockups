@@ -1077,6 +1077,23 @@ export function previewInvite(token: string): Promise<InvitePreview> {
   return get<InvitePreview>(`/api/auth/invite/${token}`);
 }
 
+// ── Password reset (admin-issued link) ──
+
+/** Admin: issue a one-time password-reset link for a team member. Returns the token to build the link. */
+export function createPasswordReset(userId: string): Promise<{ token: string; expiresAt: string }> {
+  return post<{ token: string; expiresAt: string }>(`/api/team/members/${userId}/reset-password`, {});
+}
+
+/** Public: validate a reset token, returning the target email to confirm on the page. */
+export function previewPasswordReset(token: string): Promise<{ email: string }> {
+  return get<{ email: string }>(`/api/auth/reset/${token}`);
+}
+
+/** Public: set a new password via a reset token. */
+export function submitPasswordReset(token: string, password: string): Promise<{ ok: true }> {
+  return post<{ ok: true }>(`/api/auth/reset/${token}`, { password });
+}
+
 export async function deleteCharacter(id: string): Promise<{ ok: true }> {
   const res = await fetch(`/api/characters/${id}`, { method: "DELETE" });
   const payload = (await res.json().catch(() => ({}))) as { ok: true } | ApiError;

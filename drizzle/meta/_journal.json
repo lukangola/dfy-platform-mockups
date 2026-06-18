@@ -176,6 +176,13 @@
       "when": 1781711563080,
       "tag": "0024_yellow_alex_power",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1781801645684,
+      "tag": "0025_goofy_lightspeed",
+      "breakpoints": true
     }
   ]
 }

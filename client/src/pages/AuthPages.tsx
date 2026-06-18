@@ -19,7 +19,7 @@ import { useLocation } from "wouter";
 import { motion } from "framer-motion";
 import { ArrowRight, Loader2, Lock, Mail, Sparkles, ShieldCheck, UserPlus, AlertTriangle } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { previewInvite, type InvitePreview } from "@/lib/api";
+import { previewInvite, previewPasswordReset, submitPasswordReset, type InvitePreview } from "@/lib/api";
 
 function ScreenShell({ children }: { children: React.ReactNode }) {
   return (
@@ -354,5 +354,135 @@ function Field(props: {
         <span className="block mt-1 text-[10px] font-mono text-white/30 leading-relaxed">{props.hint}</span>
       )}
     </label>
+  );
+}
+
+// ── Reset password ─────────────────────────────────────────────────
+//
+// Reached from an admin-issued reset link (/reset-password?token=…). Validates
+// the token, confirms the target email, and lets the user set a new password.
+
+export function ResetPasswordPage() {
+  const token = useMemo(() => {
+    if (typeof window === "undefined") return "";
+    return new URLSearchParams(window.location.search).get("token") ?? "";
+  }, []);
+
+  const [email, setEmail] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(true);
+
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    if (!token) {
+      setPreviewError("No reset token in URL.");
+      setPreviewLoading(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const p = await previewPasswordReset(token);
+        if (!cancelled) setEmail(p.email);
+      } catch (err) {
+        if (!cancelled) setPreviewError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) setPreviewLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [token]);
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmitError(null);
+    if (password !== confirm) {
+      setSubmitError("Passwords don't match.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await submitPasswordReset(token, password);
+      setDone(true);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (previewLoading) {
+    return (
+      <ScreenShell>
+        <div className="flex items-center gap-2 text-white/50 font-mono text-sm">
+          <Loader2 size={14} className="animate-spin" /> Validating reset link...
+        </div>
+      </ScreenShell>
+    );
+  }
+
+  if (previewError) {
+    return (
+      <ScreenShell>
+        <div className="flex items-center gap-2 mb-3 text-rose-400">
+          <AlertTriangle size={14} />
+          <span className="font-mono text-[11px] uppercase tracking-wider">Reset issue</span>
+        </div>
+        <h1 className="text-xl font-medium text-white/90 mb-1">This reset link isn't valid</h1>
+        <p className="text-[12px] text-white/50 font-mono mb-5 leading-relaxed">{previewError}</p>
+        <a href="/login" className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-cyan-500/15 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/25 transition-all text-sm font-mono uppercase tracking-wider">
+          <ArrowRight size={13} /> Go to sign in
+        </a>
+      </ScreenShell>
+    );
+  }
+
+  if (done) {
+    return (
+      <ScreenShell>
+        <div className="flex items-center gap-2 mb-3 text-emerald-400">
+          <ShieldCheck size={14} />
+          <span className="font-mono text-[11px] uppercase tracking-wider">Password updated</span>
+        </div>
+        <h1 className="text-xl font-medium text-white/90 mb-1">You're all set</h1>
+        <p className="text-[12px] text-white/40 font-mono mb-5 leading-relaxed">
+          Your password for <span className="text-white/70">{email}</span> has been updated. Sign in with your new password.
+        </p>
+        <a href="/login" className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-cyan-500/15 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/25 transition-all text-sm font-mono uppercase tracking-wider">
+          <ArrowRight size={13} /> Go to sign in
+        </a>
+      </ScreenShell>
+    );
+  }
+
+  return (
+    <ScreenShell>
+      <div className="flex items-center gap-2 mb-3 text-cyan-400">
+        <ShieldCheck size={14} />
+        <span className="font-mono text-[11px] uppercase tracking-wider">Reset password</span>
+      </div>
+      <h1 className="text-xl font-medium text-white/90 mb-1">Set a new password</h1>
+      <p className="text-[12px] text-white/40 font-mono mb-5 leading-relaxed">
+        For <span className="text-white/70">{email}</span>. Choose a new password to regain access.
+      </p>
+      <form onSubmit={onSubmit} className="space-y-3">
+        <FormError message={submitError} />
+        <Field icon={<Lock size={13} className="text-white/40" />} label="New password" type="password" autoComplete="new-password" required value={password} onChange={setPassword} hint="At least 8 characters." />
+        <Field icon={<Lock size={13} className="text-white/40" />} label="Confirm password" type="password" autoComplete="new-password" required value={confirm} onChange={setConfirm} />
+        <button
+          type="submit"
+          disabled={submitting || !password || !confirm}
+          className="w-full mt-2 flex items-center justify-center gap-2 px-4 py-3 rounded-lg bg-cyan-500/15 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/25 transition-all text-sm font-mono uppercase tracking-wider disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          {submitting ? <Loader2 size={14} className="animate-spin" /> : <ShieldCheck size={14} />}
+          {submitting ? "Updating..." : "Update password"}
+        </button>
+      </form>
+    </ScreenShell>
   );
 }
