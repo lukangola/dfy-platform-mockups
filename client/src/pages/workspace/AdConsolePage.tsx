@@ -38,11 +38,11 @@ import {
   rankAdConsoleFeed,
   startAdConsoleFeedPull, getAdConsoleFeedPullStatus,
   getAdConsoleIdeas, generateAdConsoleIdeas, selectAdConsoleIdea, skipAdConsoleIdea,
+  createAdPipelineCard, listProducts, type Product,
   ApiCallError,
   type AdConsoleNicheState, type AdConsoleCompetitor, type AdConsoleFeedCard,
   type AdConsoleOrganicPost,
   type AdConsoleCreativeBrief, type AdConsoleFeedPullRun, type AdConsoleIdea,
-  type AdConsoleRecreationApp,
 } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -136,12 +136,6 @@ function pickOrganicEmbedUrl(card: AdConsoleFeedCard, videoUrl: string | null): 
   return null;
 }
 
-/** Where a Creative Brief's suggested recreation app lives + its label. */
-const RECREATION_APP: Record<AdConsoleRecreationApp, { label: string; path: string }> = {
-  static_ads_recreator: { label: "Static Ads Recreator", path: "/workspace/apps/static-ads" },
-  script_rewriting: { label: "Copy Engine", path: "/workspace/apps/copy-engine" },
-};
-
 /** A pull-run is mid-flight (started, not yet settled). */
 function isRunning(run: AdConsoleFeedPullRun | null): boolean {
   return run?.status === "running";
@@ -214,6 +208,13 @@ export default function AdConsolePage() {
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
     noticeTimer.current = setTimeout(() => setNotice(null), 6000);
   }, []);
+
+  // Products (for the "Recreate now" product/angle picker in BriefModal).
+  const [products, setProducts] = useState<Product[]>([]);
+  useEffect(() => {
+    if (!activeBrandId) return;
+    listProducts(activeBrandId).then(({ products }) => setProducts(products)).catch(() => setProducts([]));
+  }, [activeBrandId]);
 
   // ── Loaders ────────────────────────────────────────────────────────────────
 
@@ -786,14 +787,13 @@ export default function AdConsolePage() {
 
       {/* Creative Brief modal */}
       <AnimatePresence>
-        {brief && (
+        {brief && activeBrandId && (
           <BriefModal
             brief={brief}
+            products={products}
+            brandId={activeBrandId}
             onClose={() => setBrief(null)}
-            onOpenApp={(path) => {
-              setBrief(null);
-              navigate(path);
-            }}
+            flash={flash}
           />
         )}
       </AnimatePresence>
@@ -1327,16 +1327,73 @@ function IdeaCardView({
 
 function BriefModal({
   brief,
+  products,
+  brandId,
   onClose,
-  onOpenApp,
+  flash,
 }: {
   brief: AdConsoleCreativeBrief;
+  products: Product[];
+  brandId: string;
   onClose: () => void;
-  onOpenApp: (path: string) => void;
+  flash: (m: { kind: "error" | "success"; text: string }) => void;
 }) {
-  const app = RECREATION_APP[brief.suggestedApp];
+  const [, navigate] = useLocation();
   const thumb = brief.thumbnailUrl ?? brief.referenceMediaUrls[0] ?? null;
   const body = brief.copy ?? brief.caption ?? brief.transcript ?? brief.sourceCopy ?? null;
+
+  const isStatic = brief.sourceType === "ad" && brief.format === "static";
+  const [recreateOpen, setRecreateOpen] = useState(false);
+  const [productId, setProductId] = useState("");
+  const [angleName, setAngleName] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const researched = products.filter((p) => p.researchStatus === "complete" && p.research?.markdown);
+  const angles = researched.find((p) => p.id === productId)?.research?.angles ?? [];
+
+  async function addToPipeline() {
+    setBusy(true);
+    try {
+      await createAdPipelineCard(brandId, { feedItemId: brief.feedItemId, mode: "idea" });
+      flash({ kind: "success", text: "Added to Ad Pipeline." });
+      onClose();
+    } catch (err) {
+      flash({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recreateNow() {
+    if (!productId || !angleName) return;
+    setBusy(true);
+    try {
+      const { card } = await createAdPipelineCard(brandId, {
+        feedItemId: brief.feedItemId, mode: "recreate", productId, angleName, language: "en",
+      });
+      if (isStatic) {
+        // Static recreator needs the deconstructed reference id, produced by the
+        // background job. We pass the card id; the Static Ads page resolves the
+        // reference from the card if not yet ready.
+        const params = new URLSearchParams({
+          productId, angle: angleName, language: "en", pipelineCardId: card.id,
+        });
+        if (card.staticReferenceId) params.set("referenceId", card.staticReferenceId);
+        navigate(`/workspace/apps/static-ads?${params.toString()}`);
+      } else {
+        const params = new URLSearchParams({
+          mode: "rewrite", product: productId, angle: angleName, language: "en",
+          source: brief.transcript ?? brief.sourceCopy ?? "", pipelineCardId: card.id,
+        });
+        navigate(`/workspace/apps/copy-engine?${params.toString()}`);
+      }
+      onClose();
+    } catch (err) {
+      flash({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <motion.div
@@ -1415,26 +1472,58 @@ function BriefModal({
           <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 flex items-center gap-2">
             <ExternalLink size={13} className="text-cyan-400 shrink-0" />
             <p className="text-[11px] font-mono text-white/50">
-              Routes into <span className="text-white/80">{app.label}</span>
+              Recreates in <span className="text-white/80">{isStatic ? "Static Ads Recreator" : "Copy Engine"}</span>
             </p>
           </div>
         </div>
 
-        {/* Footer */}
-        <div className="px-5 py-4 border-t border-white/[0.06] flex items-center justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="px-3 py-2 rounded-lg text-xs font-mono tracking-wide border border-white/[0.08] bg-white/[0.02] text-white/50 hover:text-white/80 transition-all"
-          >
-            Close
-          </button>
-          <button
-            onClick={() => onOpenApp(app.path)}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-mono tracking-wide border border-cyan-500/40 bg-cyan-500/15 text-cyan-200 hover:bg-cyan-500/25 transition-all"
-          >
-            Open {app.label}
-            <ArrowUpRight size={13} />
-          </button>
+        {/* Footer — Add to pipeline vs Recreate now (collects product + angle) */}
+        <div className="px-5 py-4 border-t border-white/[0.06] space-y-3">
+          {!recreateOpen ? (
+            <div className="flex gap-3">
+              <button
+                disabled={busy}
+                onClick={addToPipeline}
+                className="flex-1 rounded-lg border border-white/10 py-2.5 text-sm text-white/80 hover:bg-white/5 disabled:opacity-50"
+              >
+                Add to pipeline
+              </button>
+              <button
+                disabled={busy}
+                onClick={() => setRecreateOpen(true)}
+                className="flex-1 rounded-lg bg-cyan-500 py-2.5 text-sm font-semibold text-black hover:bg-cyan-400 disabled:opacity-50"
+              >
+                Recreate now
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <select
+                value={productId}
+                onChange={(e) => { setProductId(e.target.value); setAngleName(""); }}
+                className="w-full rounded-lg bg-black/40 border border-white/10 px-3 py-2 text-sm text-white/90"
+              >
+                <option value="">Select product…</option>
+                {researched.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              <select
+                value={angleName}
+                onChange={(e) => setAngleName(e.target.value)}
+                disabled={!productId}
+                className="w-full rounded-lg bg-black/40 border border-white/10 px-3 py-2 text-sm text-white/90 disabled:opacity-50"
+              >
+                <option value="">Select angle…</option>
+                {angles.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
+              </select>
+              <button
+                disabled={busy || !productId || !angleName}
+                onClick={recreateNow}
+                className="w-full rounded-lg bg-cyan-500 py-2.5 text-sm font-semibold text-black hover:bg-cyan-400 disabled:opacity-50"
+              >
+                {isStatic ? "Open Static Ads Recreator" : "Open Copy Engine"}
+              </button>
+            </div>
+          )}
         </div>
       </motion.div>
     </motion.div>
