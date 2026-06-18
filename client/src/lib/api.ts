@@ -1377,6 +1377,12 @@ export function recreateStaticAd(args: {
    * approved direction rather than a fresh roll of the dice.
    */
   previousOutputUrl?: string;
+  /**
+   * Ad Pipeline linkage. When set, the server logs it into the recreate
+   * generation's `inputs` so the originating pipeline card can resolve its
+   * latest draft. Never affects the rendered prompt.
+   */
+  pipelineCardId?: string;
 }): Promise<StaticAdRecreationResult> {
   return post<StaticAdRecreationResult>("/api/static-ads/recreate", args);
 }
