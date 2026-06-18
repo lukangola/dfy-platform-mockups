@@ -49,6 +49,16 @@ const AD_CONSOLE_ITEM = {
   description: "Competitor + trend command center",
 };
 
+// Ad Pipeline Kanban is gated identically to the Ad Console: managers/admins,
+// DFY-only brands. Sits right after the Ad Console in the nav.
+const AD_PIPELINE_ITEM = {
+  id: "ad-pipeline",
+  label: "Ad Pipeline",
+  icon: LayoutGrid,
+  path: "/workspace/apps/ad-pipeline",
+  description: "Ad production kanban",
+};
+
 export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
   const [location] = useLocation();
   const [collapsed, setCollapsed] = useState(false);
@@ -61,7 +71,7 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
   const showDfyConsoles = isManager && Boolean(activeBrand?.isDfyClient);
   // Ad Console is pinned to the top; Client Console sits right after Products.
   const navItems = [
-    ...(showDfyConsoles ? [AD_CONSOLE_ITEM] : []),
+    ...(showDfyConsoles ? [AD_CONSOLE_ITEM, AD_PIPELINE_ITEM] : []),
     NAV_ITEMS[0], // Products
     ...(showDfyConsoles ? [CLIENT_CONSOLE_ITEM] : []),
     NAV_ITEMS[1], // Brand Info

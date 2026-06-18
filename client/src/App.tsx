@@ -28,6 +28,7 @@ import WorkflowsPage from "./pages/workspace/WorkflowsPage";
 import DFYWorkflowPage from "./pages/workspace/DFYWorkflowPage";
 import ClientConsolePage from "./pages/workspace/ClientConsolePage";
 import AdConsolePage from "./pages/workspace/AdConsolePage";
+import AdPipelineKanbanAppPage from "./pages/workspace/AdPipelineKanbanAppPage";
 import SettingsPage from "./pages/workspace/SettingsPage";
 import { AcceptInvitePage, LoginPage, RegisterPage, ResetPasswordPage } from "./pages/AuthPages";
 import ClientSharePage from "./pages/ClientSharePage";
@@ -105,6 +106,10 @@ function Router() {
           re-checks the role so a hand-typed URL can't bypass the hidden nav. */}
       <Route path="/workspace/ad-console">
         <RequireAuth><WorkspaceLayout><AdConsolePage /></WorkspaceLayout></RequireAuth>
+      </Route>
+
+      <Route path="/workspace/apps/ad-pipeline">
+        <RequireAuth><WorkspaceLayout><AdPipelineKanbanAppPage /></WorkspaceLayout></RequireAuth>
       </Route>
 
       <Route path="/workspace/products/:id">
