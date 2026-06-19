@@ -32,6 +32,7 @@ import {
 import { marked } from "marked";
 import {
   listProducts, generateText, saveBrandAssets,
+  getAdPipelineCard, extractProductOffer,
   type Product, type ProductAngle,
 } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
@@ -167,6 +168,17 @@ export default function CopyEngineAppPage() {
   const [savedToAssets, setSavedToAssets] = useState(false);
 
   const [pipelineCardId, setPipelineCardId] = useState<string | null>(null);
+  // `autorun=1` deep-link flag — when set, the page fetches the transcript +
+  // offer and kicks off the rewrite automatically once everything is ready.
+  const [autorun, setAutorun] = useState(false);
+
+  // Carries the deep-linked angle past the product-change reset effect (which
+  // would otherwise wipe it the moment the prefill sets the product). Set in
+  // the prefill, consumed (once) by the reset effect.
+  const pendingAngleRef = useRef<string | null>(null);
+  // Fire-once guards for the auto-flow effects.
+  const offerExtractDoneRef = useRef<string | null>(null); // productId we ran extract for
+  const autorunFiredRef = useRef(false);
 
   // Deep-link prefill from the Ad Pipeline ("Recreate now"). Runs once on mount.
   useEffect(() => {
@@ -177,11 +189,17 @@ export default function CopyEngineAppPage() {
     const language = p.get("language");
     const source = p.get("source");
     const card = p.get("pipelineCardId");
+    const auto = p.get("autorun") === "1";
     if (product) setSelectedProductId(product);
-    if (angle) setSelectedAngleName(angle);
+    // Stash the prefilled angle in a ref so the product-change reset effect
+    // (which fires right after setSelectedProductId) applies it instead of
+    // clearing it. We don't call setSelectedAngleName directly here — the
+    // reset effect owns that on the initial product set.
+    if (angle) pendingAngleRef.current = angle;
     if (language) setSelectedLanguage(language);
     if (source) setSourceCopy(source);
     if (card) setPipelineCardId(card);
+    if (auto) setAutorun(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -213,9 +231,17 @@ export default function CopyEngineAppPage() {
   const productAngles: ProductAngle[] = selectedProduct?.research?.angles ?? [];
   const selectedAngle = productAngles.find((a) => a.name === selectedAngleName) ?? null;
 
-  // Reset angle when the product changes.
+  // Reset angle when the product changes — but honor a deep-linked angle.
+  // On the initial prefill the product is set programmatically; if an angle
+  // was deep-linked it's waiting in pendingAngleRef, so apply it instead of
+  // clearing. Manual product changes (no pending angle) still reset normally.
   useEffect(() => {
-    setSelectedAngleName("");
+    if (pendingAngleRef.current) {
+      setSelectedAngleName(pendingAngleRef.current);
+      pendingAngleRef.current = null;
+    } else {
+      setSelectedAngleName("");
+    }
   }, [selectedProductId]);
 
   // Reset draft state when any selector changes — keeps the user honest:
@@ -229,6 +255,58 @@ export default function CopyEngineAppPage() {
     setFeedbackInput("");
     setSavedToAssets(false);
   }, [mode, copyTypeId, selectedProductId, selectedAngleName, selectedLanguage]);
+
+  // ── Auto-flow: pull the real ad transcript from the pipeline card ──
+  // The "Recreate now" deep-link doesn't pass a `source` param — the transcript
+  // lives on the card (often still being deconstructed in a background job).
+  // Poll until `originalScript` lands, then use it as the rewrite source. Mirrors
+  // the staticReferenceId poll in StaticAdsAppPage. Stops on success/failure.
+  useEffect(() => {
+    if (!pipelineCardId || !activeBrandId || sourceCopy.trim().length > 0) return;
+    let cancelled = false;
+    let stopped = false;
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const { card } = await getAdPipelineCard(activeBrandId, pipelineCardId);
+        if (cancelled) return;
+        if (card.originalScript && card.originalScript.trim().length > 0) {
+          setSourceCopy(card.originalScript);
+          stopped = true;
+        } else if (card.bgJobStatus === "failed") {
+          stopped = true;
+          toast.error("Couldn't fetch the ad transcript — paste the source copy manually to continue.");
+        }
+      } catch { /* ignore — keep polling; user can paste manually */ }
+    };
+    void tick();
+    const iv = setInterval(() => {
+      if (stopped) { clearInterval(iv); return; }
+      void tick();
+    }, 2500);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [pipelineCardId, activeBrandId, sourceCopy]);
+
+  // ── Auto-flow: auto-extract the front-end offer from the product URL ──
+  // Runs once per product when arriving via the autorun deep-link with an empty
+  // offer. extractProductOffer never throws on bad pages (returns null offer) —
+  // if nothing extractable, we leave the field empty and the auto-run won't fire
+  // (the user can type an offer to proceed).
+  useEffect(() => {
+    if (!autorun || !pipelineCardId || !selectedProductId) return;
+    if (offer.trim().length > 0) return;
+    if (offerExtractDoneRef.current === selectedProductId) return;
+    offerExtractDoneRef.current = selectedProductId;
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await extractProductOffer(selectedProductId);
+        if (cancelled) return;
+        if (result.offer && result.offer.trim().length > 0) setOffer(result.offer);
+      } catch { /* ignore — leave offer empty; user can type one */ }
+    })();
+    return () => { cancelled = true; };
+  }, [autorun, pipelineCardId, selectedProductId, offer]);
 
   // When the user goes back to the mode picker, fully reset the side inputs
   // so re-entering a different mode starts clean.
@@ -361,6 +439,18 @@ export default function CopyEngineAppPage() {
   }
 
   const handleGenerate = () => { void runGeneration(); };
+
+  // ── Auto-flow: fire the rewrite automatically once everything is ready ──
+  // Waits for the existing canGenerate gate (product + angle + offer + source
+  // all present, not already generating) plus the derived product/angle objects
+  // to resolve. Fire-once guard prevents re-runs on subsequent renders.
+  useEffect(() => {
+    if (!autorun || autorunFiredRef.current) return;
+    if (!canGenerate || !selectedProduct || !selectedAngle) return;
+    autorunFiredRef.current = true;
+    void runGeneration();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autorun, canGenerate, selectedProduct, selectedAngle]);
 
   const handleSendFeedback = async () => {
     const feedback = feedbackInput.trim();
@@ -1067,7 +1157,23 @@ export default function CopyEngineAppPage() {
 
           {/* Output body */}
           <div id="copy-engine-output" className="flex-1 overflow-auto p-6">
-            {!draft && !generating && (
+            {/* Auto-flow status — shown while the deep-link prepares the rewrite
+                (fetching transcript + offer) before generation kicks off. */}
+            {autorun && !draft && !generating && (
+              <div className="h-full flex items-center justify-center">
+                <div className="max-w-md text-center">
+                  <Loader2 size={24} className="text-rose-400 animate-spin mx-auto mb-3" />
+                  <div className="text-[12px] font-mono text-white/50">
+                    Preparing rewrite — fetching transcript &amp; offer…
+                  </div>
+                  <div className="text-[10px] font-mono text-white/25 mt-1.5">
+                    The rewrite starts automatically once both are ready.
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {!autorun && !draft && !generating && (
               <div className="h-full flex items-center justify-center">
                 <div className="max-w-md text-center">
                   <div
