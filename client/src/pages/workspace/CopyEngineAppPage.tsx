@@ -171,6 +171,10 @@ export default function CopyEngineAppPage() {
   // `autorun=1` deep-link flag — when set, the page fetches the transcript +
   // offer and kicks off the rewrite automatically once everything is ready.
   const [autorun, setAutorun] = useState(false);
+  // Set to true when the auto-flow can't proceed (offer null or transcript
+  // failed) — hides the "Preparing rewrite…" indicator and shows the normal
+  // form so the user can fill the missing piece and rewrite manually.
+  const [autorunStalled, setAutorunStalled] = useState(false);
 
   // Carries the deep-linked angle past the product-change reset effect (which
   // would otherwise wipe it the moment the prefill sets the product). Set in
@@ -275,6 +279,7 @@ export default function CopyEngineAppPage() {
           stopped = true;
         } else if (card.bgJobStatus === "failed") {
           stopped = true;
+          setAutorunStalled(true);
           toast.error("Couldn't fetch the ad transcript — paste the source copy manually to continue.");
         }
       } catch { /* ignore — keep polling; user can paste manually */ }
@@ -302,7 +307,12 @@ export default function CopyEngineAppPage() {
       try {
         const result = await extractProductOffer(selectedProductId);
         if (cancelled) return;
-        if (result.offer && result.offer.trim().length > 0) setOffer(result.offer);
+        if (result.offer && result.offer.trim().length > 0) {
+          setOffer(result.offer);
+        } else {
+          setAutorunStalled(true);
+          toast.warning("Couldn't auto-detect an offer from the product page — add your front-end offer to generate.");
+        }
       } catch { /* ignore — leave offer empty; user can type one */ }
     })();
     return () => { cancelled = true; };
@@ -1158,8 +1168,9 @@ export default function CopyEngineAppPage() {
           {/* Output body */}
           <div id="copy-engine-output" className="flex-1 overflow-auto p-6">
             {/* Auto-flow status — shown while the deep-link prepares the rewrite
-                (fetching transcript + offer) before generation kicks off. */}
-            {autorun && !draft && !generating && (
+                (fetching transcript + offer) before generation kicks off.
+                Hidden once stalled so the normal form is visible for manual entry. */}
+            {autorun && !autorunStalled && !draft && !generating && (
               <div className="h-full flex items-center justify-center">
                 <div className="max-w-md text-center">
                   <Loader2 size={24} className="text-rose-400 animate-spin mx-auto mb-3" />
@@ -1173,7 +1184,7 @@ export default function CopyEngineAppPage() {
               </div>
             )}
 
-            {!autorun && !draft && !generating && (
+            {(!autorun || autorunStalled) && !draft && !generating && (
               <div className="h-full flex items-center justify-center">
                 <div className="max-w-md text-center">
                   <div
