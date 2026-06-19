@@ -46,6 +46,7 @@ import {
 } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
 import { useAuth } from "@/contexts/AuthContext";
+import { LANGUAGES } from "@/lib/mockData";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Small helpers
@@ -1346,6 +1347,7 @@ function BriefModal({
   const [recreateOpen, setRecreateOpen] = useState(false);
   const [productId, setProductId] = useState("");
   const [angleName, setAngleName] = useState("");
+  const [language, setLanguage] = useState("en");
   const [busy, setBusy] = useState(false);
 
   const researched = products.filter((p) => p.researchStatus === "complete" && p.research?.markdown);
@@ -1369,21 +1371,23 @@ function BriefModal({
     setBusy(true);
     try {
       const { card } = await createAdPipelineCard(brandId, {
-        feedItemId: brief.feedItemId, mode: "recreate", productId, angleName, language: "en",
+        feedItemId: brief.feedItemId, mode: "recreate", productId, angleName, language,
       });
       if (isStatic) {
         // Static recreator needs the deconstructed reference id, produced by the
         // background job. We pass the card id; the Static Ads page resolves the
         // reference from the card if not yet ready.
         const params = new URLSearchParams({
-          productId, angle: angleName, language: "en", pipelineCardId: card.id,
+          productId, angle: angleName, language, pipelineCardId: card.id,
         });
         if (card.staticReferenceId) params.set("referenceId", card.staticReferenceId);
         navigate(`/workspace/apps/static-ads?${params.toString()}`);
       } else {
+        // Copy Engine pulls the transcript from the card via pipelineCardId — do NOT
+        // pass source here. autorun=1 kicks off generation immediately.
         const params = new URLSearchParams({
-          mode: "rewrite", product: productId, angle: angleName, language: "en",
-          source: brief.transcript ?? brief.sourceCopy ?? "", pipelineCardId: card.id,
+          mode: "rewrite", product: productId, angle: angleName, language,
+          pipelineCardId: card.id, autorun: "1",
         });
         navigate(`/workspace/apps/copy-engine?${params.toString()}`);
       }
@@ -1514,6 +1518,15 @@ function BriefModal({
               >
                 <option value="">Select angle…</option>
                 {angles.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
+              </select>
+              <select
+                value={language}
+                onChange={(e) => setLanguage(e.target.value)}
+                className="w-full rounded-lg bg-black/40 border border-white/10 px-3 py-2 text-sm text-white/90"
+              >
+                {LANGUAGES.map((lang) => (
+                  <option key={lang.code} value={lang.code}>{lang.flag} {lang.label}</option>
+                ))}
               </select>
               <button
                 disabled={busy || !productId || !angleName}
