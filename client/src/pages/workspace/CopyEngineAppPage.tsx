@@ -183,11 +183,20 @@ export default function CopyEngineAppPage() {
   // Fire-once guards for the auto-flow effects.
   const offerExtractDoneRef = useRef<string | null>(null); // productId we ran extract for
   const autorunFiredRef = useRef(false);
+  // Lets the angle-reset effect skip its mount run (see that effect for why).
+  const angleResetReady = useRef(false);
 
   // Deep-link prefill from the Ad Pipeline ("Recreate now"). Runs once on mount.
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
-    if (p.get("mode") === "rewrite") setMode("rewrite");
+    if (p.get("mode") === "rewrite") {
+      setMode("rewrite");
+      // The manual flow sets this when the user clicks the rewrite button
+      // (the copy-type dropdown is hidden in rewrite mode — the rewriter is
+      // format-agnostic). The deep-link skips that click, so set it here too,
+      // otherwise selectedCopyType stays null and canGenerate never flips true.
+      setCopyTypeId("listicle");
+    }
     const product = p.get("product");
     const angle = p.get("angle");
     const language = p.get("language");
@@ -240,6 +249,15 @@ export default function CopyEngineAppPage() {
   // was deep-linked it's waiting in pendingAngleRef, so apply it instead of
   // clearing. Manual product changes (no pending angle) still reset normally.
   useEffect(() => {
+    // Skip the mount run. On mount selectedProductId is still "" — the deep-link
+    // prefill sets it in a separate mount effect that applies on the NEXT render.
+    // If we ran the reset on mount we'd consume pendingAngleRef while the product
+    // is still empty, then clear the angle on the real change, wiping the
+    // deep-linked angle. Only react to genuine product changes.
+    if (!angleResetReady.current) {
+      angleResetReady.current = true;
+      return;
+    }
     if (pendingAngleRef.current) {
       setSelectedAngleName(pendingAngleRef.current);
       pendingAngleRef.current = null;
@@ -461,6 +479,18 @@ export default function CopyEngineAppPage() {
     void runGeneration();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autorun, canGenerate, selectedProduct, selectedAngle]);
+
+  // Safety net: if the auto-flow can't assemble every input within 90s (slow
+  // transcription, an offer page we can't parse, a missing product, etc.), stop
+  // showing "Preparing rewrite…" and fall back to the manual form so it can
+  // never hang indefinitely. If the rewrite already fired, this is a no-op.
+  useEffect(() => {
+    if (!autorun) return;
+    const t = setTimeout(() => {
+      if (!autorunFiredRef.current) setAutorunStalled(true);
+    }, 90_000);
+    return () => clearTimeout(t);
+  }, [autorun]);
 
   const handleSendFeedback = async () => {
     const feedback = feedbackInput.trim();
