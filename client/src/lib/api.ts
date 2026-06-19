@@ -498,6 +498,28 @@ export function deleteProductAngle(
   );
 }
 
+/**
+ * Extract the front-end offer from the product's page URL (productUrl).
+ * Fetches the page, runs the `offer_extract` prompt, and returns:
+ *   - `offer`: a concise plain-English summary suitable for the Copy Engine's
+ *     "front-end offer" field (null if nothing was extractable or the page
+ *     was unreachable).
+ *   - `structured`: the full JSON object returned by the offer_extract prompt
+ *     (discount_label, free_gifts, shipping_line, guarantee_line, …), or null
+ *     on total failure.
+ *
+ * Never throws on bad pages — the server returns 200 with null fields when
+ * the product URL is unfetchable or the LLM can't find an offer.
+ */
+export function extractProductOffer(
+  productId: string,
+): Promise<{ offer: string | null; structured: unknown }> {
+  return post<{ offer: string | null; structured: unknown }>(
+    `/api/products/${productId}/extract-offer`,
+    {},
+  );
+}
+
 // ── Phase 2: read-only client share link ──────────────────────────────
 // Operator-side (authed): mint/rotate and revoke the share token.
 // Public-side: getSharedResearch reads the sanitized doc by token (no auth).

@@ -18,6 +18,7 @@ import { loadPrompt, PromptNotConfiguredError } from "../lib/prompts.js";
 import { generateImage, uploadToFalStorage } from "../lib/fal.js";
 import { fetchUrlMeta } from "../lib/urlMeta.js";
 import { getProductReferenceTemplateUrl } from "../lib/productReferenceTemplate.js";
+import { extractOfferFromUrl } from "../lib/productOffer.js";
 
 export const productsRouter: Router = Router();
 
@@ -1399,6 +1400,31 @@ productsRouter.post("/:id/research", async (req: Request, res: Response) => {
     res.json({ ok: true });
   } catch (err) {
     console.error("[products] re-research failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
+ * POST /api/products/:id/extract-offer
+ * Fetches the product's page URL, runs the `offer_extract` prompt against
+ * the HTML, and returns a concise offer string plus the full structured JSON.
+ * Tolerates fetch/parse failures gracefully (200 with null fields) rather
+ * than 500-ing on unfetchable pages.
+ */
+productsRouter.post("/:id/extract-offer", async (req: Request, res: Response) => {
+  try {
+    const [row] = await db
+      .select()
+      .from(schema.products)
+      .where(eq(schema.products.id, req.params.id))
+      .limit(1);
+    if (!row) return sendError(res, 404, "Product not found");
+    if (!row.productUrl) return sendError(res, 400, "Product has no productUrl — cannot extract offer");
+
+    const result = await extractOfferFromUrl(row.productUrl);
+    res.json(result);
+  } catch (err) {
+    console.error("[products] extract-offer failed:", err);
     sendError(res, 500, err instanceof Error ? err.message : String(err));
   }
 });
