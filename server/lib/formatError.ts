@@ -45,6 +45,27 @@ function pickMessageFromObject(o: Record<string, unknown>): string | null {
   if (body && typeof body === "object") {
     const bo = body as Record<string, unknown>;
     if (typeof bo.detail === "string" && bo.detail.trim()) return bo.detail.trim();
+    // fal validation errors put a `detail[]` array here, each entry
+    // `{ loc: [...], msg, type }`. This is the field-level reason (e.g.
+    // "prompt: Could not generate images with the given prompts and
+    // images"). Without this branch the array fell through to the generic
+    // status text and the actual cause was lost.
+    if (Array.isArray(bo.detail) && bo.detail.length > 0) {
+      const parts = bo.detail
+        .map((d) => {
+          if (typeof d === "string") return d;
+          if (d && typeof d === "object") {
+            const dd = d as Record<string, unknown>;
+            const loc = Array.isArray(dd.loc) ? dd.loc.filter((x) => x !== "body").join(".") : "";
+            const m =
+              typeof dd.msg === "string" ? dd.msg : typeof dd.message === "string" ? dd.message : "";
+            return loc && m ? `${loc}: ${m}` : m || loc;
+          }
+          return "";
+        })
+        .filter(Boolean);
+      if (parts.length > 0) return parts.join(" | ");
+    }
     if (typeof bo.error === "string" && bo.error.trim()) return bo.error.trim();
     if (typeof bo.message === "string" && bo.message.trim()) return bo.message.trim();
   }

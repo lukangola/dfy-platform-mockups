@@ -2687,6 +2687,11 @@ async function runReferenceSheetGeneration(
         num_images: 1,
         output_format: "jpeg",
       },
+      // nano-banana-pro intermittently 422-refuses valid input. This is an
+      // async background runner, so we can afford extra retries (4 attempts
+      // total) to turn a transient flake into a success instead of a
+      // permanent "Reference Sheet FAILED" in the UI.
+      retries: 3,
     });
 
     const url = result.urls[0];
