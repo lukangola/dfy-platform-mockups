@@ -966,6 +966,10 @@ function FeedCardView({
   // IG video URLs are signed + expire; if the raw <video> 403s we fall back to
   // the durable /reel/<code>/embed iframe so a stale reel is still watchable.
   const [videoFailed, setVideoFailed] = useState(false);
+  // Cover thumbnails are signed CDN URLs that expire (esp. TikTok covers, which
+  // 403 once the token ages out). If the poster <img> fails, show a clean
+  // placeholder instead of a black box — the video still plays via the embed.
+  const [posterFailed, setPosterFailed] = useState(false);
 
   const isOrganic = item.itemType === "organic";
   const advertiser = ad?.advertiserName ?? organic?.profileName ?? organic?.handle ?? "Unknown";
@@ -1063,12 +1067,23 @@ function FeedCardView({
             aria-label={`Play ${platformLabel} video`}
             className="absolute inset-0 w-full h-full group/play"
           >
-            {previewSrc ? (
+            {previewSrc && !posterFailed ? (
               // eslint-disable-next-line jsx-a11y/img-redundant-alt
-              <img src={previewSrc} alt={advertiser} className="absolute inset-0 w-full h-full object-cover" loading="lazy" />
+              <img
+                src={previewSrc}
+                alt={advertiser}
+                onError={() => setPosterFailed(true)}
+                className="absolute inset-0 w-full h-full object-cover"
+                loading="lazy"
+              />
             ) : (
-              <div className="absolute inset-0 flex items-center justify-center">
-                <Flame size={22} className="text-white/15" />
+              // No / expired cover — clean gradient + handle instead of a black
+              // box. The clip is still watchable via the platform embed on click.
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-white/[0.07] via-transparent to-white/[0.02]">
+                <Flame size={20} className="text-white/20" />
+                <span className="px-4 max-w-full truncate text-[10px] font-mono text-white/35 text-center">
+                  {handle ?? advertiser}
+                </span>
               </div>
             )}
             <div className="absolute inset-0 flex items-center justify-center bg-black/15 group-hover/play:bg-black/30 transition-colors">
