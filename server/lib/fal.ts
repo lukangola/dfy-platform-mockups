@@ -36,64 +36,126 @@ export type MediaGenResult = {
  * Lets callers / route handlers distinguish "Gemini said no" from generic
  * fal.ai errors and bubble a specific status to the client so the UI can
  * trigger its auto-soften-and-retry flow.
+ *
+ * `body` preserves the original fal error body (e.g. the validation
+ * `detail[]` array). Previously this class swallowed it, which blinded the
+ * downstream diagnostic dig in runReferenceSheetGeneration — every 422 came
+ * out as the useless "HTTP 422: Unprocessable Entity" with no field-level
+ * reason. Carry the body so callers can persist what actually went wrong.
  */
 export class FalContentSafetyError extends Error {
   status = 422;
-  constructor(message: string) {
+  body?: unknown;
+  constructor(message: string, body?: unknown) {
     super(message);
     this.name = "FalContentSafetyError";
+    this.body = body;
   }
 }
 
 /**
+ * nano-banana-pro (Gemini 3 Pro Image) intermittently returns a 422 that is
+ * NOT a hard content block — the model just fails to produce an image for an
+ * otherwise valid, benign request ("did not generate the expected output" /
+ * "could not generate images with the given prompts and images"). Re-running
+ * the IDENTICAL input usually succeeds (measured: ~1-in-3 to ~1-in-5 of these
+ * calls refuse, and a retry clears it). We classify those so generateImage can
+ * transparently retry instead of killing the whole pipeline on the first flake.
+ *
+ * A genuine policy block produces the same message but refuses every time —
+ * retries are bounded, so we burn a couple of extra attempts then surface it
+ * as a FalContentSafetyError exactly as before (the client's soften-and-retry
+ * flow then kicks in). False-retrying a hard block costs a little; NOT
+ * retrying a transient flake costs the user a "FAILED" on valid input.
+ */
+export function isTransientGenerationRefusal(status: number | undefined, msg: string): boolean {
+  if (status !== 422) return false;
+  return /did not generate the expected output|could not generate images with the given|try again with different inputs|model did not generate/i.test(
+    msg,
+  );
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
  * Generate image(s) via fal.ai. Model defaults to flux-pro.
  * `input` is the fal.ai model-specific payload.
+ *
+ * `retries` — how many EXTRA attempts to make when fal returns a transient
+ * generation-refusal 422 (see isTransientGenerationRefusal). Defaults to 2
+ * (so 3 attempts total). Only transient refusals are retried; auth /
+ * validation / network errors fail immediately. Set to 0 to disable.
  */
 export async function generateImage(args: {
   model?: string;
   input: Record<string, unknown>;
+  retries?: number;
 }): Promise<MediaGenResult> {
   ensureConfigured();
   const model = args.model ?? "fal-ai/flux-pro/v1.1";
-  const started = Date.now();
+  const maxRetries = Math.max(0, args.retries ?? 2);
 
-  try {
-    const result = await fal.subscribe(model, {
-      input: args.input,
-      logs: false,
-      pollInterval: 500,
-    });
+  for (let attempt = 0; ; attempt++) {
+    const started = Date.now();
+    try {
+      const result = await fal.subscribe(model, {
+        input: args.input,
+        logs: false,
+        pollInterval: 500,
+      });
 
-    const data = result.data as { images?: Array<{ url: string }>; image?: { url: string } };
-    const urls = data.images?.map((i) => i.url) ?? (data.image ? [data.image.url] : []);
+      const data = result.data as { images?: Array<{ url: string }>; image?: { url: string } };
+      const urls = data.images?.map((i) => i.url) ?? (data.image ? [data.image.url] : []);
 
-    return { urls, raw: result.data, model, durationMs: Date.now() - started };
-  } catch (err) {
-    // Gemini's safety classifier rejects the prompt → fal returns 422 with
-    // the "did not generate the expected output" body. Re-throw as a typed
-    // error so the route handler can return 422 (instead of 500) and the
-    // client knows to trigger its sanitize-and-retry flow. Other errors
-    // (auth, network, missing input) propagate as REAL Error instances
-    // with a useful message — `@fal-ai/client` rejects with plain
-    // objects, and the previous `throw err` flowed those plain objects
-    // up to the route handler, where `err instanceof Error` was false
-    // and `String(err)` produced the literal "[object Object]" that
-    // landed in the user's UI. formatError() unwraps the SDK's nested
-    // shapes (body.detail / message / errors[0].msg / etc.) so we never
-    // lose the actual failure reason again.
-    const e = err as { status?: number; body?: { detail?: string }; message?: string };
-    const status = e?.status;
-    const msg = formatError(err);
-    if (status === 422 || /did not generate the expected output|unsafe content|content policy/i.test(msg)) {
-      throw new FalContentSafetyError(msg);
+      return { urls, raw: result.data, model, durationMs: Date.now() - started };
+    } catch (err) {
+      // `@fal-ai/client` rejects with plain objects shaped like
+      //   { status: 422, body: { detail: [{ loc, msg, type }] } }
+      // formatError() unwraps those nested shapes (incl. the validation
+      // `detail[]` array) so we never lose the real reason to a bare
+      // "[object Object]" or "Unprocessable Entity" again.
+      const e = err as { status?: number; body?: unknown; message?: string };
+      const status = e?.status;
+      const msg = formatError(err);
+
+      // Transient nano-banana / Gemini refusal on valid input → retry the
+      // IDENTICAL request a bounded number of times before giving up. This
+      // is the single biggest source of spurious "FAILED" states in the
+      // B-roll reference-sheet pipeline.
+      if (isTransientGenerationRefusal(status, msg) && attempt < maxRetries) {
+        console.warn(
+          `[fal] ${model} transient generation-refusal (attempt ${attempt + 1}/${maxRetries + 1}), retrying: ${msg.slice(0, 140)}`,
+        );
+        await sleep(1500 * (attempt + 1));
+        continue;
+      }
+
+      // Out of retries, or a non-retryable error. Gemini-backed 422s
+      // surface as a typed FalContentSafetyError so the route handler can
+      // return 422 (not 500) and trigger the client's sanitize-and-retry
+      // flow. We now carry the original fal `body` on the error so the
+      // downstream diagnostic dig can still report the field-level reason.
+      if (status === 422 || /did not generate the expected output|unsafe content|content policy/i.test(msg)) {
+        throw new FalContentSafetyError(msg, e?.body);
+      }
+      // Other errors (auth, network, missing input). `@fal-ai/client`
+      // rejects with plain objects, so wrap non-Error rejections in a real
+      // Error — otherwise `err instanceof Error` is false downstream and
+      // `String(err)` renders "[object Object]". Preserve status + body.
+      if (err instanceof Error) {
+        if (status !== undefined && (err as Error & { status?: number }).status === undefined) {
+          (err as Error & { status?: number }).status = status;
+        }
+        if (e?.body !== undefined && (err as Error & { body?: unknown }).body === undefined) {
+          (err as Error & { body?: unknown }).body = e.body;
+        }
+        throw err;
+      }
+      const wrapped = new Error(`fal.ai (${model}) failed: ${msg}`);
+      if (status !== undefined) (wrapped as Error & { status?: number }).status = status;
+      if (e?.body !== undefined) (wrapped as Error & { body?: unknown }).body = e.body;
+      throw wrapped;
     }
-    if (err instanceof Error) throw err;
-    // Plain-object rejection from the fal SDK — re-throw as a real Error
-    // so every catch site downstream gets a meaningful .message and a
-    // stack trace anchored at this throw.
-    const wrapped = new Error(`fal.ai (${model}) failed: ${msg}`);
-    if (status !== undefined) (wrapped as Error & { status?: number }).status = status;
-    throw wrapped;
   }
 }
 
