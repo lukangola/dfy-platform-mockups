@@ -75,10 +75,18 @@ adConsoleRouter.get("/img", async (req: Request, res: Response) => {
   }
   if (!PROXY_HOST_RE.test(host)) return res.status(400).end();
   try {
-    // No Referer — these CDNs serve the bytes to any server-side fetch (the
-    // browser-only CORP header is what we're working around), and a wrong
-    // referer would just risk a 403 on the non-matching CDN.
-    const upstream = await fetch(url);
+    // Send a browser User-Agent — some social CDNs (notably TikTok) 403 a
+    // header-less server fetch. No Referer: a wrong one risks a 403 on the
+    // non-matching CDN. NOTE: TikTok cover URLs are signed + short-lived, so an
+    // EXPIRED one still 403s here regardless of headers — the client card then
+    // falls back to a clean placeholder on our 502 (never a black box).
+    const upstream = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Accept: "image/avif,image/webp,image/apng,image/*,*/*",
+      },
+    });
     if (!upstream.ok) return res.status(502).end();
     res.setHeader("Content-Type", upstream.headers.get("content-type") ?? "image/jpeg");
     res.setHeader("Cache-Control", "public, max-age=86400");
