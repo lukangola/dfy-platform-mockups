@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, integer, jsonb, numeric, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, index, integer, jsonb, numeric, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 export const generations = pgTable("generations", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -746,6 +746,35 @@ export const feedEvents = pgTable("feed_events", {
 });
 
 /**
+ * Ad Pipeline — durable Kanban card. Snapshots the CreativeBrief on "Make it
+ * mine" so the card survives feed re-ranking (feed_items are ephemeral). Outputs
+ * are NOT stored here: they live in `generations` (live draft, tagged with
+ * pipelineCardId in inputs) and `brand_assets` (curated keeper, tagged in
+ * metadata). A card reaches `ready` only once a brand asset is saved for it.
+ */
+export const adPipelineCards = pgTable("ad_pipeline_cards", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+  brandId: uuid("brand_id").notNull(),
+  stage: text("stage").notNull().default("idea"), // "idea" | "in_production" | "ready"
+  sourceType: text("source_type").notNull(), // "ad" | "organic"
+  format: text("format").notNull(), // "video" | "static"
+  brief: jsonb("brief").notNull(), // full CreativeBrief snapshot
+  sourceUrl: text("source_url"), // original reference (the card's link)
+  originalScript: text("original_script"), // transcript (from brief, or filled by enrichment)
+  referenceImageUrl: text("reference_image_url"), // static: creative image to recreate from
+  staticReferenceId: uuid("static_reference_id"), // static: the created static_ad_reference
+  productId: uuid("product_id"), // chosen at recreate time (null while in Idea)
+  angleName: text("angle_name"), // chosen at recreate time
+  language: text("language").notNull().default("en"),
+  bgJobStatus: text("bg_job_status").notNull().default("pending"), // pending|running|complete|failed
+  bgJobError: text("bg_job_error"),
+}, (t) => ({
+  brandIdx: index("ad_pipeline_cards_brand_idx").on(t.brandId),
+}));
+
+/**
  * LLM-GENERATED weekly creative ideas — the "This Week's Ideas" rail (spec §5,
  * `weekly_ideas`). UNLIKE the competitor/organic rails (which queue real scraped
  * creatives via feed_items), these are fresh ad concepts the model invents FOR
@@ -788,3 +817,5 @@ export type FeedEvent = typeof feedEvents.$inferSelect;
 export type NewFeedEvent = typeof feedEvents.$inferInsert;
 export type AdConsoleIdea = typeof adConsoleIdeas.$inferSelect;
 export type NewAdConsoleIdea = typeof adConsoleIdeas.$inferInsert;
+export type AdPipelineCard = typeof adPipelineCards.$inferSelect;
+export type NewAdPipelineCard = typeof adPipelineCards.$inferInsert;

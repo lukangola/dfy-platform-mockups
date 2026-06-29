@@ -14,6 +14,7 @@ import { db, schema } from "../lib/db.js";
 import type { NewBrandAsset } from "../db/schema.js";
 import { requireAdmin, requireAuth } from "../lib/auth.js";
 import { canSeeBrand } from "../lib/brandAccess.js";
+import { advanceCardOnAssetSaved } from "../lib/adPipeline.js";
 
 export const brandAssetsRouter: Router = Router();
 
@@ -139,6 +140,14 @@ brandAssetsRouter.post("/", async (req: Request, res: Response) => {
     }
 
     const inserted = await db.insert(schema.brandAssets).values(validated).returning();
+
+    // Ad Pipeline linkage: any saved asset tagged with a pipelineCardId advances
+    // its card to "ready" (a card needs a saved asset, not just a generation).
+    for (const asset of inserted) {
+      const cardId = (asset.metadata as { pipelineCardId?: string } | null)?.pipelineCardId;
+      if (cardId) await advanceCardOnAssetSaved(cardId);
+    }
+
     // Tag each inserted row with the current user's display name so the client
     // can show the "created by" chip on freshly-saved rows without re-fetching.
     const creatorName = displayNameFor(req.auth?.user ?? null);

@@ -64,7 +64,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 export function generateText(
   action: string,
   vars: Record<string, unknown> = {},
-  opts: { model?: string; maxTokens?: number } = {},
+  opts: { model?: string; maxTokens?: number; meta?: { pipelineCardId?: string } } = {},
 ): Promise<TextGenResponse> {
   return post<TextGenResponse>(`/api/generate/text/${action}`, { vars, ...opts });
 }
@@ -495,6 +495,28 @@ export function deleteProductAngle(
 ): Promise<{ angles: ProductAngle[] }> {
   return del<{ angles: ProductAngle[] }>(
     `/api/products/${productId}/angles/${encodeURIComponent(angleId)}`,
+  );
+}
+
+/**
+ * Extract the front-end offer from the product's page URL (productUrl).
+ * Fetches the page, runs the `offer_extract` prompt, and returns:
+ *   - `offer`: a concise plain-English summary suitable for the Copy Engine's
+ *     "front-end offer" field (null if nothing was extractable or the page
+ *     was unreachable).
+ *   - `structured`: the full JSON object returned by the offer_extract prompt
+ *     (discount_label, free_gifts, shipping_line, guarantee_line, …), or null
+ *     on total failure.
+ *
+ * Never throws on bad pages — the server returns 200 with null fields when
+ * the product URL is unfetchable or the LLM can't find an offer.
+ */
+export function extractProductOffer(
+  productId: string,
+): Promise<{ offer: string | null; structured: unknown }> {
+  return post<{ offer: string | null; structured: unknown }>(
+    `/api/products/${productId}/extract-offer`,
+    {},
   );
 }
 
@@ -1377,6 +1399,12 @@ export function recreateStaticAd(args: {
    * approved direction rather than a fresh roll of the dice.
    */
   previousOutputUrl?: string;
+  /**
+   * Ad Pipeline linkage. When set, the server logs it into the recreate
+   * generation's `inputs` so the originating pipeline card can resolve its
+   * latest draft. Never affects the rendered prompt.
+   */
+  pipelineCardId?: string;
 }): Promise<StaticAdRecreationResult> {
   return post<StaticAdRecreationResult>("/api/static-ads/recreate", args);
 }
@@ -2183,4 +2211,69 @@ export function selectAdConsoleIdea(brandId: string, ideaId: string): Promise<{ 
 
 export function skipAdConsoleIdea(brandId: string, ideaId: string): Promise<{ idea: AdConsoleIdea }> {
   return post<{ idea: AdConsoleIdea }>(`${AD_CONSOLE}/brands/${brandId}/ideas/${ideaId}/skip`, {});
+}
+
+// ---------- Ad Pipeline ----------
+
+export type AdPipelineStage = "idea" | "in_production" | "ready";
+
+export type AdPipelineCardOutput = {
+  source: "asset" | "generation";
+  kind: "text" | "image";
+  text: string | null;
+  imageUrl: string | null;
+  savedAssetId: string | null;
+  generatedAt: string;
+};
+
+export type AdPipelineCard = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  brandId: string;
+  stage: AdPipelineStage;
+  sourceType: "ad" | "organic";
+  format: "video" | "static" | string;
+  brief: AdConsoleCreativeBrief;
+  sourceUrl: string | null;
+  originalScript: string | null;
+  referenceImageUrl: string | null;
+  staticReferenceId: string | null;
+  productId: string | null;
+  angleName: string | null;
+  language: string | null;
+  bgJobStatus: "pending" | "running" | "complete" | "failed";
+  bgJobError: string | null;
+  output: AdPipelineCardOutput | null;
+};
+
+const AD_PIPELINE = "/api/ad-pipeline";
+
+export function listAdPipelineCards(brandId: string): Promise<{ cards: AdPipelineCard[] }> {
+  return get<{ cards: AdPipelineCard[] }>(`${AD_PIPELINE}/brands/${brandId}/cards`);
+}
+
+export function getAdPipelineCard(brandId: string, cardId: string): Promise<{ card: AdPipelineCard }> {
+  return get<{ card: AdPipelineCard }>(`${AD_PIPELINE}/cards/${cardId}?brandId=${encodeURIComponent(brandId)}`);
+}
+
+export function createAdPipelineCard(
+  brandId: string,
+  args: { feedItemId: string; mode: "idea" | "recreate"; productId?: string | null; angleName?: string | null; language?: string | null },
+): Promise<{ card: AdPipelineCard }> {
+  return post<{ card: AdPipelineCard }>(`${AD_PIPELINE}/brands/${brandId}/cards`, args);
+}
+
+export function updateAdPipelineCard(
+  brandId: string,
+  cardId: string,
+  patch: { stage?: AdPipelineStage; productId?: string | null; angleName?: string | null; language?: string | null },
+): Promise<{ card: AdPipelineCard }> {
+  return put<{ card: AdPipelineCard }>(`${AD_PIPELINE}/cards/${cardId}`, { brandId, ...patch });
+}
+
+export type AdPipelineJob = { cardId: string; status: "pending" | "running" | "complete" | "failed"; error: string | null };
+
+export function getAdPipelineCardJobStatus(cardId: string): Promise<{ job: AdPipelineJob | null }> {
+  return get<{ job: AdPipelineJob | null }>(`${AD_PIPELINE}/cards/${cardId}/job-status`);
 }

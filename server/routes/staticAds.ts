@@ -69,6 +69,7 @@ type RecreateBody = {
    * than re-running the full recreate pipeline from the reference ad.
    */
   previousOutputUrl?: string;
+  pipelineCardId?: string;
 };
 
 function sendError(res: Response, status: number, message: string, extra?: Record<string, unknown>) {
@@ -537,6 +538,7 @@ staticAdsRouter.post("/recreate", async (req: Request, res: Response) => {
         feedback: body.feedback ?? null,
         previousOutputUrl: body.previousOutputUrl ?? null,
         mode: isFeedbackEdit ? "feedback_edit" : "recreate",
+        pipelineCardId: body.pipelineCardId ?? null,
       },
       output: { url, raw: result.raw },
       model: result.model,
@@ -583,6 +585,7 @@ staticAdsRouter.post("/recreate", async (req: Request, res: Response) => {
           previousOutputUrl: body.previousOutputUrl ?? null,
           mode: failedMode,
           errorCode: code,
+          pipelineCardId: body.pipelineCardId ?? null,
         },
         model: "fal-ai/nano-banana-pro/edit",
         error: rawMsg,

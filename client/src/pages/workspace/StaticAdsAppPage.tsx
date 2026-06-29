@@ -17,7 +17,7 @@ import {
 import { LANGUAGES } from "@/lib/mockData";
 import {
   ApiCallError,
-  createStaticAdReference, listProducts, listStaticAdReferences,
+  createStaticAdReference, getAdPipelineCard, listProducts, listStaticAdReferences,
   recreateStaticAd, saveBrandAssets,
   type Product, type ProductAngle, type StaticAdReference,
 } from "@/lib/api";
@@ -148,6 +148,10 @@ export default function StaticAdsAppPage() {
 
   // Step 1 state
   const [selectedRefs, setSelectedRefs] = useState<Set<string>>(new Set());
+  // Ad Pipeline linkage (deep-link from "Recreate now"). Stamped into the
+  // recreate request + saved-asset metadata so the originating card can resolve
+  // its output.
+  const [pipelineCardId, setPipelineCardId] = useState<string | null>(null);
   // Multi-select niche filter for the library grid. Empty set = show all.
   const [nicheFilter, setNicheFilter] = useState<Set<string>>(new Set());
 
@@ -177,6 +181,39 @@ export default function StaticAdsAppPage() {
   const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Deep-link prefill from the Ad Pipeline ("Recreate now"). Runs once on mount.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    const productId = p.get("productId");
+    const angle = p.get("angle");
+    const language = p.get("language");
+    const referenceId = p.get("referenceId");
+    const card = p.get("pipelineCardId");
+    if (productId) setSelectedProductId(productId);
+    if (angle) setSelectedAngle(angle);
+    if (language) setSelectedLanguage(language);
+    if (referenceId) setSelectedRefs(new Set([referenceId]));
+    if (card) setPipelineCardId(card);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // When the deep-link lacked a referenceId (static deconstruction wasn't ready
+  // yet), poll the pipeline card until its background job produces a
+  // staticReferenceId, then preselect it. Stops once a reference is selected.
+  useEffect(() => {
+    if (!pipelineCardId || !activeBrandId || selectedRefs.size > 0) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const { card } = await getAdPipelineCard(activeBrandId, pipelineCardId);
+        if (!cancelled && card.staticReferenceId) setSelectedRefs(new Set([card.staticReferenceId]));
+      } catch { /* ignore — user can pick a reference manually */ }
+    };
+    void tick();
+    const iv = setInterval(tick, 2500);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [pipelineCardId, activeBrandId, selectedRefs.size]);
 
   useEffect(() => {
     if (!activeBrandId) return;
@@ -362,6 +399,7 @@ export default function StaticAdsAppPage() {
         brand: brand ?? null,
         feedback,
         previousOutputUrl,
+        ...(pipelineCardId ? { pipelineCardId } : {}),
       });
       setRecreations((prev) =>
         prev.map((r) =>
@@ -485,6 +523,7 @@ export default function StaticAdsAppPage() {
             durationMs: r.durationMs ?? null,
             model: r.model ?? null,
             promptVersion: r.promptVersion ?? null,
+            ...(pipelineCardId ? { pipelineCardId } : {}),
           },
         })),
       );

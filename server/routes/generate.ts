@@ -56,8 +56,19 @@ function sendError(res: Response, status: number, message: string, extras: Recor
  */
 generateRouter.post("/text/:action", async (req: Request, res: Response) => {
   const { action } = req.params;
-  const body = (req.body ?? {}) as { vars?: Record<string, unknown>; model?: string; maxTokens?: number };
+  const body = (req.body ?? {}) as {
+    vars?: Record<string, unknown>;
+    model?: string;
+    maxTokens?: number;
+    meta?: { pipelineCardId?: string };
+  };
   const vars = body.vars ?? {};
+  // pipelineCardId is logged into generations.inputs (top-level) so an Ad
+  // Pipeline card can resolve its latest draft — but it is NOT passed to the
+  // prompt template (kept out of `vars`), so it never pollutes the rendered prompt.
+  const loggedInputs = body.meta?.pipelineCardId
+    ? { ...vars, pipelineCardId: body.meta.pipelineCardId }
+    : vars;
 
   try {
     const prompt = loadPrompt(action, vars);
@@ -72,7 +83,7 @@ generateRouter.post("/text/:action", async (req: Request, res: Response) => {
     const id = await persist({
       action,
       kind: "text",
-      inputs: vars,
+      inputs: loggedInputs,
       output: { text: result.text },
       model: result.model,
       promptVersion: prompt.version,
