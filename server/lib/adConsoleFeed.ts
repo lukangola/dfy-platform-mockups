@@ -23,7 +23,7 @@
  * Re-ranking is idempotent: upsert on (brandId, refKey) refreshes the scores
  * but PRESERVES the swipe `status`, so a re-rank never un-skips an item.
  */
-import { and, desc, eq, inArray, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import { db, schema } from "./db.js";
 import { getBrandNicheState } from "./adConsoleNiche.js";
 import { ORGANIC_MIN_DURATION_SEC, isLikelyEnglish } from "./adConsoleOrganic.js";
@@ -282,10 +282,20 @@ function preferAd(candidate: AdCreative, current: AdCreative): boolean {
  * AND sourced from AdSpy (the sole ad source; legacy gethookd/facebook_ads rows
  * in the pool are excluded so they never rank into the feed).
  */
-async function loadEligibleAds(streamId: string | null, competitorIds: string[]): Promise<AdCreative[]> {
+async function loadEligibleAds(streamId: string | null, activeCompetitorIds: string[]): Promise<AdCreative[]> {
   const provenance: SQL[] = [];
-  if (streamId) provenance.push(eq(schema.adCreatives.nicheStreamId, streamId));
-  if (competitorIds.length > 0) provenance.push(inArray(schema.adCreatives.competitorId, competitorIds));
+  // Niche-discovery ads: surfaced by keyword/seed queries and NOT tied to a
+  // competitor. (Competitor ads carry both a competitorId AND the nicheStreamId,
+  // so we exclude them from the niche lane to keep the competitor lane below the
+  // single source of truth for whether a competitor's ads stay eligible.)
+  if (streamId) {
+    provenance.push(and(isNull(schema.adCreatives.competitorId), eq(schema.adCreatives.nicheStreamId, streamId)) as SQL);
+  }
+  // Competitor ads: eligible ONLY while their competitor is still active for this
+  // brand. Removing/archiving a competitor drops its pooled ads on the next pull.
+  if (activeCompetitorIds.length > 0) {
+    provenance.push(inArray(schema.adCreatives.competitorId, activeCompetitorIds));
+  }
   if (provenance.length === 0) return [];
   const where = and(
     eq(schema.adCreatives.source, "adspy"),
@@ -305,12 +315,13 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
   const weights = resolveWeights(stream);
   const pools = await buildKeywordPools(brandId, stream);
 
-  // Brand overlay: this brand's competitors (any status — the ad was pulled
-  // while the competitor was active; archiving shouldn't drop already-pooled ads).
+  // Brand overlay: ONLY this brand's ACTIVE competitors. Removing or archiving a
+  // competitor drops its pooled ads from the feed on the next pull — the operator
+  // removed it because the results weren't what they wanted.
   const competitorRows = await db
     .select({ id: schema.competitors.id })
     .from(schema.competitors)
-    .where(eq(schema.competitors.brandId, brandId));
+    .where(and(eq(schema.competitors.brandId, brandId), eq(schema.competitors.status, "active")));
   const competitorIds = competitorRows.map((c) => c.id);
 
   // ── competitor_ads rail ──
@@ -377,6 +388,22 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
       ),
     );
   const skippedFingerprints = new Set(skippedAdRows.map((r) => creativeFingerprint(r.ad)));
+
+  // FRESH PULL: every pull rebuilds the feed from scratch. Clear this brand's
+  // not-yet-actioned ("new") cards on the rails we re-rank below, so stale results
+  // from removed competitors or changed keywords don't linger and block the new
+  // ones. Operator-actioned cards are preserved: "selected" (kept work / pipeline
+  // cards) and "skipped" (stays buried — and skippedFingerprints above re-buries
+  // any re-pulled copy with a fresh ad id).
+  await db
+    .delete(schema.feedItems)
+    .where(
+      and(
+        eq(schema.feedItems.brandId, brandId),
+        eq(schema.feedItems.status, "new"),
+        inArray(schema.feedItems.rail, ["competitor_ads", "trending_organic"]),
+      ),
+    );
 
   let adsRanked = 0;
   for (const ad of ads) {
