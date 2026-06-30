@@ -80,7 +80,17 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
     ...NAV_ITEMS.slice(3), // Assets, Workflows
   ];
 
-  const isActive = (path: string) => location.startsWith(path);
+  // A nav item matches when the URL is its path or a sub-path of it. Several
+  // items can match at once (e.g. /workspace/apps/ad-pipeline matches both
+  // "Apps" → /workspace/apps and "Ad Pipeline" → /workspace/apps/ad-pipeline),
+  // so only the LONGEST (most specific) match is highlighted.
+  const matchesPath = (path: string) => location === path || location.startsWith(path + "/");
+  const activePath =
+    navItems
+      .map((i) => i.path)
+      .filter(matchesPath)
+      .sort((a, b) => b.length - a.length)[0] ?? null;
+  const isActive = (path: string) => path === activePath;
   const settingsActive = location.startsWith("/workspace/settings");
 
   return (
