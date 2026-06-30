@@ -38,9 +38,8 @@ const CLIENT_CONSOLE_ITEM = {
   description: "Client share + feedback",
 };
 
-// Ad Creative Console is gated like the Client Console: managers/admins AND
-// only when the active brand is flagged a DFY client (toggled by an admin under
-// Settings → Clients). Pinned to the top of the nav when visible.
+// Ad Inspo Console: available to managers/admins on ANY brand (not DFY-gated).
+// Pinned to the top of the nav when visible.
 const AD_CONSOLE_ITEM = {
   id: "ad-console",
   label: "Ad Inspo Console",
@@ -49,8 +48,8 @@ const AD_CONSOLE_ITEM = {
   description: "Competitor + trend command center",
 };
 
-// Ad Pipeline Kanban is gated identically to the Ad Console: managers/admins,
-// DFY-only brands. Sits right after the Ad Console in the nav.
+// Ad Pipeline Kanban: same audience as the Ad Console (managers/admins, any
+// brand). Sits right after the Ad Console in the nav.
 const AD_PIPELINE_ITEM = {
   id: "ad-pipeline",
   label: "Ad Pipeline",
@@ -66,14 +65,16 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
   const { activeBrand } = useBrand();
 
   const isManager = role === "admin" || role === "manager";
-  // Both manager consoles are DFY-only: shown to managers/admins only when the
-  // active brand is flagged a DFY client.
-  const showDfyConsoles = isManager && Boolean(activeBrand?.isDfyClient);
+  // Ad Inspo Console + Ad Pipeline are available to managers/admins on ANY brand.
+  const showAdTools = isManager;
+  // Client Console stays DFY-only: it's the client-facing share + feedback
+  // surface, only meaningful for done-for-you brands.
+  const showClientConsole = isManager && Boolean(activeBrand?.isDfyClient);
   // Ad Console is pinned to the top; Client Console sits right after Products.
   const navItems = [
-    ...(showDfyConsoles ? [AD_CONSOLE_ITEM, AD_PIPELINE_ITEM] : []),
+    ...(showAdTools ? [AD_CONSOLE_ITEM, AD_PIPELINE_ITEM] : []),
     NAV_ITEMS[0], // Products
-    ...(showDfyConsoles ? [CLIENT_CONSOLE_ITEM] : []),
+    ...(showClientConsole ? [CLIENT_CONSOLE_ITEM] : []),
     NAV_ITEMS[1], // Brand Info
     NAV_ITEMS[2], // Apps
     ...NAV_ITEMS.slice(3), // Assets, Workflows

@@ -152,9 +152,10 @@ export default function AdConsolePage() {
   const [, navigate] = useLocation();
 
   const canUse = role === "admin" || role === "manager";
-  // The Ad Console is DFY-only: shown only for brands an admin has flagged a DFY
-  // client. The nav hides it for non-DFY brands; we re-check here so a hand-typed
-  // URL can't bypass it.
+  // The Ad Console is available for ANY brand (managers/admins). `isDfy` no
+  // longer gates access — it only decides whether we auto-bootstrap the brand
+  // (niche + competitors + keywords) on open: DFY brands auto-prepare, normal
+  // brands don't auto-spend and prepare on explicit action instead.
   const isDfy = Boolean(activeBrand?.isDfyClient);
 
   // Core data
@@ -245,7 +246,7 @@ export default function AdConsolePage() {
 
   // Initial load — pull everything in parallel.
   useEffect(() => {
-    if (!activeBrandId || !canUse || !isDfy) {
+    if (!activeBrandId || !canUse) {
       setLoading(false);
       return;
     }
@@ -275,7 +276,9 @@ export default function AdConsolePage() {
         // Auto-prepare the brand in the background: detect niche + research
         // competitors + extract angle keywords (all LLM, no Apify spend). Only
         // when something's missing, and only once per brand per mount.
-        const needsBootstrap = !nicheState.nicheType || comps.competitors.length === 0;
+        // Auto-bootstrap (LLM spend) only for DFY brands. Normal brands never
+        // auto-spend on open — the operator prepares them on explicit action.
+        const needsBootstrap = isDfy && (!nicheState.nicheType || comps.competitors.length === 0);
         if (needsBootstrap && !bootstrappedRef.current.has(activeBrandId)) {
           bootstrappedRef.current.add(activeBrandId);
           setBootstrapping(true);
@@ -585,12 +588,6 @@ export default function AdConsolePage() {
             icon={Building2}
             title="No brand selected"
             body="Pick a brand from the switcher in the top-left to load its competitor ads, trending posts, and weekly ideas."
-          />
-        ) : !isDfy ? (
-          <GuardPanel
-            icon={ShieldAlert}
-            title="DFY clients only"
-            body="The Ad Inspo Console is enabled per brand. An admin can flag this brand as a DFY client under Settings → Clients to turn it on."
           />
         ) : loadError ? (
           <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs font-mono text-rose-300">
