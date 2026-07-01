@@ -23,7 +23,7 @@ import {
   type Product, type ProductAngle, type MessageAngleGroup,
 } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
-import { MOCK_CHAT_MESSAGES } from "@/lib/mockData";
+import { MOCK_CHAT_MESSAGES, LANGUAGES } from "@/lib/mockData";
 import { toast } from "sonner";
 
 const STEPS = [
@@ -288,6 +288,9 @@ export default function MessageTestingAppPage() {
   const [selectedProductId, setSelectedProductId] = useState("");
   const [productDropdownOpen, setProductDropdownOpen] = useState(false);
 
+  // Output language for the generated messages.
+  const [selectedLanguage, setSelectedLanguage] = useState("en");
+
   // Research angles (name+block) for the selected product
   const [angles, setAngles] = useState<ProductAngle[]>([]);
   const [anglesLoading, setAnglesLoading] = useState(false);
@@ -449,6 +452,14 @@ export default function MessageTestingAppPage() {
     );
   };
 
+  // Switching language invalidates any already-generated messages (they were
+  // written in the previous language), so the next "Next" regenerates them.
+  const handleLanguageChange = (code: string) => {
+    setSelectedLanguage(code);
+    setMessageGroups(null);
+    setConfirmedAngleNames(new Set());
+  };
+
   // Step 1 → 2: run the copy writer, land on the message review screen.
   const handleAdvanceToMessageReview = async () => {
     if (!selectedProduct || selectedAngles.length === 0) return;
@@ -462,9 +473,11 @@ export default function MessageTestingAppPage() {
     setCopyLoading(true);
     setCopyError(null);
     try {
+      const selectedLang = LANGUAGES.find((l) => l.code === selectedLanguage) ?? LANGUAGES[0];
       const { groups } = await generateMessageTestingCopy({
         product: selectedProduct.name,
         angles: selectedAngles,
+        language: selectedLang.label,
       });
       setMessageGroups(groups);
       setConfirmedAngleNames(new Set());
@@ -781,6 +794,27 @@ export default function MessageTestingAppPage() {
             )}
           </AnimatePresence>
         </div>
+      </div>
+
+      {/* Language Selector */}
+      <div className="rounded-xl border border-white/[0.08] p-5 mb-6" style={{ background: "#13161F" }}>
+        <label className="text-[10px] font-mono text-white/30 uppercase tracking-widest mb-3 block">
+          Message Language
+        </label>
+        <select
+          value={selectedLanguage}
+          onChange={(e) => handleLanguageChange(e.target.value)}
+          className="w-full p-3 rounded-lg border border-white/[0.08] bg-white/[0.02] text-sm text-white/90 focus:outline-none focus:border-white/20"
+        >
+          {LANGUAGES.map((lang) => (
+            <option key={lang.code} value={lang.code} className="bg-[#1A1D28] text-white">
+              {lang.flag} {lang.label}
+            </option>
+          ))}
+        </select>
+        <p className="text-[10px] text-white/25 font-mono mt-2">
+          The generated messages will be written in this language.
+        </p>
       </div>
 
       {/* Angles Selection */}

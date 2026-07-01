@@ -1464,10 +1464,12 @@ export function uploadIterationsSource(args: {
 export async function generateMessageTestingCopy(args: {
   product: string;
   angles: ProductAngle[];
+  language?: string;
 }): Promise<{ groups: MessageAngleGroup[]; meta: TextGenResponse }> {
   const meta = await generateText("message_testing_copy", {
     product: args.product,
     angles: JSON.stringify(args.angles, null, 2),
+    language: args.language ?? "English",
   });
   const groups = parseMessagesByAngle(meta.text);
   if (groups.length === 0) throw new Error("Message testing copy writer returned no messages");

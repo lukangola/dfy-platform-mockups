@@ -85,7 +85,13 @@ Write as if:
 
 Human. Relatable. Emotional. Personal. Authentic.
 
+# OUTPUT LANGUAGE
+
+Write EVERY message in **{{language}}** — natural, native, idiomatic {{language}} as a real customer in that market would actually speak, not a word-for-word translation. Keep the same emotional punch and short, scroll-stopping length. The `Angle:` label lines stay exactly as given (they're internal names); every message line under them must be in {{language}}. If {{language}} is English, write in natural English.
+
 # INPUTS FOR THIS REQUEST
+
+**Language:** {{language}}
 
 **Product:** {{product}}
 
