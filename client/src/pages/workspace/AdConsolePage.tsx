@@ -371,6 +371,30 @@ export default function AdConsolePage() {
     }
   }
 
+  // One-click full setup: niche detection + competitor discovery + angle-keyword
+  // extraction (all LLM — no ad-scraping/Apify spend). Gives a brand a ready-to-
+  // tweak Ad Console in one click, then the operator pulls when they're happy.
+  async function handleGenerateSetup() {
+    if (!activeBrandId || bootstrapping) return;
+    setBootstrapping(true);
+    try {
+      await bootstrapAdConsole(activeBrandId);
+      const [n2, c2, k2] = await Promise.all([
+        getAdConsoleNiche(activeBrandId),
+        listAdConsoleCompetitors(activeBrandId),
+        listAdConsoleKeywordSets(activeBrandId),
+      ]);
+      setNiche(n2);
+      setCompetitors(c2.competitors);
+      setKeywordSetCount(k2.keywordSets.length);
+      flash({ kind: "success", text: "Generated setup — niche, competitors & angle keywords are ready to tweak." });
+    } catch (err) {
+      flash({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBootstrapping(false);
+    }
+  }
+
   async function handleGenerateIdeas() {
     if (!activeBrandId || generatingIdeas) return;
     setGeneratingIdeas(true);
@@ -669,6 +693,7 @@ export default function AdConsolePage() {
                     competitors={competitors}
                     keywordSetCount={keywordSetCount}
                     bootstrapping={bootstrapping}
+                    onGenerateSetup={handleGenerateSetup}
                     onCompetitorsChange={refreshCompetitors}
                     onFeedRanked={refreshFeed}
                     onNicheChange={setNiche}
@@ -1841,6 +1866,7 @@ function SetupPanel({
   competitors,
   keywordSetCount,
   bootstrapping,
+  onGenerateSetup,
   onCompetitorsChange,
   onFeedRanked,
   onNicheChange,
@@ -1851,8 +1877,10 @@ function SetupPanel({
   nicheLabel: string | null;
   competitors: AdConsoleCompetitor[];
   keywordSetCount: number | null;
-  /** True while the background bootstrap (niche + competitors + keywords) runs. */
+  /** True while the bootstrap (niche + competitors + keywords) runs. */
   bootstrapping: boolean;
+  /** One-click full setup: niche + competitors + angle keywords. */
+  onGenerateSetup: () => Promise<void>;
   onCompetitorsChange: () => Promise<void>;
   onFeedRanked: () => Promise<void>;
   onNicheChange: (state: AdConsoleNicheState) => void;
@@ -1978,7 +2006,16 @@ function SetupPanel({
             <span className="text-[12px] text-white/80">{keywordSetCount ?? 0} angle{keywordSetCount === 1 ? "" : "s"}</span>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={() => void onGenerateSetup()}
+            disabled={bootstrapping}
+            title="Auto-generate niche, competitors and angle keywords in one go — ready to tweak, then pull"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-mono tracking-wide border border-cyan-500/40 bg-cyan-500/15 text-cyan-200 hover:bg-cyan-500/25 transition-all disabled:opacity-50"
+          >
+            {bootstrapping ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+            {bootstrapping ? "Generating setup…" : "Generate setup"}
+          </button>
           <button
             onClick={() => void handleRank()}
             disabled={ranking}
@@ -1998,7 +2035,7 @@ function SetupPanel({
           </button>
         </div>
         <p className="text-[10px] text-white/25 font-mono leading-relaxed">
-          Niche, competitors &amp; angle keywords are detected automatically in the background — they sharpen which ads &amp; posts rank into your feed.
+          Hit <span className="text-cyan-300/70">Generate setup</span> to auto-fill niche, competitors &amp; angle keywords, then tweak them below — they sharpen which ads &amp; posts rank into your feed.
         </p>
 
         <KeywordManager brandId={brandId} onNotice={onNotice} />
