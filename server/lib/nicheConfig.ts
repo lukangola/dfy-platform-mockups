@@ -282,11 +282,82 @@ const CLEANING_SEED: NicheSeed = {
   config: DEFAULT_CONFIG,
 };
 
+const HAIRCARE_SEED: NicheSeed = {
+  niche: "haircare",
+  displayName: "Haircare",
+  keywords: {
+    adLibrary: [
+      "haircare",
+      "hair serum",
+      "hair growth serum",
+      "hair loss treatment",
+      "scalp serum",
+      "hair oil",
+      "rosemary oil",
+      "biotin",
+      "hair thickening",
+      "hair mask",
+      "dry shampoo",
+      "hair supplement",
+    ],
+    organic: [
+      "hair growth routine",
+      "how to stop hair thinning",
+      "scalp care routine",
+      "hair loss tips",
+      "postpartum hair loss",
+      "thicker hair naturally",
+      "rosemary oil hair growth",
+      "hair growth journey",
+    ],
+    hashtags: [
+      "#hairtok",
+      "#hairgrowth",
+      "#hairloss",
+      "#haircare",
+      "#scalpcare",
+      "#hairthinning",
+      "#hairgrowthjourney",
+      "#postpartumhairloss",
+      "#rosemaryoil",
+      "#healthyhair",
+    ],
+  },
+  leadingAdvertisers: [
+    // Name-only seeds (per SeedAdvertiser doc): the ingest resolves each by name
+    // against AdSpy rather than us hardcoding handles/IDs.
+    { name: "Vegamour" },
+    { name: "Nutrafol" },
+    { name: "Divi" },
+    { name: "Act+Acre" },
+    { name: "K18" },
+    { name: "Ceremonia" },
+    { name: "Prose" },
+    { name: "Bread Beauty Supply" },
+  ],
+  painPointKeywords: [
+    "hair thinning",
+    "hair loss",
+    "postpartum hair loss",
+    "receding hairline",
+    "thinning at the crown",
+    "itchy flaky scalp",
+    "dry damaged hair",
+    "slow hair growth",
+    "excessive shedding",
+    "brittle breakage",
+    "dandruff",
+    "menopausal hair thinning",
+  ],
+  config: DEFAULT_CONFIG,
+};
+
 /** Registry of all configured niches, keyed by canonical niche key. */
 export const NICHE_SEEDS: Record<string, NicheSeed> = {
   supplement: SUPPLEMENT_SEED,
   skincare: SKINCARE_SEED,
   cleaning: CLEANING_SEED,
+  haircare: HAIRCARE_SEED,
 };
 
 /** Closed set the brand niche classifier output is coerced against. */
