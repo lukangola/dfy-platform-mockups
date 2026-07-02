@@ -1461,19 +1461,99 @@ export function uploadIterationsSource(args: {
   return post<{ url: string; filename: string }>("/api/static-ads-iterations/upload-source", args);
 }
 
+/**
+ * Split a research "messages" artifact (plain text — one message per line, or
+ * blank-line separated) into individual messages. Mirrors ClientSharePage.
+ */
+function splitResearchMessages(content: string): string[] {
+  const strip = (s: string) =>
+    s.replace(/^\s*([-*•]|\d+[.)])\s+/, "").replace(/^["'“”]+|["'“”]+$/g, "").trim();
+  const byBlank = content.split(/\n\s*\n/).map((b) => strip(b.trim())).filter(Boolean);
+  if (byBlank.length > 1) return byBlank;
+  const byLine = content.split(/\n/).map((l) => strip(l.trim())).filter(Boolean);
+  if (byLine.length > 1) return byLine;
+  const single = strip(content.trim());
+  return single ? [single] : [];
+}
+
+function messagesArtifactReady(a: ProductAngle): boolean {
+  const art = a.artifacts?.messages;
+  return Boolean(art && art.status === "complete" && art.content && art.content.trim());
+}
+
+/**
+ * Message Testing copy = the product's RESEARCH messages (angle.artifacts.messages),
+ * NOT freshly-invented copy. For any selected angle whose research messages haven't
+ * been generated yet, we generate them on demand (which persists them back onto the
+ * product's research), then read them. When a non-English language is chosen, we
+ * translate the exact research messages — no new messages are invented.
+ */
 export async function generateMessageTestingCopy(args: {
-  product: string;
+  productId: string;
   angles: ProductAngle[];
   language?: string;
-}): Promise<{ groups: MessageAngleGroup[]; meta: TextGenResponse }> {
-  const meta = await generateText("message_testing_copy", {
-    product: args.product,
-    angles: JSON.stringify(args.angles, null, 2),
-    language: args.language ?? "English",
-  });
-  const groups = parseMessagesByAngle(meta.text);
-  if (groups.length === 0) throw new Error("Message testing copy writer returned no messages");
-  return { groups, meta };
+  /** Force-regenerate the research messages even if they already exist (the
+   *  per-angle "Regenerate" action). Refreshes the persisted research too. */
+  force?: boolean;
+}): Promise<{ groups: MessageAngleGroup[] }> {
+  const selectedNames = new Set(args.angles.map((a) => a.name));
+  let angles = args.angles.filter((a) => selectedNames.has(a.name));
+
+  // 1. Ensure research messages exist for every selected angle (generate + persist).
+  //    Force mode regenerates all of them; otherwise only the ones still missing.
+  const toGenerate = args.force ? angles.filter((a) => a.id) : angles.filter((a) => !messagesArtifactReady(a) && a.id);
+  if (toGenerate.length > 0) {
+    // Capture prior generatedAt so a forced regen waits for genuinely NEW output
+    // (a stale "complete" status from before the regen must not satisfy the poll).
+    const prevAt = new Map(toGenerate.map((a) => [a.name, a.artifacts?.messages?.generatedAt]));
+    const targetNames = new Set(toGenerate.map((a) => a.name));
+    await Promise.all(
+      toGenerate.map((a) => generateAngleArtifact(args.productId, a.id!, "messages").catch(() => {})),
+    );
+    // Poll until every targeted angle's messages artifact settles (complete/failed).
+    for (let i = 0; i < 48; i++) {
+      await new Promise((r) => setTimeout(r, 2500));
+      const { angles: fresh } = await getProductAngles(args.productId);
+      angles = fresh.filter((a) => selectedNames.has(a.name));
+      const pending = angles.filter((a) => {
+        if (!targetNames.has(a.name)) return false;
+        const art = a.artifacts?.messages;
+        if (!art) return true;
+        if (art.status === "failed") return false;
+        if (art.status === "complete") {
+          const prev = prevAt.get(a.name);
+          return prev ? art.generatedAt === prev : false; // forced regen: wait for a new timestamp
+        }
+        return true; // running / not started yet
+      });
+      if (pending.length === 0) break;
+    }
+  }
+
+  // 2. Build the groups straight from the research messages.
+  let groups: MessageAngleGroup[] = angles
+    .map((a) => ({ name: a.name, messages: splitResearchMessages(a.artifacts?.messages?.content ?? "") }))
+    .filter((g) => g.messages.length > 0);
+
+  if (groups.length === 0) {
+    throw new Error(
+      "No research messages available for the selected angles — generate them from the product's research first.",
+    );
+  }
+
+  // 3. Translate the exact research messages when a non-English language is chosen.
+  const language = (args.language ?? "English").trim();
+  if (language.toLowerCase() !== "english") {
+    const text = groups.map((g) => `Angle: ${g.name}\n${g.messages.join("\n")}`).join("\n\n");
+    const meta = await generateText("translate_messages", { messages: text, language });
+    const translated = parseMessagesByAngle(meta.text);
+    groups = groups.map((g) => {
+      const t = translated.find((p) => p.name === g.name);
+      return t && t.messages.length > 0 ? t : g;
+    });
+  }
+
+  return { groups };
 }
 
 // ---------- Listicle Builder ----------

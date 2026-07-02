@@ -475,7 +475,7 @@ export default function MessageTestingAppPage() {
     try {
       const selectedLang = LANGUAGES.find((l) => l.code === selectedLanguage) ?? LANGUAGES[0];
       const { groups } = await generateMessageTestingCopy({
-        product: selectedProduct.name,
+        productId: selectedProductId,
         angles: selectedAngles,
         language: selectedLang.label,
       });
@@ -537,9 +537,12 @@ export default function MessageTestingAppPage() {
     if (!angle) return;
     setRegeneratingAngles((prev) => new Set(prev).add(angleName));
     try {
+      const selectedLang = LANGUAGES.find((l) => l.code === selectedLanguage) ?? LANGUAGES[0];
       const { groups } = await generateMessageTestingCopy({
-        product: selectedProduct.name,
+        productId: selectedProductId,
         angles: [angle],
+        language: selectedLang.label,
+        force: true,
       });
       const fresh = groups.find((g) => g.name === angleName) ?? groups[0];
       if (fresh) {
