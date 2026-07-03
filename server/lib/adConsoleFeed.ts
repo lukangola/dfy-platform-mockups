@@ -26,6 +26,7 @@
 import { and, desc, eq, inArray, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import { db, schema } from "./db.js";
 import { getBrandNicheState } from "./adConsoleNiche.js";
+import { buildBrandSearchQueries } from "./adConsoleKeywords.js";
 import { ORGANIC_MIN_DURATION_SEC, isLikelyEnglish } from "./adConsoleOrganic.js";
 import { scoreAdspyTraction } from "./adspy.js";
 import { DEFAULT_NICHE_CONFIG, type NicheStreamConfig } from "./nicheConfig.js";
@@ -315,6 +316,32 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
   const weights = resolveWeights(stream);
   const pools = await buildKeywordPools(brandId, stream);
 
+  // Live keyword allow-list. When the operator REMOVES a search keyword, its
+  // already-pooled ads/posts must drop from the feed on the next rank — not just
+  // stop being re-fetched. A keyword-surfaced item survives only if its discovery
+  // query is still a current search term (operator-curated `search_terms`, which
+  // buildBrandSearchQueries honours) OR a niche-seed term. Competitor ads are
+  // exempt (they're kept by competitor membership, not by keyword).
+  const brandTerms = await buildBrandSearchQueries(brandId);
+  const seedKw = (stream?.keywords ?? {}) as { adLibrary?: unknown; organic?: unknown };
+  const lowerList = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").map((x) => x.toLowerCase().trim()) : [];
+  const currentTerms = new Set<string>(
+    [
+      ...lowerList(brandTerms.adQueries),
+      ...lowerList(brandTerms.organicQueries),
+      ...lowerList(seedKw.adLibrary),
+      ...lowerList(seedKw.organic),
+      ...lowerList(stream?.painPointKeywords),
+    ].filter(Boolean),
+  );
+  /** True when a keyword-surfaced item's discovery query is no longer a live term. */
+  const removedKeyword = (query: string | null | undefined): boolean => {
+    if (currentTerms.size === 0) return false; // no curated terms → don't filter
+    const q = (query ?? "").toLowerCase().trim();
+    return q.length > 0 && !currentTerms.has(q);
+  };
+
   // Brand overlay: ONLY this brand's ACTIVE competitors. Removing or archiving a
   // competitor drops its pooled ads from the feed on the next pull — the operator
   // removed it because the results weren't what they wanted.
@@ -407,6 +434,9 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
 
   let adsRanked = 0;
   for (const ad of ads) {
+    // Drop keyword-surfaced (niche) ads whose discovery keyword the operator has
+    // removed from the search terms. Competitor ads are exempt.
+    if (!ad.competitorId && removedKeyword(ad.discoveryQuery)) continue;
     const hay = normalizeHaystack([ad.copy, ad.advertiserName, ad.cta]);
     const { matched, weighted } = matchKeywords(hay, pools.ad);
     // Relevance from PROVENANCE, not the ad's copy: a researched competitor's ad is
@@ -489,6 +519,8 @@ export async function rankBrandFeed(brandId: string): Promise<FeedRankSummary> {
     const foundQuery = String((post.rawJson as Record<string, unknown> | null)?.searchQuery ?? "")
       .toLowerCase()
       .trim();
+    // Drop clips whose search keyword the operator has removed from the terms.
+    if (removedKeyword(foundQuery)) continue;
     const relevance = pools.brandAngle.has(foundQuery)
       ? 1
       : pools.niche.has(foundQuery)
