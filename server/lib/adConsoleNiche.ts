@@ -23,7 +23,7 @@ import { generateText } from "./anthropic.js";
 import { db, schema } from "./db.js";
 import { extractJsonObject } from "./jsonExtract.js";
 import { loadPrompt, PromptNotConfiguredError } from "./prompts.js";
-import { AD_CONSOLE_NICHES, getNicheSeed } from "./nicheConfig.js";
+import { AD_CONSOLE_NICHES, DEFAULT_NICHE_CONFIG, getNicheSeed } from "./nicheConfig.js";
 import type { NicheStream } from "../db/schema.js";
 
 const CLASSIFY_ACTION = "brand_niche_classify";
@@ -95,8 +95,46 @@ export async function getBrandNicheState(brandId: string): Promise<BrandNicheSta
   const nicheType = brand?.nicheType ?? null;
   if (!nicheType) return { nicheType: null, seeded: false, stream: null };
   const seeded = AD_CONSOLE_NICHES.includes(nicheType);
-  const stream = seeded ? await ensureNicheStream(nicheType) : null;
+  // Seeded niches share a curated stream; every other brand gets a per-brand
+  // stream so organic + the niche ad-lane still pull — driven by the brand's own
+  // keywords. `seeded` stays false (it's not a curated seed), but a stream exists.
+  const stream = seeded ? await ensureNicheStream(nicheType) : await ensureBrandNicheStream(brandId, nicheType);
   return { nicheType, seeded, stream };
+}
+
+/**
+ * Per-brand fallback niche stream for UNSEEDED niches (e.g. "other" / any niche
+ * without a curated seed). Organic and the niche ad-lane are driven entirely by
+ * the brand's OWN angle keywords (buildBrandSearchQueries), so the stream only
+ * needs to exist as a brand-scoped id to tag + rank the pulled posts/ads. Keyed
+ * per brand so one brand's organic never bleeds into another's. Empty seed
+ * keyword lists are intentional — the brand's keywords supply the search terms.
+ */
+export async function ensureBrandNicheStream(brandId: string, nicheType: string): Promise<NicheStream | null> {
+  const key = `brand:${brandId}`;
+  const [existing] = await db
+    .select()
+    .from(schema.nicheStreams)
+    .where(eq(schema.nicheStreams.niche, key))
+    .limit(1);
+  if (existing) return existing;
+  await db
+    .insert(schema.nicheStreams)
+    .values({
+      niche: key,
+      displayName: nicheType || "Custom",
+      keywords: { adLibrary: [], organic: [], hashtags: [] },
+      leadingAdvertisers: [],
+      painPointKeywords: [],
+      config: DEFAULT_NICHE_CONFIG,
+    })
+    .onConflictDoNothing({ target: schema.nicheStreams.niche });
+  const [row] = await db
+    .select()
+    .from(schema.nicheStreams)
+    .where(eq(schema.nicheStreams.niche, key))
+    .limit(1);
+  return row ?? null;
 }
 
 /**

@@ -1923,7 +1923,7 @@ function SetupPanel({
       onNotice(
         classification.seeded
           ? { kind: "success", text: `Re-detected niche: ${label}.` }
-          : { kind: "error", text: `Detected "${classification.niche}" — not a seeded niche, so no niche stream attaches.` },
+          : { kind: "success", text: `Detected "${classification.niche}" — ads + organic will pull using this brand's own keywords.` },
       );
     } catch (err) {
       onNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
