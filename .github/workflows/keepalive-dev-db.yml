@@ -1,0 +1,60 @@
+name: keepalive-dev-db
+
+# Keeps the DEV Supabase project awake so the free tier never hits its 7-day
+# inactivity auto-pause. Production runs on Railway and is unaffected by this.
+#
+# The dev database URL (which contains the password) lives ONLY in the
+# encrypted GitHub Actions secret DEV_DATABASE_URL — it is never printed and
+# is masked in logs. This is safe on a public repo: Actions secrets are not
+# exposed to forks and are not readable from pull requests.
+#
+# Notes on scheduling:
+#   - `schedule` triggers only run from the repository's DEFAULT branch (main).
+#   - GitHub auto-disables scheduled workflows after 60 days with no repo
+#     activity. This repo is committed to regularly, so that won't trigger; if
+#     the project is ever dormant that long, re-enable it from the Actions tab.
+#   - Scheduled runs can be delayed under load, so we run daily (not every few
+#     days) to keep a comfortable margin under the 7-day pause window.
+
+on:
+  schedule:
+    # 05:19 UTC daily. Off-the-hour to dodge GitHub's congested top-of-hour
+    # scheduler queue (top-of-hour cron jobs are the most likely to be delayed).
+    - cron: "19 5 * * *"
+  workflow_dispatch: {} # manual "Run workflow" button for on-demand pings
+
+# Never let two pings overlap; if one is still running, skip the newcomer.
+concurrency:
+  group: keepalive-dev-db
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping dev Supabase database
+        env:
+          DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DEV_DATABASE_URL:-}" ]; then
+            echo "::error::DEV_DATABASE_URL secret is not set. Add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client
+          fi
+          # A real upsert + read = unambiguous database activity, which resets
+          # Supabase's inactivity timer (a bare SELECT would likely suffice, but
+          # a write leaves no doubt). Uses a dedicated one-row bookkeeping table,
+          # created on first run. ON_ERROR_STOP so any failure fails the job.
+          psql "$DEV_DATABASE_URL" -v ON_ERROR_STOP=1 \
+            -c "create table if not exists public._keepalive (id smallint primary key default 1, pinged_at timestamptz not null default now(), source text);" \
+            -c "insert into public._keepalive (id, pinged_at, source) values (1, now(), 'github-actions') on conflict (id) do update set pinged_at = excluded.pinged_at, source = excluded.source;" \
+            -c "select id, pinged_at, source from public._keepalive;"
+          echo "OK: dev Supabase pinged at $(date -u +%FT%TZ)"
