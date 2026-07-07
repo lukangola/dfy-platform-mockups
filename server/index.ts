@@ -21,7 +21,7 @@ import { listiclesRouter } from "./routes/listicles.js";
 import { teamRouter } from "./routes/team.js";
 import { isNull } from "drizzle-orm";
 import { messageTestingRouter } from "./routes/messageTesting.js";
-import { productsRouter, sweepOrphanedMechanismExtractions } from "./routes/products.js";
+import { productsRouter, sweepOrphanedMechanismExtractions, sweepOrphanedProductPipelines } from "./routes/products.js";
 import { shareRouter } from "./routes/share.js";
 import { staticAdsRouter } from "./routes/staticAds.js";
 import { staticAdsIterationsRouter } from "./routes/staticAdsIterations.js";
@@ -330,6 +330,27 @@ async function startServer() {
       }
     } catch (err) {
       console.error("[characters] boot ingest failed:", err);
+    }
+  })();
+
+  // Research / reference-sheet rescue sweep. Product research and the
+  // reference-sheet generator are fire-and-forget in-process promises, so a
+  // deploy or crash mid-run leaves the row stuck on "researching"/"running"
+  // forever (the UI spinner never resolves). In production we RESUME the
+  // orphaned pipeline (research re-chains reference sheet + mechanism, so a
+  // recovered product runs the whole way through); in dev — where tsx watch
+  // restarts on every file save — we mark them failed with a retry hint
+  // instead, so editing code doesn't fire a Claude research run per save.
+  void (async () => {
+    try {
+      const result = await sweepOrphanedProductPipelines({ resume: !isDev });
+      if (result.research > 0 || result.referenceSheets > 0) {
+        console.log(
+          `[products] research sweep: ${isDev ? "marked failed" : "resumed"} ${result.research} orphaned research run(s), ${result.referenceSheets} orphaned reference sheet(s)`,
+        );
+      }
+    } catch (err) {
+      console.error("[products] research sweep failed (non-fatal):", err);
     }
   })();
 

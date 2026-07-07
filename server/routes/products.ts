@@ -2124,6 +2124,77 @@ export function maybeTriggerMechanismExtraction(
 }
 
 /**
+ * Boot-time sweep for RESEARCH + REFERENCE-SHEET crash orphans.
+ *
+ * Product research and reference-sheet generation are fire-and-forget
+ * in-process promises (`void runResearch(...)` / `void
+ * runReferenceSheetGeneration(...)`). A deploy or crash mid-run kills the
+ * promise with the process, but the DB still says "researching" / "running" —
+ * so the UI spins forever and nothing ever finishes. (This is exactly what
+ * happened to a freshly-added brand's product when a deploy landed while its
+ * research was in flight.) At boot nothing can legitimately be in one of
+ * those states, so every one is an orphan from the previous process.
+ *
+ * `resume: true` (production) re-kicks the pipeline: runResearch re-chains
+ * reference sheet + mechanism on completion, so a resumed product runs the
+ * whole way through. `resume: false` (dev — tsx watch restarts on every file
+ * save, and auto-resume would kick off a fresh Claude research run per save
+ * only for the next save to kill it) marks orphans "failed" with a clear
+ * retry hint instead.
+ */
+export async function sweepOrphanedProductPipelines(opts: { resume: boolean }): Promise<{
+  research: number;
+  referenceSheets: number;
+}> {
+  let research = 0;
+  let referenceSheets = 0;
+  const all = await db.select().from(schema.products);
+  for (const p of all) {
+    const r = (p.research ?? {}) as Record<string, unknown>;
+    if (p.researchStatus === "researching") {
+      research++;
+      if (opts.resume) {
+        console.log(`[products] research sweep: resuming orphaned research for "${p.name}" (${p.id})`);
+        void runResearch(p.id);
+      } else {
+        await db
+          .update(schema.products)
+          .set({
+            researchStatus: "failed",
+            researchError: "Interrupted by a server restart — use Re-run research to restart it.",
+          })
+          .where(eq(schema.products.id, p.id));
+      }
+      // runResearch re-chains reference sheet + mechanism itself — don't
+      // double-trigger them for this product.
+      continue;
+    }
+    const refStatus = (r as { referenceSheetStatus?: string }).referenceSheetStatus;
+    if (refStatus === "running") {
+      referenceSheets++;
+      if (opts.resume) {
+        console.log(`[products] research sweep: resuming orphaned reference sheet for "${p.name}" (${p.id})`);
+        void runReferenceSheetGeneration(p.id);
+      } else {
+        await db
+          .update(schema.products)
+          .set({
+            research: {
+              ...r,
+              referenceSheetStatus: "failed",
+              referenceSheetError: "Interrupted by a server restart — hit Generate to retry.",
+              mechanismStatus: "failed",
+              mechanismError: "Interrupted by a server restart — regenerate the reference sheet to retry.",
+            },
+          })
+          .where(eq(schema.products.id, p.id));
+      }
+    }
+  }
+  return { research, referenceSheets };
+}
+
+/**
  * Boot-time sweep: find every product that has a complete reference sheet
  * but no mechanism and trigger extraction. Runs once at server startup.
  *
