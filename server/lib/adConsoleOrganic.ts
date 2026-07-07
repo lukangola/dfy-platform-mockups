@@ -20,8 +20,9 @@
  * Credit safety mirrors Phase 3: bounded by the niche stream's caps and only
  * ever fired from an explicit manual action — never on boot or any auto path.
  */
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "./db.js";
+import { persistOrganicCover } from "./adConsoleCovers.js";
 import { env } from "./env.js";
 import { DEFAULT_NICHE_CONFIG, type NicheStreamConfig } from "./nicheConfig.js";
 import { listCompetitors } from "./adConsoleCompetitors.js";
@@ -483,7 +484,26 @@ async function upsertOrganicPost(
     .onConflictDoNothing({ target: [schema.organicPosts.source, schema.organicPosts.externalId] })
     .returning({ id: schema.organicPosts.id });
 
-  if (insertedRow) return "inserted";
+  if (insertedRow) {
+    // Re-host the cover on fal.storage NOW, while the signed CDN URL is still
+    // fresh, so the thumbnail never 403s later (TikTok/IG cover URLs expire
+    // within hours). Best-effort: on failure we keep the raw URL and the card
+    // falls back to its placeholder. Only runs for genuinely new rows, so the
+    // download/upload cost is bounded by new posts per pull.
+    const durable = await persistOrganicCover({
+      source: post.source,
+      coverUrl: post.thumbnailUrl,
+      postUrl: post.postUrl,
+      externalId: post.externalId,
+    });
+    if (durable && durable !== post.thumbnailUrl) {
+      await db
+        .update(schema.organicPosts)
+        .set({ thumbnailUrl: durable })
+        .where(eq(schema.organicPosts.id, insertedRow.id));
+    }
+    return "inserted";
+  }
 
   await db
     .update(schema.organicPosts)
@@ -492,7 +512,15 @@ async function upsertOrganicPost(
       profileName: post.profileName,
       postUrl: post.postUrl,
       mediaUrl: post.mediaUrl,
-      thumbnailUrl: post.thumbnailUrl,
+      // Never clobber a cover we've already re-hosted on fal.storage with a
+      // fresh (but still expiring) raw URL — keep the durable one. A legacy row
+      // that isn't durable yet takes the fresh raw URL; the backfill re-hosts it.
+      thumbnailUrl: sql`case
+        when ${schema.organicPosts.thumbnailUrl} like '%fal.media%'
+          or ${schema.organicPosts.thumbnailUrl} like '%fal.storage%'
+        then ${schema.organicPosts.thumbnailUrl}
+        else ${post.thumbnailUrl ?? null}
+      end`,
       caption: post.caption,
       hashtags: post.hashtags,
       views: post.views,

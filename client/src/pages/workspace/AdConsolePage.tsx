@@ -1099,13 +1099,17 @@ function FeedCardView({
                 loading="lazy"
               />
             ) : (
-              // No / expired cover — clean gradient + handle instead of a black
-              // box. The clip is still watchable via the platform embed on click.
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-white/[0.07] via-transparent to-white/[0.02]">
-                <Flame size={20} className="text-white/20" />
-                <span className="px-4 max-w-full truncate text-[10px] font-mono text-white/35 text-center">
-                  {handle ?? advertiser}
-                </span>
+              // No / unresolvable cover — a clean, intentional card, NOT a black
+              // box. Real covers are re-hosted on fal.storage at ingest so they
+              // never expire; this only shows for the rare post whose cover can't
+              // be recovered. The caption bar sits BELOW the centered play button
+              // so it's never hidden. The clip still plays via the embed on click.
+              <div className="absolute inset-0 bg-gradient-to-br from-[#1b2331] via-[#141a24] to-[#0d1014]">
+                <Flame size={56} className="absolute left-1/2 top-[28%] -translate-x-1/2 -translate-y-1/2 text-white/[0.06]" />
+                <div className="absolute inset-x-0 bottom-0 p-3 bg-gradient-to-t from-black/70 via-black/20 to-transparent">
+                  <div className="text-[10px] font-mono uppercase tracking-wide text-cyan-300/55">{platformLabel}</div>
+                  <div className="truncate text-sm font-medium text-white/85">{handle ?? advertiser}</div>
+                </div>
               </div>
             )}
             <div className="absolute inset-0 flex items-center justify-center bg-black/15 group-hover/play:bg-black/30 transition-colors">
