@@ -22,7 +22,7 @@
  */
 import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "./db.js";
-import { persistOrganicCover } from "./adConsoleCovers.js";
+import { isDurableCoverUrl, persistOrganicCover } from "./adConsoleCovers.js";
 import { env } from "./env.js";
 import { DEFAULT_NICHE_CONFIG, type NicheStreamConfig } from "./nicheConfig.js";
 import { listCompetitors } from "./adConsoleCompetitors.js";
@@ -537,6 +537,32 @@ async function upsertOrganicPost(
       updatedAt: new Date(),
     })
     .where(and(eq(schema.organicPosts.source, post.source), eq(schema.organicPosts.externalId, post.externalId)));
+
+  // Re-host on the UPDATE path too. Without this, a legacy row that predates
+  // durable covers keeps receiving a fresh-but-expiring raw URL on every
+  // weekly re-pull and NEVER becomes durable — this matters most for
+  // Instagram, which (unlike TikTok) has no public oEmbed to backfill from,
+  // so the re-pull moment is the only time its cover is fetchable. Skipped
+  // when the stored cover is already durable (the CASE above kept it).
+  const [current] = await db
+    .select({ id: schema.organicPosts.id, thumbnailUrl: schema.organicPosts.thumbnailUrl })
+    .from(schema.organicPosts)
+    .where(and(eq(schema.organicPosts.source, post.source), eq(schema.organicPosts.externalId, post.externalId)))
+    .limit(1);
+  if (current?.thumbnailUrl && !isDurableCoverUrl(current.thumbnailUrl)) {
+    const durable = await persistOrganicCover({
+      source: post.source,
+      coverUrl: current.thumbnailUrl,
+      postUrl: post.postUrl,
+      externalId: post.externalId,
+    });
+    if (durable && durable !== current.thumbnailUrl) {
+      await db
+        .update(schema.organicPosts)
+        .set({ thumbnailUrl: durable })
+        .where(eq(schema.organicPosts.id, current.id));
+    }
+  }
 
   return "updated";
 }
