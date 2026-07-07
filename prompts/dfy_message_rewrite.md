@@ -34,13 +34,13 @@ This is a rewrite job, not a research job. The authentic voice has already been 
    - Tight: one line, roughly **under 120 characters**. Cut filler, keep the punch.
    - Specific: keep the concrete detail that made the original land (the "2pm crash", "hands shake so bad I can't type", etc.).
 3. Ignore and drop any ` — [↗](url)` source-link markup from the input. Output clean message text only — **no links, no citations, no bullet markers, no numbering.**
-4. Select the **10 strongest, most distinct** statements and rewrite those. Output **exactly 10 messages — never more than 10.** If you genuinely have fewer than 10 strong, distinct statements, output only the strong ones (fewer is fine), but never exceed 10. Skip weak, vague, or near-duplicate statements — quality over quota.
+4. Select the **10 strongest, most distinct** statements and rewrite those. Output **exactly 10 messages — never more, never fewer.** If you have fewer than 10 strong, distinct statements, still deliver 10: first rewrite every strong statement once, then fill the remaining slots with **alternate takes on the strongest statements** — a different facet, moment, or phrasing of the SAME real pain (the bedtime version vs. the morning version of the same complaint, the "what strangers see" version vs. the "what I feel" version). A variation must never introduce a claim, symptom, or benefit that isn't already in a mined statement. Skip weak, vague, or near-duplicate statements when picking your strong pool — quality first, then top up with grounded variations.
 
 ---
 
 ## OUTPUT FORMAT
 
-- **At most 10 lines total — never output more than 10 messages.** Aim for exactly 10 (the 10 strongest, most distinct).
+- **Exactly 10 lines total — never more, never fewer.** When the statement pool is thin, the last lines are grounded variations of the strongest statements (see rule 4).
 - Output **one rewritten message per line**, nothing else.
 - **No `Angle:` line. No heading, no angle name, no title.** Do not restate the angle.
 - No bullets, no numbers, no intro ("Here are…"), no count, no commentary, no blank lines between messages.

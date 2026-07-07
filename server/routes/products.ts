@@ -56,7 +56,7 @@ function sendError(res: Response, status: number, message: string) {
 // addition to its `block` (the elaborated "Description"):
 //   - statements → authentic customer resonance statements (dfy_resonance.md,
 //                  web-mined from Reddit / reviews / forums / social comments)
-//   - messages   → 10 first-person ad messages (message_testing_copy.md)
+//   - messages   → 10 first-person ad messages (dfy_message_rewrite.md — rewrites the mined statements)
 //   - adCopy     → a complete primary ad (primary_ad_copy.md)
 // Generation is per-angle (one Claude call per angle per kind) so each angle's
 // artifact has isolated status/error and can be regenerated independently —
@@ -1636,7 +1636,7 @@ async function autoGenerateAngleArtifacts(
  * its only input so the whole model output IS that angle's artifact (no
  * fragile cross-angle parsing):
  *   - statements → dfy_resonance.md      (web-mines authentic customer voice)
- *   - messages   → message_testing_copy.md (10 first-person ad messages)
+ *   - messages   → dfy_message_rewrite.md (rewrites mined statements into exactly 10 messages)
  *   - adCopy     → primary_ad_copy.md    (one complete primary ad)
  *
  * On success: caches content + status "complete". On failure: status "failed"
