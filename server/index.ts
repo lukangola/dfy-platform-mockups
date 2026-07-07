@@ -344,9 +344,9 @@ async function startServer() {
   void (async () => {
     try {
       const result = await sweepOrphanedProductPipelines({ resume: !isDev });
-      if (result.research > 0 || result.referenceSheets > 0) {
+      if (result.research > 0 || result.referenceSheets > 0 || result.angleArtifacts > 0) {
         console.log(
-          `[products] research sweep: ${isDev ? "marked failed" : "resumed"} ${result.research} orphaned research run(s), ${result.referenceSheets} orphaned reference sheet(s)`,
+          `[products] research sweep: ${isDev ? "marked failed" : "resumed"} ${result.research} orphaned research run(s), ${result.referenceSheets} orphaned reference sheet(s), ${result.angleArtifacts} orphaned angle artifact(s)`,
         );
       }
     } catch (err) {

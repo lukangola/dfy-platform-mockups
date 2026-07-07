@@ -2145,9 +2145,11 @@ export function maybeTriggerMechanismExtraction(
 export async function sweepOrphanedProductPipelines(opts: { resume: boolean }): Promise<{
   research: number;
   referenceSheets: number;
+  angleArtifacts: number;
 }> {
   let research = 0;
   let referenceSheets = 0;
+  let angleArtifacts = 0;
   const all = await db.select().from(schema.products);
   for (const p of all) {
     const r = (p.research ?? {}) as Record<string, unknown>;
@@ -2165,10 +2167,70 @@ export async function sweepOrphanedProductPipelines(opts: { resume: boolean }): 
           })
           .where(eq(schema.products.id, p.id));
       }
-      // runResearch re-chains reference sheet + mechanism itself — don't
-      // double-trigger them for this product.
+      // runResearch re-chains reference sheet + mechanism + angle artifacts
+      // itself — don't double-trigger any of them for this product.
       continue;
     }
+
+    // Angle artifacts (statements / messages / adCopy) are fire-and-forget
+    // too — autoGenerateAngleArtifacts chains them after research, and the
+    // per-angle endpoint kicks them on demand. A restart mid-run strands the
+    // artifact at "running", which makes the Message Testing app poll that
+    // angle for its full timeout on every open ("loading forever"). Resume
+    // them in the same statements → messages → adCopy order the auto-chain
+    // uses (messages are rewritten from the mined statements), sequentially
+    // per product to avoid racing the research JSON read-modify-write.
+    const sweepAngles = Array.isArray((r as { angles?: unknown }).angles)
+      ? ((r as { angles: StoredAngle[] }).angles)
+      : [];
+    const stuckArtifacts: Array<{ angleId: string; kind: AngleArtifactKind }> = [];
+    for (const angle of sweepAngles) {
+      if (!angle?.id) continue;
+      for (const kind of ANGLE_ARTIFACT_KINDS) {
+        if (angle.artifacts?.[kind]?.status === "running") {
+          stuckArtifacts.push({ angleId: angle.id, kind });
+        }
+      }
+    }
+    if (stuckArtifacts.length > 0) {
+      angleArtifacts += stuckArtifacts.length;
+      if (opts.resume) {
+        console.log(
+          `[products] research sweep: resuming ${stuckArtifacts.length} orphaned angle artifact(s) for "${p.name}" (${p.id})`,
+        );
+        void (async () => {
+          for (const s of stuckArtifacts) {
+            // runAngleArtifact swallows its own errors (writes "failed").
+            await runAngleArtifact(p.id, s.angleId, s.kind);
+          }
+        })();
+      } else {
+        const stuckByAngle = new Map<string, Set<AngleArtifactKind>>();
+        for (const s of stuckArtifacts) {
+          const set = stuckByAngle.get(s.angleId) ?? new Set<AngleArtifactKind>();
+          set.add(s.kind);
+          stuckByAngle.set(s.angleId, set);
+        }
+        const healed = sweepAngles.map((angle) => {
+          const kinds = angle?.id ? stuckByAngle.get(angle.id) : undefined;
+          if (!kinds) return angle;
+          const artifacts = { ...(angle.artifacts ?? {}) };
+          for (const kind of Array.from(kinds)) {
+            artifacts[kind] = {
+              ...(artifacts[kind] ?? {}),
+              status: "failed",
+              error: "Interrupted by a server restart — hit Generate/Regenerate to retry.",
+            };
+          }
+          return { ...angle, artifacts };
+        });
+        await db
+          .update(schema.products)
+          .set({ research: { ...r, angles: healed } })
+          .where(eq(schema.products.id, p.id));
+      }
+    }
+
     const refStatus = (r as { referenceSheetStatus?: string }).referenceSheetStatus;
     if (refStatus === "running") {
       referenceSheets++;
@@ -2191,7 +2253,7 @@ export async function sweepOrphanedProductPipelines(opts: { resume: boolean }): 
       }
     }
   }
-  return { research, referenceSheets };
+  return { research, referenceSheets, angleArtifacts };
 }
 
 /**
