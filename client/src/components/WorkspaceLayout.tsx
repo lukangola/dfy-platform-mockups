@@ -156,6 +156,10 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
                       {runningJobs}
                     </span>
                   )}
+                  {/* Collapsed sidebar has no room for a count — show a passive running dot. */}
+                  {item.id === "dashboard" && runningJobs > 0 && collapsed && (
+                    <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                  )}
                   {active && (
                     <motion.div
                       layoutId="sidebar-active"
