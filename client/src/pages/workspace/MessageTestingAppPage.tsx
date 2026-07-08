@@ -7,7 +7,7 @@
  *   4. Review All Generated Ads
  *   5. Export
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -18,8 +18,10 @@ import {
   Plus,
 } from "lucide-react";
 import {
+  createJob, getJob, listJobs,
   listProducts, getProductAngles, generateMessageTestingCopy, generateImage,
   getReferenceStyle, saveBrandAssets,
+  type Job, type JobItem,
   type Product, type ProductAngle, type MessageAngleGroup,
 } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
@@ -106,6 +108,19 @@ type LiveAd = {
   status: AdStatus;
   imageUrl?: string;
   error?: string;
+};
+
+/** LiveAd fields snapshotted into the job payload (null instead of undefined
+ *  so the shape survives JSON round-trips) — enough for hydrateFromJob to
+ *  rebuild the review grid without any other fetch. Includes angleName so the
+ *  Dashboard's item labels and the restored grid both know their angle. */
+type AdSnapshot = {
+  id: string;
+  angleName: string;
+  message: string;
+  status: AdStatus;
+  imageUrl: string | null;
+  error: string | null;
 };
 
 // ── Ad Card ────────────────────────────────────────────────────
@@ -327,6 +342,31 @@ export default function MessageTestingAppPage() {
   const [exported, setExported] = useState(false);
   const [collapsedAngles, setCollapsedAngles] = useState<Set<string>>(new Set());
 
+  // Durable jobs: ad-image batches run server-side (survive reload + deploys).
+  // The page tracks the active job ids and mirrors item state onto ads via
+  // the poll effect below. Multiple ids can be live at once — the batch plus
+  // single-ad regenerates fired off already-finished cards.
+  const [activeJobIds, setActiveJobIds] = useState<string[]>([]);
+  // Unfinished-session banner: newest queued/running message_testing job for
+  // this brand, offered as a one-click resume when the page isn't tracking a job.
+  const [resumableJob, setResumableJob] = useState<Job | null>(null);
+  // Job orchestration errors (create/hydrate failures) — per-ad generation
+  // errors still render on the cards themselves.
+  const [jobError, setJobError] = useState<string | null>(null);
+  // Synchronous re-entrancy guard for the batch creator: activeJobIds only
+  // gains the id once createJob returns, so without this a second click
+  // during the awaits (adoptUnfinishedJob, createJob) double-creates a job.
+  const generateInFlightRef = useRef(false);
+  // adId → id of the job that most recently targeted it. Two live jobs can
+  // both hold an item for the same ad (the original batch + a later single-ad
+  // regenerate); without this the still-polled batch item would stomp the
+  // regenerate's spinner/result with the old output every tick.
+  const jobOwnerRef = useRef<Map<string, string>>(new Map());
+  // Set by hydrateFromJob just before it switches the product, so the
+  // product-change effect below keeps the restored session state instead of
+  // resetting it for a fresh product.
+  const hydratingRef = useRef(false);
+
   // Fetch products for the active brand.
   useEffect(() => {
     if (!activeBrandId) return;
@@ -386,21 +426,29 @@ export default function MessageTestingAppPage() {
       setTemplatePreviewError(null);
       return;
     }
+    // hydrateFromJob switches the product as part of restoring a saved
+    // session — keep the restored messages/preview/angle selection instead of
+    // resetting them for a fresh product (still fetch the angle list so the
+    // step-1/2 UIs work if the user navigates back).
+    const hydrating = hydratingRef.current;
+    hydratingRef.current = false;
     let cancelled = false;
     setAnglesLoading(true);
     setAnglesError(null);
-    setMessageGroups(null);
-    setCopyError(null);
-    setConfirmedAngleNames(new Set());
-    setTemplateFeedback("");
-    setTemplatePreviewUrl(null);
-    setTemplatePreviewError(null);
+    if (!hydrating) {
+      setMessageGroups(null);
+      setCopyError(null);
+      setConfirmedAngleNames(new Set());
+      setTemplateFeedback("");
+      setTemplatePreviewUrl(null);
+      setTemplatePreviewError(null);
+    }
     (async () => {
       try {
         const { angles: fetched } = await getProductAngles(selectedProductId);
         if (!cancelled) {
           setAngles(fetched);
-          setSelectedAngleNames(fetched.map((a) => a.name));
+          if (!hydrating) setSelectedAngleNames(fetched.map((a) => a.name));
         }
       } catch (err) {
         if (!cancelled) setAnglesError(err instanceof Error ? err.message : String(err));
@@ -568,6 +616,8 @@ export default function MessageTestingAppPage() {
   };
 
   // Render a single-message preview using the current template + feedback.
+  // Deliberately a DIRECT call, not a durable job: it's a quick, iterative
+  // step-3 loop that auto-kicks on step entry — jobs would spam the dashboard.
   async function regenerateTemplatePreview() {
     if (!selectedProduct) return;
     const firstGroup = messageGroups?.find((g) => selectedAngleNames.includes(g.name));
@@ -595,69 +645,316 @@ export default function MessageTestingAppPage() {
     }
   }
 
-  // Step 3 → 4: kick off batch generation. CRITICAL: snapshot the approved preview
-  // image — every batch ad is generated from THAT exact image, only the headline
-  // changes. Guarantees visual consistency across the whole set.
-  const handleGenerateAll = () => {
-    if (!selectedProduct || !messageGroups) return;
+  // ---------- Durable-job machinery (mirrors StaticAdsAppPage) ----------
+
+  /** Session snapshot stored on every job — enough for hydrateFromJob to
+   *  restore the review grid (config chips + ad cards) without any other
+   *  fetch. Item outputs overlay whatever finished after the snapshot.
+   *  `approvedRef` is passed explicitly: at batch kick the state setter for
+   *  approvedReferenceUrl hasn't committed yet. */
+  function buildSessionPayload(ads: LiveAd[], approvedRef: string | null) {
+    return {
+      productId: selectedProductId,
+      productName: selectedProduct?.name ?? null,
+      angleNames: selectedAngleNames,
+      messageGroups,
+      approvedReferenceUrl: approvedRef,
+      templatePreviewUrl,
+      // Snapshots are always taken from (or headed to) the review grid.
+      step: 4,
+      ads: ads.map((a): AdSnapshot => ({
+        id: a.id,
+        angleName: a.angleName,
+        message: a.message,
+        status: a.status,
+        imageUrl: a.imageUrl ?? null,
+        error: a.error ?? null,
+      })),
+    };
+  }
+
+  /** item.input for the message_testing_images executor: a generic
+   *  model+falInput passthrough, plus adId so poll ticks can map the item
+   *  back onto its card. */
+  function buildJobItem(ad: LiveAd, approvedRef: string) {
+    const prompt = REFERENCE_TEMPLATE.batchComposition(ad.message, templateFeedback);
+    const { model, input } = buildAdInput(prompt, [approvedRef]);
+    return {
+      label: `${ad.message.slice(0, 60)} (${ad.angleName})`,
+      input: { adId: ad.id, kind: "image", model, falInput: input },
+    };
+  }
+
+  /** Mirror a job item's state onto its ad card. A finished generation lands
+   *  in "pending" (awaiting review) with the image URL — exactly the status
+   *  the old direct-call path assigned. */
+  function applyItemToAd(it: JobItem) {
+    const adId = (it.input as { adId?: string }).adId;
+    if (!adId) return;
+    // Only the job that most recently targeted this ad may write to it — see
+    // jobOwnerRef. (An owner is recorded on every create/adopt, so a missing
+    // owner just means "apply".)
+    const owner = jobOwnerRef.current.get(adId);
+    if (owner && owner !== it.jobId) return;
+    const out = (it.output ?? {}) as { url?: string };
+    if (it.status === "complete" && out.url) {
+      setGeneratedAds((prev) =>
+        prev.map((a) =>
+          a.id === adId && a.status === "generating"
+            ? { ...a, status: "pending", imageUrl: out.url, error: undefined }
+            : a,
+        ),
+      );
+    } else if (it.status === "failed") {
+      setGeneratedAds((prev) =>
+        prev.map((a) =>
+          a.id === adId && a.status === "generating"
+            ? { ...a, status: "failed", error: it.error ?? "Generation failed" }
+            : a,
+        ),
+      );
+    }
+  }
+
+  // Poll all active jobs every 2.5s (the app's standard cadence) and mirror
+  // item states onto ads; drop each job from the active set once it reaches a
+  // terminal status.
+  useEffect(() => {
+    if (activeJobIds.length === 0) return;
+    let cancelled = false;
+    const pollOne = async (jobId: string) => {
+      try {
+        const { job, items } = await getJob(jobId);
+        if (cancelled) return;
+        for (const it of items) applyItemToAd(it);
+        if (job.status !== "queued" && job.status !== "running") {
+          setActiveJobIds((prev) => prev.filter((id) => id !== jobId));
+        }
+      } catch {
+        /* transient — next tick retries */
+      }
+    };
+    const tick = () => {
+      for (const id of activeJobIds) void pollOne(id);
+    };
+    tick();
+    const t = setInterval(tick, 2500);
+    return () => { cancelled = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeJobIds]);
+
+  /**
+   * Restore the full review session from a job: the payload snapshot provides
+   * the config + ad cards as of trigger time; item outputs overlay whatever
+   * finished after the snapshot. Adopts the job as a poll target when it is
+   * still running and moves the user to the review step.
+   */
+  async function hydrateFromJob(jobId: string) {
+    const { job, items } = await getJob(jobId);
+    const payload = job.payload as {
+      productId?: string | null;
+      productName?: string | null;
+      angleNames?: string[];
+      messageGroups?: MessageAngleGroup[];
+      approvedReferenceUrl?: string | null;
+      templatePreviewUrl?: string | null;
+      step?: number;
+      ads?: AdSnapshot[];
+    };
+    // Restore the step-1..3 config so the summary chips render and
+    // post-resume regenerates aren't product/template-blind. hydratingRef
+    // stops the product-change effect from wiping the state set below.
+    if (payload.productId && payload.productId !== selectedProductId) {
+      hydratingRef.current = true;
+      setSelectedProductId(payload.productId);
+    }
+    if (payload.angleNames?.length) {
+      setSelectedAngleNames(payload.angleNames);
+      // Reaching the review grid implies every restored angle was confirmed.
+      setConfirmedAngleNames(new Set(payload.angleNames));
+    }
+    if (payload.messageGroups?.length) setMessageGroups(payload.messageGroups);
+    if (payload.approvedReferenceUrl) setApprovedReferenceUrl(payload.approvedReferenceUrl);
+    if (payload.templatePreviewUrl) setTemplatePreviewUrl(payload.templatePreviewUrl);
+    // A job can be adopted well after it ended. If the job is no longer
+    // active, any item still pending/running will never be picked up by a
+    // worker — mapping those to "generating" would spin forever, so treat
+    // them as failed with a retry hint instead.
+    const jobIsActive = job.status === "queued" || job.status === "running";
+    const byAdId = new Map(items.map((it) => [(it.input as { adId?: string }).adId, it] as const));
+    const restored: LiveAd[] = (payload.ads ?? []).map((snap) => {
+      const base: LiveAd = {
+        id: snap.id,
+        angleName: snap.angleName,
+        message: snap.message,
+        status: snap.status,
+        imageUrl: snap.imageUrl ?? undefined,
+        error: snap.error ?? undefined,
+      };
+      const it = byAdId.get(snap.id);
+      if (it) {
+        const out = (it.output ?? {}) as { url?: string };
+        if (it.status === "complete" && out.url) {
+          return { ...base, status: "pending" as const, imageUrl: out.url, error: undefined };
+        }
+        if (it.status === "failed") {
+          return { ...base, status: "failed" as const, imageUrl: undefined, error: it.error ?? "Generation failed" };
+        }
+        return jobIsActive
+          ? { ...base, status: "generating" as const, error: undefined }
+          : { ...base, status: "failed" as const, imageUrl: undefined, error: "Interrupted — job ended before this ad finished. Regenerate to retry." };
+      }
+      // Not an item of THIS job — the snapshot state stands, except an ad
+      // that was generating under some other job can no longer be tracked.
+      if (base.status === "generating") {
+        return { ...base, status: "failed" as const, imageUrl: undefined, error: "Interrupted — this ad was still generating when the session was saved. Regenerate to retry." };
+      }
+      return base;
+    });
+    setGeneratedAds(restored);
+    setChatAd(null);
+    setExported(false);
+    setCollapsedAngles(new Set());
+    if (jobIsActive) {
+      for (const it of items) {
+        const aid = (it.input as { adId?: string }).adId;
+        if (aid) jobOwnerRef.current.set(aid, job.id);
+      }
+      setActiveJobIds([job.id]);
+    } else {
+      setActiveJobIds([]);
+    }
+    setStep(typeof payload.step === "number" ? payload.step : 4);
+  }
+
+  /** Returns true when an unfinished message_testing job for the current
+   *  product was handled — adopted (session hydrated, poll target set), or
+   *  found but adoption failed (error surfaced; never fall through to
+   *  creating a duplicate over a live job). Returns false only when there is
+   *  nothing to adopt, so a normal create may proceed. */
+  async function adoptUnfinishedJob(): Promise<boolean> {
+    if (!activeBrandId) return false;
+    let candidate: Job | undefined;
+    try {
+      const { jobs } = await listJobs(activeBrandId);
+      candidate = jobs.find(
+        (x) =>
+          x.app === "message_testing" &&
+          x.type === "message_testing_images" &&
+          (x.status === "queued" || x.status === "running") &&
+          (((x.payload as { productId?: string | null }).productId ?? null) === (selectedProductId || null)),
+      );
+    } catch {
+      // Couldn't check — proceed with a normal create rather than blocking the user.
+      return false;
+    }
+    if (!candidate) return false;
+    try {
+      await hydrateFromJob(candidate.id);
+    } catch (err) {
+      setJobError(err instanceof Error ? err.message : String(err));
+    }
+    return true;
+  }
+
+  // Deep link from the dashboard: ?job=<id> restores that session.
+  useEffect(() => {
+    const jobId = new URLSearchParams(window.location.search).get("job");
+    if (jobId) {
+      void hydrateFromJob(jobId).catch((err) =>
+        setJobError(err instanceof Error ? err.message : String(err)),
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Unfinished-session banner source: newest queued/running message_testing job.
+  useEffect(() => {
+    if (!activeBrandId) return;
+    let cancelled = false;
+    void listJobs(activeBrandId)
+      .then(({ jobs }) => {
+        if (cancelled) return;
+        const j = jobs.find(
+          (x) => x.app === "message_testing" && x.type === "message_testing_images" && (x.status === "queued" || x.status === "running"),
+        );
+        setResumableJob(j ?? null);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeBrandId]);
+
+  // Step 3 → 4: kick off batch generation as ONE durable job (was: a
+  // client-side worker pool of direct calls). CRITICAL: snapshot the approved
+  // preview image — every batch ad is generated from THAT exact image, only
+  // the headline changes. Guarantees visual consistency across the whole set.
+  const handleGenerateAll = async () => {
+    if (!selectedProduct || !messageGroups || !activeBrandId) return;
     if (!templatePreviewUrl) {
       toast.error("Regenerate the template preview before generating all ads.");
       return;
     }
+    if (activeJobIds.length > 0) return;
+    // Synchronous in-flight guard — activeJobIds only gains the id once
+    // createJob returns, so a concurrent second click would race through the
+    // awaits below and create a duplicate job.
+    if (generateInFlightRef.current) return;
+    generateInFlightRef.current = true;
+    try {
+      // Duplicate-guard: a reload loses activeJobIds, and re-walking the flow
+      // re-enters this path while the original batch may still be running
+      // server-side. Adopt that job instead of paying for a second one.
+      if (await adoptUnfinishedJob()) return;
 
-    const seeds: LiveAd[] = [];
-    for (const group of messageGroups) {
-      if (!selectedAngleNames.includes(group.name)) continue;
-      group.messages.forEach((message, idx) => {
-        seeds.push({
-          id: `${group.name}-${idx}`,
-          angleName: group.name,
-          message,
-          status: "generating",
+      const seeds: LiveAd[] = [];
+      for (const group of messageGroups) {
+        if (!selectedAngleNames.includes(group.name)) continue;
+        group.messages.forEach((message, idx) => {
+          seeds.push({
+            id: `${group.name}-${idx}`,
+            angleName: group.name,
+            message,
+            status: "generating",
+          });
         });
-      });
-    }
-    if (seeds.length === 0) {
-      toast.error("No messages to generate.");
-      return;
-    }
-
-    // Freeze the approved preview as the canonical reference for this batch.
-    const approved = templatePreviewUrl;
-    setApprovedReferenceUrl(approved);
-    setGeneratedAds(seeds);
-    setStep(4);
-
-    void runImageGeneration(seeds, templateFeedback, approved);
-  };
-
-  async function runImageGeneration(seeds: LiveAd[], feedback: string, approvedRef: string) {
-    const CONCURRENCY = 3;
-
-    let index = 0;
-    async function worker() {
-      while (index < seeds.length) {
-        const i = index++;
-        const seed = seeds[i];
-        try {
-          const prompt = REFERENCE_TEMPLATE.batchComposition(seed.message, feedback);
-          const { model, input } = buildAdInput(prompt, [approvedRef]);
-          const res = await generateImage("message_ad", { input, model });
-          const url = res.urls[0];
-          setGeneratedAds((prev) =>
-            prev.map((a) => (a.id === seed.id ? { ...a, status: "pending", imageUrl: url } : a))
-          );
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          setGeneratedAds((prev) =>
-            prev.map((a) => (a.id === seed.id ? { ...a, status: "failed", error: msg } : a))
-          );
-        }
       }
-    }
+      if (seeds.length === 0) {
+        toast.error("No messages to generate.");
+        return;
+      }
 
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, seeds.length) }, worker));
-  }
+      // Freeze the approved preview as the canonical reference for this batch.
+      const approved = templatePreviewUrl;
+      setApprovedReferenceUrl(approved);
+      setGeneratedAds(seeds);
+      setJobError(null);
+      setStep(4);
+
+      try {
+        const { job } = await createJob({
+          app: "message_testing",
+          type: "message_testing_images",
+          brandId: activeBrandId,
+          productId: selectedProductId || null,
+          title: `Message testing — ${seeds.length} ad${seeds.length === 1 ? "" : "s"}`,
+          payload: buildSessionPayload(seeds, approved),
+          items: seeds.map((ad) => buildJobItem(ad, approved)),
+        });
+        for (const ad of seeds) jobOwnerRef.current.set(ad.id, job.id);
+        setActiveJobIds((prev) => [...prev, job.id]);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setJobError(msg);
+        // Roll the optimistic "generating" cards into failed so they stay
+        // actionable — each card's Regenerate fires a fresh single-item job.
+        setGeneratedAds((prev) =>
+          prev.map((a) => (a.status === "generating" ? { ...a, status: "failed", error: msg } : a)),
+        );
+      }
+    } finally {
+      generateInFlightRef.current = false;
+    }
+  };
 
   const handleApproveAd = (adId: string) => {
     setGeneratedAds((prev) =>
@@ -674,29 +971,52 @@ export default function MessageTestingAppPage() {
     toast.success("All ready ads approved");
   };
 
+  // Single-ad regenerate → a 1-item durable job. Runs alongside a still-active
+  // batch (each card is independent), which is why activeJobIds is a set-like
+  // array rather than a single id.
   const handleRegenerateAd = async (adId: string) => {
-    if (!selectedProduct) return;
+    if (!selectedProduct || !activeBrandId) return;
     const target = generatedAds.find((a) => a.id === adId);
     if (!target) return;
+    // Double-click guard: the ad flips to "generating" synchronously below,
+    // so a re-entrant click can't fire a duplicate job while createJob is
+    // still in flight.
+    if (target.status === "generating") return;
     const approvedRef = approvedReferenceUrl ?? templatePreviewUrl;
     if (!approvedRef) {
       toast.error("No approved template reference — go back to step 3 and regenerate the preview.");
       return;
     }
-    setGeneratedAds((prev) =>
-      prev.map((a) => (a.id === adId ? { ...a, status: "generating", error: undefined } : a))
-    );
+    setJobError(null);
+    // Claim ownership BEFORE flipping the ad to "generating": during the
+    // createJob round-trip the batch job (if still polled) would otherwise
+    // still own this ad, and one of its ticks could re-apply the OLD terminal
+    // item to the just-flipped card — after which the rework's output never
+    // lands (applies only touch "generating" ads). The placeholder matches no
+    // job id, so batch ticks are ignored immediately.
+    jobOwnerRef.current.set(adId, `pending:${Date.now()}`);
+    const flip = (a: LiveAd): LiveAd =>
+      a.id === adId ? { ...a, status: "generating", error: undefined } : a;
+    setGeneratedAds((prev) => prev.map(flip));
     try {
-      const prompt = REFERENCE_TEMPLATE.batchComposition(target.message, templateFeedback);
-      const { model, input } = buildAdInput(prompt, [approvedRef]);
-      const res = await generateImage("message_ad", { input, model });
-      const url = res.urls[0];
-      setGeneratedAds((prev) =>
-        prev.map((a) => (a.id === adId ? { ...a, status: "pending", imageUrl: url } : a))
-      );
-      toast("Ad regenerated");
+      const { job } = await createJob({
+        app: "message_testing",
+        type: "message_testing_images",
+        brandId: activeBrandId,
+        productId: selectedProductId || null,
+        title: "Message testing — 1 ad",
+        // Snapshot the WHOLE review grid (with this ad flipped), not just the
+        // reworked card — resuming this job must restore every card.
+        payload: buildSessionPayload(generatedAds.map(flip), approvedRef),
+        items: [buildJobItem(target, approvedRef)],
+      });
+      jobOwnerRef.current.set(adId, job.id);
+      setActiveJobIds((prev) => [...prev, job.id]);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // Hygiene: drop the placeholder — harmless if left (applies skip
+      // non-"generating" ads), but no job ever claimed this ad.
+      jobOwnerRef.current.delete(adId);
       setGeneratedAds((prev) =>
         prev.map((a) => (a.id === adId ? { ...a, status: "failed", error: msg } : a))
       );
@@ -1103,7 +1423,11 @@ export default function MessageTestingAppPage() {
       (n, g) => n + (selectedAngleNames.includes(g.name) ? g.messages.length : 0),
       0
     );
-    const canGenerate = Boolean(templatePreviewUrl) && !templatePreviewLoading && totalMessages > 0;
+    const canGenerate =
+      Boolean(templatePreviewUrl) && !templatePreviewLoading && totalMessages > 0 &&
+      // A live job (batch or single regenerate) blocks a new batch — mirrors
+      // the synchronous guard inside handleGenerateAll.
+      activeJobIds.length === 0;
 
     return (
       <div className="max-w-5xl mx-auto">
@@ -1645,6 +1969,44 @@ export default function MessageTestingAppPage() {
 
       {/* Content */}
       <div className="p-6">
+        {/* Unfinished-session resume banner — hidden while the page is
+            already mirroring a job (then the cards' spinners cover it). */}
+        {resumableJob && activeJobIds.length === 0 && (
+          <div className="mb-4 max-w-5xl mx-auto rounded-md border border-cyan-400/30 bg-cyan-400/10 p-3 flex items-start gap-2">
+            <RotateCcw size={14} className="text-cyan-400 shrink-0 mt-0.5" />
+            <button
+              type="button"
+              onClick={() => {
+                const j = resumableJob;
+                setResumableJob(null);
+                if (j) {
+                  void hydrateFromJob(j.id).catch((err) =>
+                    setJobError(err instanceof Error ? err.message : String(err)),
+                  );
+                }
+              }}
+              className="flex-1 text-left hover:opacity-80 transition-opacity"
+            >
+              <p className="text-[11px] font-mono text-cyan-200/80 break-words">
+                <span className="font-medium text-cyan-200">A generation is still running: {resumableJob.title}</span>
+                {" "}— click to resume this session.
+              </p>
+            </button>
+            <button
+              type="button"
+              onClick={() => setResumableJob(null)}
+              className="p-1 rounded text-cyan-400/60 hover:text-cyan-300 hover:bg-cyan-400/10 transition-colors shrink-0"
+              aria-label="Dismiss resume banner"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        )}
+        {jobError && (
+          <div className="mb-4 max-w-5xl mx-auto rounded-md border border-rose-500/30 bg-rose-500/5 px-4 py-3 text-[11px] font-mono text-rose-400">
+            {jobError}
+          </div>
+        )}
         {step === 1 && renderStep1()}
         {step === 2 && renderStep2()}
         {step === 3 && renderStep3()}
