@@ -10,6 +10,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Package, Palette, LayoutGrid, ChevronLeft, ChevronRight,
   Settings, HelpCircle, FolderOpen, Zap, LogOut, Crown, Shield, Headset, Radar,
+  LayoutDashboard,
 } from "lucide-react";
 import BrandSwitcher from "./BrandSwitcher";
 import { useAuth } from "@/contexts/AuthContext";
@@ -20,6 +21,7 @@ interface WorkspaceLayoutProps {
 }
 
 const NAV_ITEMS = [
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, path: "/workspace/dashboard", description: "Jobs overview" },
   { id: "products", label: "Products", icon: Package, path: "/workspace/products", description: "Product repository" },
   { id: "brand", label: "Brand Info", icon: Palette, path: "/workspace/brand", description: "Brand identity" },
   { id: "apps", label: "Apps", icon: LayoutGrid, path: "/workspace/apps", description: "Tool suite" },
@@ -70,14 +72,17 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
   // Client Console stays DFY-only: it's the client-facing share + feedback
   // surface, only meaningful for done-for-you brands.
   const showClientConsole = isManager && Boolean(activeBrand?.isDfyClient);
-  // Ad Console is pinned to the top; Client Console sits right after Products.
+  // Dashboard is always the first entry — jobs overview lands above
+  // everything else, including the (manager-only) Ad Console pin.
+  // Client Console sits right after Products.
   const navItems = [
+    NAV_ITEMS[0], // Dashboard
     ...(showAdTools ? [AD_CONSOLE_ITEM, AD_PIPELINE_ITEM] : []),
-    NAV_ITEMS[0], // Products
+    NAV_ITEMS[1], // Products
     ...(showClientConsole ? [CLIENT_CONSOLE_ITEM] : []),
-    NAV_ITEMS[1], // Brand Info
-    NAV_ITEMS[2], // Apps
-    ...NAV_ITEMS.slice(3), // Assets, Workflows
+    NAV_ITEMS[2], // Brand Info
+    NAV_ITEMS[3], // Apps
+    ...NAV_ITEMS.slice(4), // Assets, Workflows
   ];
 
   // A nav item matches when the URL is its path or a sub-path of it. Several

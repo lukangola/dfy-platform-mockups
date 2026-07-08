@@ -11,6 +11,7 @@ import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { BrandProvider } from "./contexts/BrandContext";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import WorkspaceLayout from "./components/WorkspaceLayout";
+import DashboardPage from "./pages/workspace/DashboardPage";
 import ProductsPage from "./pages/workspace/ProductsPage";
 import ProductDetailPage from "./pages/workspace/ProductDetailPage";
 import BrandInfoPage from "./pages/workspace/BrandInfoPage";
@@ -90,6 +91,10 @@ function Router() {
       </Route>
 
       {/* Workspace routes — gated. RequireAuth also mounts BrandProvider. */}
+      <Route path="/workspace/dashboard">
+        <RequireAuth><WorkspaceLayout><DashboardPage /></WorkspaceLayout></RequireAuth>
+      </Route>
+
       <Route path="/workspace/products">
         <RequireAuth><WorkspaceLayout><ProductsPage /></WorkspaceLayout></RequireAuth>
       </Route>
