@@ -1286,6 +1286,74 @@ function parseMessagesByAngle(text: string): MessageAngleGroup[] {
   return result;
 }
 
+// ---------- Jobs (durable generation jobs) ----------
+
+export type JobStatus = "queued" | "running" | "complete" | "complete_with_errors" | "failed";
+export type JobItemStatus = "pending" | "running" | "complete" | "failed";
+
+export type Job = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+  brandId: string;
+  userId: string | null;
+  productId: string | null;
+  app: string;
+  type: string;
+  status: JobStatus;
+  title: string;
+  payload: Record<string, unknown>;
+  totalCount: number;
+  doneCount: number;
+  errorCount: number;
+  error: string | null;
+};
+
+export type JobItem = {
+  id: string;
+  jobId: string;
+  idx: number;
+  label: string;
+  status: JobItemStatus;
+  attempts: number;
+  input: Record<string, unknown>;
+  output: {
+    url?: string;
+    model?: string;
+    durationMs?: number;
+    generationId?: string | null;
+    fallbackFrom?: string;
+  } | null;
+  error: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+};
+
+export function createJob(args: {
+  app: string;
+  type: string;
+  brandId: string;
+  productId?: string | null;
+  title: string;
+  payload: Record<string, unknown>;
+  items: Array<{ label: string; input: Record<string, unknown> }>;
+}): Promise<{ job: Job }> {
+  return post<{ job: Job }>("/api/jobs", args);
+}
+
+export function listJobs(brandId: string): Promise<{ jobs: Job[]; runningCount: number }> {
+  return get<{ jobs: Job[]; runningCount: number }>(`/api/jobs?brandId=${encodeURIComponent(brandId)}`);
+}
+
+export function getJob(id: string): Promise<{ job: Job; items: JobItem[] }> {
+  return get<{ job: Job; items: JobItem[] }>(`/api/jobs/${id}`);
+}
+
+export function retryJobItem(jobId: string, itemId: string): Promise<{ ok: true }> {
+  return post<{ ok: true }>(`/api/jobs/${jobId}/items/${itemId}/retry`, {});
+}
+
 // ---------- Static Ad References ----------
 
 export type StaticAdDeconstructionStatus = "pending" | "running" | "complete" | "failed";
