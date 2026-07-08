@@ -6,7 +6,7 @@
  *   POST /api/jobs/:id/items/:itemId/retry → reset one failed item + re-kick
  * All brand-gated via canSeeBrand. Spec: docs/superpowers/specs/2026-07-08-generation-jobs-design.md
  */
-import { and, asc, desc, eq, sql as sqlTag } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql as sqlTag } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { db, schema } from "../lib/db.js";
 import { requireAuth } from "../lib/auth.js";
@@ -18,6 +18,80 @@ function sendError(res: Response, status: number, message: string) {
 }
 
 const JOB_APPS = ["broll", "character_broll", "single_scene", "message_testing", "listicle", "copy_engine", "static_ads"] as const;
+
+// ── Listicle projection ─────────────────────────────────────────────
+//
+// Listicle builds run server-side with their OWN status machine
+// (listicles.status + listicleImages.imageStatus) — they never create jobs
+// rows. For the dashboard we project them READ-ONLY into the jobs list as
+// pseudo-Job rows with id "listicle-<uuid>". The client parses the prefix
+// and deep-links back into the Listicle Builder with ?listicle=<id> instead
+// of ?job=<id>. No writes to the listicles pipeline happen here.
+
+/** listicles.status → job status. drafting/analyzing/images/rendering are in-flight. */
+function listicleJobStatus(status: string): "running" | "complete" | "failed" {
+  if (status === "ready" || status === "deployed") return "complete";
+  if (status === "failed") return "failed";
+  return "running";
+}
+
+/**
+ * Map one listicle row (+ its product name and per-section image counts)
+ * onto the exact serialized shape of a jobs row so the client's Job type
+ * fits unchanged.
+ */
+function projectListicleAsJob(
+  row: schema.Listicle,
+  productName: string | null,
+  counts: { total: number; ready: number; failed: number } | undefined,
+): schema.Job {
+  const status = listicleJobStatus(row.status);
+  const terminal = status !== "running";
+  return {
+    id: `listicle-${row.id}`,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    // The listicles table has no finishedAt; updatedAt is the closest
+    // "when it reached this state" timestamp for terminal rows.
+    finishedAt: terminal ? row.updatedAt : null,
+    brandId: row.brandId,
+    userId: null,
+    productId: row.productId,
+    app: "listicle",
+    type: "listicle_build",
+    status,
+    title: `Listicle — ${productName ?? "untitled"}`,
+    payload: { listicleId: row.id, stage: row.status },
+    totalCount: counts?.total ?? 0,
+    doneCount: counts?.ready ?? 0,
+    errorCount: counts?.failed ?? 0,
+    error: row.error,
+  };
+}
+
+/** Fetch the brand's recent listicles projected as pseudo-Job rows. */
+async function listListicleJobs(brandId: string): Promise<schema.Job[]> {
+  const rows = await db
+    .select({ listicle: schema.listicles, productName: schema.products.name })
+    .from(schema.listicles)
+    .leftJoin(schema.products, eq(schema.products.id, schema.listicles.productId))
+    .where(eq(schema.listicles.brandId, brandId))
+    .orderBy(desc(schema.listicles.createdAt))
+    .limit(20);
+  if (rows.length === 0) return [];
+  const countRows = await db
+    .select({
+      listicleId: schema.listicleImages.listicleId,
+      total: sqlTag<number>`count(*)::int`,
+      ready: sqlTag<number>`count(*) filter (where ${schema.listicleImages.imageStatus} = 'ready')::int`,
+      failed: sqlTag<number>`count(*) filter (where ${schema.listicleImages.imageStatus} = 'failed')::int`,
+    })
+    .from(schema.listicleImages)
+    .where(inArray(schema.listicleImages.listicleId, rows.map((r) => r.listicle.id)))
+    .groupBy(schema.listicleImages.listicleId);
+  const countsById = new Map(countRows.map((c) => [c.listicleId, c]));
+  return rows.map((r) => projectListicleAsJob(r.listicle, r.productName, countsById.get(r.listicle.id)));
+}
 
 export const jobsRouter = Router();
 jobsRouter.use(requireAuth);
@@ -90,8 +164,18 @@ jobsRouter.get("/", async (req: Request, res: Response) => {
         desc(schema.jobs.createdAt),
       )
       .limit(50);
-    const runningCount = rows.filter((j) => j.status === "queued" || j.status === "running").length;
-    res.json({ jobs: rows, runningCount });
+    // Merge in the brand's listicle builds as read-only pseudo-jobs, then
+    // re-sort the combined list with the same running-first-then-newest order
+    // the query above uses (the DB sort only covered the jobs rows).
+    const listicleJobs = await listListicleJobs(brandId);
+    const isActive = (s: string) => s === "queued" || s === "running";
+    const merged = [...rows, ...listicleJobs].sort((a, b) => {
+      const activeDelta = (isActive(a.status) ? 0 : 1) - (isActive(b.status) ? 0 : 1);
+      if (activeDelta !== 0) return activeDelta;
+      return b.createdAt.getTime() - a.createdAt.getTime();
+    });
+    const runningCount = merged.filter((j) => isActive(j.status)).length;
+    res.json({ jobs: merged, runningCount });
   } catch (err) {
     console.error("[jobs] list failed:", err);
     sendError(res, 500, err instanceof Error ? err.message : String(err));
@@ -100,6 +184,11 @@ jobsRouter.get("/", async (req: Request, res: Response) => {
 
 jobsRouter.get("/:id", async (req: Request, res: Response) => {
   try {
+    // Listicle projections ("listicle-<uuid>") are dashboard-only pseudo-jobs
+    // with no jobs/job_items rows. 404 before the uuid lookup below — drizzle
+    // eq() on a uuid column with a non-uuid string THROWS (22P02) rather than
+    // returning no rows, which would surface as a 500.
+    if (req.params.id.startsWith("listicle-")) return sendError(res, 404, "Job not found");
     const [job] = await db.select().from(schema.jobs).where(eq(schema.jobs.id, req.params.id)).limit(1);
     if (!job) return sendError(res, 404, "Job not found");
     const { user, role } = req.auth!;
@@ -119,6 +208,10 @@ jobsRouter.get("/:id", async (req: Request, res: Response) => {
 
 jobsRouter.post("/:id/items/:itemId/retry", async (req: Request, res: Response) => {
   try {
+    // Listicle projections are read-only — retries happen inside the Listicle
+    // Builder, never through the jobs API. Also avoids the uuid-parse throw
+    // (see GET /:id above).
+    if (req.params.id.startsWith("listicle-")) return sendError(res, 404, "Job not found");
     const [job] = await db.select().from(schema.jobs).where(eq(schema.jobs.id, req.params.id)).limit(1);
     if (!job) return sendError(res, 404, "Job not found");
     const { user, role } = req.auth!;

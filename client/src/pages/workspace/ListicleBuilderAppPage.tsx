@@ -235,6 +235,48 @@ export default function ListicleBuilderAppPage() {
     return { l, imgs };
   }
 
+  // Deep link from the dashboard: ?listicle=<id> reopens an existing listicle
+  // (the dashboard projects listicle builds as read-only job rows). Reuses
+  // refreshListicle — the page's existing loader — then seeds the wizard's
+  // setup state from the row and lands on the furthest step the pipeline has
+  // reached. Mount-only, matching the ?job= deep-link pattern in BrollAppPage.
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("listicle");
+    if (!id) return;
+    void (async () => {
+      try {
+        const { l, imgs } = await refreshListicle(id);
+        setMode(l.source);
+        setSelectedProductId(l.productId);
+        setSelectedLanguage(l.language || "en");
+        if (l.destinationUrl) setDestinationUrl(l.destinationUrl);
+        if (l.angleName) setSelectedAngleName(l.angleName);
+        setCopyDraft(l.copyMarkdown ?? "");
+        if (l.source === "winning_ad") {
+          // Rehydrate the analysis-review state so setup renders complete if
+          // the build never got past step 0.
+          setPendingListicleId(l.id);
+          setWinningAdAnalysis(l.winningAdAnalysis);
+          setWinningAdUrl(l.winningAdUrl);
+          setWinningAdType(l.winningAdType);
+          setWinningAdTranscript(l.winningAdTranscript);
+        }
+        if (l.status === "deployed" && l.publishedUrl && l.previewUrl && l.editorUrl) {
+          setDeployResult({ publishedUrl: l.publishedUrl, previewUrl: l.previewUrl, editorUrl: l.editorUrl });
+        }
+        setCurrentStep(
+          l.status === "rendering" || l.status === "ready" || l.status === "deployed" ? 3
+            : l.status === "images" || imgs.length > 0 ? 2
+            : l.copyMarkdown ? 1
+            : 0,
+        );
+      } catch (err) {
+        setPipelineError(err instanceof Error ? err.message : String(err));
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Step 0 → Step 1 (Setup → Confirm copy) ──
   // UX rule: jump to the destination step IMMEDIATELY, then run the slow
   // work in the background. The destination step's render handles the

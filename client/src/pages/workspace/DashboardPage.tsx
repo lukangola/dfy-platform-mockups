@@ -48,6 +48,38 @@ function productName(job: Job): string | null {
   return (job.payload as { productName?: string | null })?.productName ?? null;
 }
 
+/** Pipeline stage for listicle projections (payload.stage, e.g. "images"). */
+function jobStage(job: Job): string | null {
+  const stage = (job.payload as { stage?: string })?.stage;
+  return typeof stage === "string" && stage ? stage : null;
+}
+
+/**
+ * "product · stage · 7/11 items" meta line. Stage only exists on listicle
+ * projections; the item counts are hidden when a listicle has no image rows
+ * yet (totalCount 0 would render a meaningless "0/0 items").
+ */
+function metaLine(job: Job): string {
+  const showCounts = job.totalCount > 0 || !jobStage(job);
+  return [
+    productName(job),
+    jobStage(job),
+    showCounts ? `${job.doneCount + job.errorCount}/${job.totalCount} items` : null,
+  ].filter(Boolean).join(" · ");
+}
+
+/**
+ * Deep-link target. Listicle builds are read-only projections (id
+ * "listicle-<uuid>", no jobs row) — they reopen in the Listicle Builder via
+ * ?listicle=<id>. Real jobs restore their session via ?job=<id>.
+ */
+function jobHref(job: Job): string {
+  const meta = APP_META[job.app] ?? APP_META.broll;
+  const listicleId = (job.payload as { listicleId?: string })?.listicleId;
+  if (job.app === "listicle" && listicleId) return `${meta.path}?listicle=${listicleId}`;
+  return `${meta.path}?job=${job.id}`;
+}
+
 function isActive(job: Job): boolean {
   return job.status === "queued" || job.status === "running";
 }
@@ -67,7 +99,6 @@ function ProgressBar({ job }: { job: Job }) {
 function HeroCard({ job }: { job: Job }) {
   const meta = APP_META[job.app] ?? APP_META.broll;
   const Icon = meta.icon;
-  const product = productName(job);
   const active = isActive(job);
   return (
     <section>
@@ -80,12 +111,11 @@ function HeroCard({ job }: { job: Job }) {
           <div className="text-[11px] font-mono text-white/35">{meta.label}</div>
           <div className="text-base font-medium text-white/90 truncate">{job.title}</div>
           <div className="truncate text-[11px] font-mono text-white/40">
-            {product && <>{product} · </>}
-            {job.doneCount + job.errorCount}/{job.totalCount} items · {relTime(job.createdAt)} · <StatusChip job={job} />
+            {metaLine(job)} · {relTime(job.createdAt)} · <StatusChip job={job} />
           </div>
           {active && <ProgressBar job={job} />}
         </div>
-        <Link href={`${meta.path}?job=${job.id}`}>
+        <Link href={jobHref(job)}>
           <div className="inline-flex items-center gap-2 rounded-lg border border-cyan-400/30 bg-cyan-400/15 px-4 py-2 text-sm text-cyan-200 hover:bg-cyan-400/25 transition-colors cursor-pointer shrink-0">
             {active ? (<>Continue <ArrowRight size={14} /></>) : "Review"}
           </div>
@@ -98,9 +128,8 @@ function HeroCard({ job }: { job: Job }) {
 function JobRow({ job }: { job: Job }) {
   const meta = APP_META[job.app] ?? APP_META.broll;
   const Icon = meta.icon;
-  const product = productName(job);
   return (
-    <Link href={`${meta.path}?job=${job.id}`}>
+    <Link href={jobHref(job)}>
       <div className="p-4 flex items-center gap-4 hover:bg-white/[0.02] cursor-pointer">
         <div className="w-9 h-9 rounded-full bg-white/[0.04] border border-white/[0.06] flex items-center justify-center shrink-0">
           <Icon size={16} className="text-white/40" />
@@ -109,8 +138,7 @@ function JobRow({ job }: { job: Job }) {
           <div className="text-[11px] font-mono text-white/35">{meta.label}</div>
           <div className="text-sm font-medium text-white/85 truncate">{job.title}</div>
           <div className="truncate text-[11px] font-mono text-white/40">
-            {product && <>{product} · </>}
-            {job.doneCount + job.errorCount}/{job.totalCount} items
+            {metaLine(job)}
             {job.status === "failed" && job.error && <> · <span className="text-rose-400/80">{job.error}</span></>}
           </div>
           {isActive(job) && <ProgressBar job={job} />}
