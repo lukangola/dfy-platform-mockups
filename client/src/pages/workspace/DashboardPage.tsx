@@ -64,6 +64,10 @@ export default function DashboardPage() {
     return () => { cancelled = true; clearInterval(t); };
   }, [activeBrandId]);
 
+  if (!activeBrandId) {
+    return <div className="p-8 text-sm text-white/35">Select a brand to see its jobs.</div>;
+  }
+
   const running = (jobs ?? []).filter((j) => j.status === "queued" || j.status === "running");
   const finished = (jobs ?? []).filter((j) => j.status !== "queued" && j.status !== "running");
 
@@ -95,6 +99,9 @@ export default function DashboardPage() {
                             <div className="min-w-0 flex-1">
                               <div className="truncate text-sm text-white/85">{job.title}</div>
                               <div className="text-[11px] font-mono text-white/35">{meta.label} · {job.doneCount + job.errorCount}/{job.totalCount} · <Clock size={9} className="inline -mt-0.5" /> {relTime(job.createdAt)}</div>
+                              {job.status === "failed" && job.error && (
+                                <div className="truncate text-[11px] font-mono text-rose-400/80">{job.error}</div>
+                              )}
                             </div>
                             <StatusChip job={job} />
                           </div>

@@ -15,6 +15,7 @@ import {
 import BrandSwitcher from "./BrandSwitcher";
 import { useAuth } from "@/contexts/AuthContext";
 import { useBrand } from "@/contexts/BrandContext";
+import { useJobsPulse } from "@/hooks/useJobsPulse";
 
 interface WorkspaceLayoutProps {
   children: React.ReactNode;
@@ -64,7 +65,8 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
   const [location] = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const { user, role, logout } = useAuth();
-  const { activeBrand } = useBrand();
+  const { activeBrand, activeBrandId } = useBrand();
+  const runningJobs = useJobsPulse(activeBrandId ?? null, user?.id ?? null);
 
   const isManager = role === "admin" || role === "manager";
   // Ad Inspo Console + Ad Pipeline are available to managers/admins on ANY brand.
@@ -149,6 +151,11 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
                       </motion.span>
                     )}
                   </AnimatePresence>
+                  {item.id === "dashboard" && runningJobs > 0 && !collapsed && (
+                    <span className="ml-auto inline-flex items-center justify-center min-w-[18px] h-[18px] rounded-full bg-cyan-400/20 text-cyan-300 text-[10px] font-mono px-1">
+                      {runningJobs}
+                    </span>
+                  )}
                   {active && (
                     <motion.div
                       layoutId="sidebar-active"
