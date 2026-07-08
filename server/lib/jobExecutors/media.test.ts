@@ -15,8 +15,9 @@ vi.mock("../fal.js", () => ({
   generateVideo: vi.fn(),
 }));
 
+import { db } from "../db.js";
 import { generateImage, generateVideo } from "../fal.js";
-import { runImageItem, runVideoItem } from "./broll.js";
+import { makeImageExecutor, makeVideoExecutor, runImageItem, runVideoItem } from "./media.js";
 
 const mockGenerateImage = vi.mocked(generateImage);
 const mockGenerateVideo = vi.mocked(generateVideo);
@@ -91,6 +92,41 @@ describe("runVideoItem", () => {
 
     await expect(
       runVideoItem({ item: makeItem({ prompt: "x", image_urls: [] }), payload: {} }),
+    ).rejects.toBe(err);
+    expect(mockGenerateVideo).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("executor factories", () => {
+  it("makeImageExecutor logs a generations row with the given per-app action", async () => {
+    mockGenerateImage.mockResolvedValueOnce({
+      urls: ["https://i/char.jpg"],
+      raw: {},
+      model: "fal-ai/nano-banana-pro/edit",
+      durationMs: 4,
+    });
+
+    const exec = makeImageExecutor("character_broll_image");
+    const result = await exec({ item: makeItem({ prompt: "hero shot" }), payload: {} });
+
+    expect(result.url).toBe("https://i/char.jpg");
+    expect(result.generationId).toBe("gen-1");
+    const insertMock = db.insert as unknown as ReturnType<typeof vi.fn>;
+    const valuesMock = insertMock.mock.results[0]?.value.values as ReturnType<typeof vi.fn>;
+    expect(valuesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "character_broll_image", kind: "image" }),
+    );
+  });
+
+  it("makeVideoExecutor with seedanceKlingFallback:false does NOT retry a likeness 422", async () => {
+    const err = likenessError();
+    mockGenerateVideo.mockRejectedValueOnce(err);
+
+    const exec = makeVideoExecutor("character_broll_video", { seedanceKlingFallback: false });
+    await expect(
+      // Starting frame present — a fallback WOULD be possible, proving the
+      // flag (not a missing frame) is what suppresses the second call.
+      exec({ item: makeItem({ prompt: "x", image_urls: ["https://start.jpg"] }, KLING), payload: {} }),
     ).rejects.toBe(err);
     expect(mockGenerateVideo).toHaveBeenCalledTimes(1);
   });
