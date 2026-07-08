@@ -28,10 +28,15 @@ type MediaItemInput = { model?: string; falInput?: Record<string, unknown> };
 
 /**
  * Foot-gun (accepted v1 trade-off, kept visible on purpose): this insert runs
- * AFTER a successful render. If it throws, the executor throws, the runner
- * classifies the DB error as "hard" (no retry), and the item fails — the
- * already-rendered fal URL is lost with it. Swallowing the error would
- * silently break cost accounting, so we choose the loud failure.
+ * AFTER a successful render. If it throws, the executor throws and the
+ * runner classifies the DB error via classifyJobError — most DB failures are
+ * classified hard (no retry), and the item fails with the already-rendered
+ * fal URL lost with it. Exception: connection-class errors (e.g.
+ * ECONNREFUSED, if the DB is briefly unreachable) match the same transient
+ * regex used for provider hiccups, so those WILL be retried — meaning a
+ * successful render can get silently re-rendered at extra cost before the
+ * item finally fails. Swallowing the error would silently break cost
+ * accounting, so we choose the loud (if occasionally expensive) failure.
  */
 async function logGeneration(args: {
   action: "broll_image" | "broll_video";

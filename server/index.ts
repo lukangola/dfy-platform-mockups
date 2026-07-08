@@ -29,6 +29,9 @@ import { backfillMissingThumbnails, runDeconstruction, runNicheClassification, s
 import { uploadsRouter } from "./routes/uploads.js";
 import { adConsoleRouter } from "./routes/adConsole.js";
 import { adPipelineRouter } from "./routes/adPipeline.js";
+import { jobsRouter } from "./routes/jobs.js";
+import { sweepOrphanedJobs } from "./lib/jobRunner.js";
+import "./lib/jobExecutors/broll.js"; // side-effect: registers broll_images / broll_videos
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -136,6 +139,7 @@ async function startServer() {
   app.use("/api/ad-console", adConsoleRouter);
   // Ad Pipeline Kanban — Idea → In Production → Ready; managers + admins, gated inside the router.
   app.use("/api/ad-pipeline", adPipelineRouter);
+  app.use("/api/jobs", jobsRouter);
 
   // Dev: API-only on API_PORT. Vite serves the UI and proxies /api/* here.
   // Prod: same process also serves built assets.
@@ -351,6 +355,20 @@ async function startServer() {
       }
     } catch (err) {
       console.error("[products] research sweep failed (non-fatal):", err);
+    }
+  })();
+
+  // Durable-jobs rescue sweep — resume batches orphaned by a restart (prod),
+  // mark them failed in dev (tsx watch restarts per save). Same idiom as the
+  // research/mechanism sweeps above.
+  void (async () => {
+    try {
+      const r = await sweepOrphanedJobs({ resume: !isDev });
+      if (r.resumed > 0 || r.failed > 0) {
+        console.log(`[jobs] boot sweep: resumed ${r.resumed}, failed ${r.failed}`);
+      }
+    } catch (err) {
+      console.error("[jobs] boot sweep failed (non-fatal):", err);
     }
   })();
 
