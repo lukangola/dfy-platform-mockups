@@ -41,7 +41,9 @@ jobsRouter.post("/", async (req: Request, res: Response) => {
       return sendError(res, 400, "items must be a non-empty array");
     }
     const { user, role } = req.auth!;
-    if (!(await canSeeBrand(user.id, role, body.brandId))) return sendError(res, 403, "No access to this brand");
+    // 404 (not 403) on denial — house convention (see brandAccess.ts): the
+    // existence of a brand must not leak to users who can't see it.
+    if (!(await canSeeBrand(user.id, role, body.brandId))) return sendError(res, 404, "Brand not found");
 
     const [job] = await db
       .insert(schema.jobs)
@@ -77,7 +79,7 @@ jobsRouter.get("/", async (req: Request, res: Response) => {
     const brandId = String(req.query.brandId ?? "");
     if (!brandId) return sendError(res, 400, "brandId is required");
     const { user, role } = req.auth!;
-    if (!(await canSeeBrand(user.id, role, brandId))) return sendError(res, 403, "No access to this brand");
+    if (!(await canSeeBrand(user.id, role, brandId))) return sendError(res, 404, "Brand not found");
     const rows = await db
       .select()
       .from(schema.jobs)
@@ -101,7 +103,8 @@ jobsRouter.get("/:id", async (req: Request, res: Response) => {
     const [job] = await db.select().from(schema.jobs).where(eq(schema.jobs.id, req.params.id)).limit(1);
     if (!job) return sendError(res, 404, "Job not found");
     const { user, role } = req.auth!;
-    if (!(await canSeeBrand(user.id, role, job.brandId))) return sendError(res, 403, "No access to this brand");
+    // 404 (not 403) on denial — deny knowledge of the job entirely (no-leak convention).
+    if (!(await canSeeBrand(user.id, role, job.brandId))) return sendError(res, 404, "Job not found");
     const items = await db
       .select()
       .from(schema.jobItems)
@@ -119,7 +122,8 @@ jobsRouter.post("/:id/items/:itemId/retry", async (req: Request, res: Response) 
     const [job] = await db.select().from(schema.jobs).where(eq(schema.jobs.id, req.params.id)).limit(1);
     if (!job) return sendError(res, 404, "Job not found");
     const { user, role } = req.auth!;
-    if (!(await canSeeBrand(user.id, role, job.brandId))) return sendError(res, 403, "No access to this brand");
+    // 404 (not 403) on denial — deny knowledge of the job entirely (no-leak convention).
+    if (!(await canSeeBrand(user.id, role, job.brandId))) return sendError(res, 404, "Job not found");
     const [item] = await db
       .select()
       .from(schema.jobItems)

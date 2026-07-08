@@ -99,16 +99,16 @@ export function kickJob(jobId: string): void {
       inFlight.delete(jobId);
       // Self-heal the retry race: if someone re-queued this job while we were
       // finishing (their kick was swallowed by the inFlight guard above),
-      // pick it up now instead of leaving it stranded until the next boot.
-      void db
-        .select({ status: schema.jobs.status })
-        .from(schema.jobs)
-        .where(eq(schema.jobs.id, jobId))
-        .limit(1)
-        .then((rows) => {
-          if (rows[0]?.status === "queued") kickJob(jobId);
-        })
-        .catch(() => {});
+      // pick it up now. The boot sweep remains the real backstop — this only
+      // shortens the latency when the process stays up.
+      void (async () => {
+        const rows = await db
+          .select({ status: schema.jobs.status })
+          .from(schema.jobs)
+          .where(eq(schema.jobs.id, jobId))
+          .limit(1);
+        if (rows[0]?.status === "queued") kickJob(jobId);
+      })().catch(() => {});
     });
 }
 
