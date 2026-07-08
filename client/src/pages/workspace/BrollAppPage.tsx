@@ -519,21 +519,37 @@ export default function BrollAppPage() {
 
   // Builds the fal payload for one shot's video — used by both the batch
   // (generateAllVideos) and single-shot (regenerateVideo) durable jobs.
+  //
+  // Seedance 2.0 reference-to-video takes `image_urls` (up to 9) and references
+  // them inside the prompt as @Image1, @Image2, etc. @Image1 is the B-roll
+  // starting frame; subsequent entries are the product hero / content image /
+  // reference sheet so the model can match packaging + angles across the clip.
   function buildVideoItemInput(shot: UiShot, prompt: string): Record<string, unknown> {
     const productRefs = collectProductImageUrls();
-    // Starting frame first, then product references (de-duped). Uses the
-    // [DEV TRIAL] fast-tier Seedance model (see model field below).
+    // Starting frame first, then product references (de-duped in case the
+    // broll still is somehow one of the product URLs).
     const imageUrls = [shot.imageUrl!, ...productRefs.filter((u) => u !== shot.imageUrl)];
     return {
       shotId: shot.id,
       kind: "video",
+      // [DEV TRIAL] Using the FAST variant on dev to compare label fidelity
+      // and motion quality against the regular tier. To roll back:
+      //   model: "bytedance/seedance-2.0/reference-to-video"
+      // Fast tier: ~2-3× faster, ~30-50% cheaper, accepts the same 9 reference
+      // images and 4-15s duration. Watch for: softer motion, label/text drift
+      // on packaging, color/lighting deviation from the starting frame.
       model: "bytedance/seedance-2.0/fast/reference-to-video",
       falInput: {
         prompt,
         image_urls: imageUrls,
+        // 5 seconds (was 4): Seedance 2.0 supports 4-15. 5s gives the model
+        // a touch more room for product motion (rotation reveal, pour beat,
+        // unboxing slide) without a noticeable cost or latency hit.
         duration: "5",
         aspect_ratio: "9:16",
         resolution: "720p",
+        // Audio off: we never use the generated audio track, and disabling it
+        // shaves generation time + drops Seedance/Kling cost noticeably.
         generate_audio: false,
       },
     };
@@ -1267,7 +1283,7 @@ export default function BrollAppPage() {
             >
               <RotateCcw size={14} className="text-cyan-400 shrink-0 mt-0.5" />
               <p className="text-[11px] font-mono text-cyan-200/80 break-words">
-                <span className="text-sm text-cyan-200">A generation is still running: {resumableJob.title}</span>
+                <span className="font-medium text-cyan-200">A generation is still running: {resumableJob.title}</span>
                 {" "}— click to resume this session.
               </p>
             </button>
