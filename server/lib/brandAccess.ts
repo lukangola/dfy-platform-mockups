@@ -113,6 +113,24 @@ export async function canSeeProduct(userId: string, role: Role, productId: strin
 }
 
 /**
+ * Boolean: can `userId` (with team `role`) see the listicle with id
+ * `listicleId`? Chains to canSeeBrand by looking up the listicle's
+ * brandId once — same shape as canSeeProduct. Returns false if the
+ * listicle doesn't exist — callers should treat that as "no access"
+ * and emit a 404 to avoid leaking the (non-)existence of the row.
+ */
+export async function canSeeListicle(userId: string, role: Role, listicleId: string): Promise<boolean> {
+  if (role === "admin") return true;
+  const [row] = await db
+    .select({ brandId: schema.listicles.brandId })
+    .from(schema.listicles)
+    .where(eq(schema.listicles.id, listicleId))
+    .limit(1);
+  if (!row) return false;
+  return canSeeBrand(userId, role, row.brandId);
+}
+
+/**
  * Revoke all grants for `userId` on the given brand ids in one go.
  * Used by the PUT endpoint when an admin un-checks brands.
  */

@@ -21,8 +21,10 @@
  */
 import https from "node:https";
 import { and, asc, eq } from "drizzle-orm";
-import { type Request, type Response, Router } from "express";
+import { type NextFunction, type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
+import { requireAuth } from "../lib/auth.js";
+import { canSeeBrand, canSeeListicle } from "../lib/brandAccess.js";
 import { db, schema } from "../lib/db.js";
 import { generateImage, transcribeAudio, uploadToFalStorage } from "../lib/fal.js";
 import { extractJsonObject } from "../lib/jsonExtract.js";
@@ -31,9 +33,42 @@ import { loadPrompt } from "../lib/prompts.js";
 
 export const listiclesRouter: Router = Router();
 
+// Every listicle route requires a signed-in user — there is no public
+// consumer (the only client callers live in the authed Listicle Builder
+// workspace page; the PUBLIC /api/share router never touches listicles).
+listiclesRouter.use(requireAuth);
+
 function sendError(res: Response, status: number, message: string) {
   res.status(status).json({ error: message });
 }
+
+/**
+ * Gate every /:id route on whether the caller can see the listicle's
+ * brand. Same idiom as products.ts's gateByProductAccess: mounted once
+ * via `listiclesRouter.use("/:id", ...)` it mechanically covers
+ * GET/PATCH /:id plus every nested POST/PATCH (analyze-ad, extract-offer,
+ * generate-copy, generate-image-prompts, images/:imageId/*, render-html,
+ * deploy) without per-route boilerplate. Denied access AND missing rows
+ * both return 404 "Listicle not found" — not 403 — so the existence of a
+ * listicle never leaks across brands. Auth is attached upstream by the
+ * router-wide requireAuth above.
+ */
+async function gateByListicleAccess(req: Request, res: Response, next: NextFunction): Promise<void> {
+  if (!req.auth) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+  const { user, role } = req.auth;
+  const listicleId = req.params.id;
+  if (!listicleId) return next();
+  if (!(await canSeeListicle(user.id, role, listicleId))) {
+    res.status(404).json({ error: "Listicle not found" });
+    return;
+  }
+  next();
+}
+
+listiclesRouter.use("/:id", gateByListicleAccess);
 
 /**
  * Conditional product-reference inclusion for the per-section image
@@ -404,6 +439,12 @@ listiclesRouter.post("/", async (req: Request, res: Response) => {
     };
     if (!body.brandId || !body.productId || !body.source) {
       return sendError(res, 400, "brandId, productId, and source are required");
+    }
+    // Brand gate on the client-supplied brandId — 404 (not 403) so brand
+    // existence doesn't leak. Same convention as products/jobs create.
+    const { user, role } = req.auth!;
+    if (!(await canSeeBrand(user.id, role, body.brandId))) {
+      return sendError(res, 404, "Brand not found");
     }
     const [row] = await db
       .insert(schema.listicles)
