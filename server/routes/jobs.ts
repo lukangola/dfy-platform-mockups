@@ -17,7 +17,7 @@ function sendError(res: Response, status: number, message: string) {
   res.status(status).json({ error: message });
 }
 
-const JOB_APPS = ["broll", "character_broll", "single_scene", "message_testing", "listicle", "copy_engine"] as const;
+const JOB_APPS = ["broll", "character_broll", "single_scene", "message_testing", "listicle", "copy_engine", "static_ads"] as const;
 
 export const jobsRouter = Router();
 jobsRouter.use(requireAuth);

@@ -32,6 +32,7 @@ import { adPipelineRouter } from "./routes/adPipeline.js";
 import { jobsRouter } from "./routes/jobs.js";
 import { sweepOrphanedJobs } from "./lib/jobRunner.js";
 import "./lib/jobExecutors/broll.js"; // side-effect: registers broll_images / broll_videos
+import "./lib/jobExecutors/staticAds.js"; // side-effect: registers static_ads_recreate
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
