@@ -16,6 +16,9 @@ describe("classifyJobError", () => {
     expect(classifyJobError(422, "resolution: invalid value")).toBe("hard");
     expect(classifyJobError(400, "prompt required")).toBe("hard");
   });
+  it("falls back to hard when neither status nor message match anything", () => {
+    expect(classifyJobError(undefined, "some unrelated string")).toBe("hard");
+  });
 });
 
 describe("seedanceToKlingFallback", () => {
