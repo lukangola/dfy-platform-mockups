@@ -197,6 +197,13 @@
       "when": 1781809225127,
       "tag": "0027_late_tempest",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1783507708500,
+      "tag": "0028_previous_shockwave",
+      "breakpoints": true
     }
   ]
 }

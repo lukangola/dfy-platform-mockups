@@ -819,3 +819,50 @@ export type AdConsoleIdea = typeof adConsoleIdeas.$inferSelect;
 export type NewAdConsoleIdea = typeof adConsoleIdeas.$inferInsert;
 export type AdPipelineCard = typeof adPipelineCards.$inferSelect;
 export type NewAdPipelineCard = typeof adPipelineCards.$inferInsert;
+
+/**
+ * Durable generation jobs. One row per user-triggered batch ("Generate all
+ * images" = one job). The runner (server/lib/jobRunner.ts) processes items
+ * server-side so batches survive tab closes and deploys; payload snapshots
+ * the app session at trigger time so the app can restore full working state.
+ * Spec: docs/superpowers/specs/2026-07-08-generation-jobs-design.md
+ */
+export const jobs = pgTable("jobs", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  brandId: uuid("brand_id").notNull(),
+  userId: uuid("user_id"), // creator, from req.auth
+  productId: uuid("product_id"), // soft ref
+  app: text("app").notNull(), // "broll" | "character_broll" | "single_scene" | "message_testing" | "listicle" | "copy_engine"
+  type: text("type").notNull(), // runner registry key: "broll_images" | "broll_videos" | ...
+  status: text("status").notNull().default("queued"), // queued | running | complete | complete_with_errors | failed
+  title: text("title").notNull(),
+  payload: jsonb("payload").notNull(), // full session snapshot at trigger time
+  totalCount: integer("total_count").notNull().default(0),
+  doneCount: integer("done_count").notNull().default(0),
+  errorCount: integer("error_count").notNull().default(0),
+  error: text("error"), // job-fatal error only
+}, (t) => ({
+  brandStatusIdx: index("jobs_brand_status_idx").on(t.brandId, t.status, t.createdAt),
+}));
+
+export const jobItems = pgTable("job_items", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  jobId: uuid("job_id").notNull(),
+  idx: integer("idx").notNull(), // stable ordering
+  label: text("label").notNull(), // shot title
+  status: text("status").notNull().default("pending"), // pending | running | complete | failed
+  attempts: integer("attempts").notNull().default(0),
+  input: jsonb("input").notNull(), // { shotId, kind: "image"|"video", model, falInput }
+  output: jsonb("output"), // { url, model, durationMs }
+  error: text("error"),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+}, (t) => ({
+  jobIdx: index("job_items_job_idx").on(t.jobId),
+}));
+
+export type Job = typeof jobs.$inferSelect;
+export type JobItem = typeof jobItems.$inferSelect;
