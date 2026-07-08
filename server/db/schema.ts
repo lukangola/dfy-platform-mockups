@@ -861,8 +861,10 @@ export const jobItems = pgTable("job_items", {
   startedAt: timestamp("started_at", { withTimezone: true }),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
 }, (t) => ({
-  jobIdx: index("job_items_job_idx").on(t.jobId),
+  jobIdIdx: index("job_items_job_idx").on(t.jobId),
 }));
 
 export type Job = typeof jobs.$inferSelect;
 export type JobItem = typeof jobItems.$inferSelect;
+export type NewJob = typeof jobs.$inferInsert;
+export type NewJobItem = typeof jobItems.$inferInsert;
