@@ -265,7 +265,10 @@ export default function ListicleBuilderAppPage() {
           setDeployResult({ publishedUrl: l.publishedUrl, previewUrl: l.previewUrl, editorUrl: l.editorUrl });
         }
         setCurrentStep(
-          l.status === "rendering" || l.status === "ready" || l.status === "deployed" ? 3
+          // renderedHtml set also lands step 3 for deploy-failed builds
+          // (status "failed" AFTER a successful render) — the user resumes
+          // at the preview/deploy step instead of being dropped on images.
+          l.status === "rendering" || l.status === "ready" || l.status === "deployed" || Boolean(l.renderedHtml) ? 3
             : l.status === "images" || imgs.length > 0 ? 2
             : l.copyMarkdown ? 1
             : 0,

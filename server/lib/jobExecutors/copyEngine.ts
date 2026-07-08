@@ -30,7 +30,7 @@
  * losing cost accounting.
  *
  * Errors: thrown as-is for the runner to classify. generateText retries
- * Anthropic 429/529 internally (3 attempts, exponential backoff); if those
+ * Anthropic 429/529 internally (4 attempts (1 + 3 retries), exponential backoff); if those
  * are exhausted it throws a plain "temporarily overloaded" Error WITHOUT a
  * status, which classifyJobError marks hard — acceptable, the call was
  * already retried. Other Anthropic SDK errors surface `.status` (5xx →

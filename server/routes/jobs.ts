@@ -154,20 +154,24 @@ jobsRouter.get("/", async (req: Request, res: Response) => {
     if (!brandId) return sendError(res, 400, "brandId is required");
     const { user, role } = req.auth!;
     if (!(await canSeeBrand(user.id, role, brandId))) return sendError(res, 404, "Brand not found");
-    const rows = await db
-      .select()
-      .from(schema.jobs)
-      .where(eq(schema.jobs.brandId, brandId))
-      .orderBy(
-        // running/queued first, then newest
-        sqlTag`case when ${schema.jobs.status} in ('queued','running') then 0 else 1 end`,
-        desc(schema.jobs.createdAt),
-      )
-      .limit(50);
-    // Merge in the brand's listicle builds as read-only pseudo-jobs, then
-    // re-sort the combined list with the same running-first-then-newest order
-    // the query above uses (the DB sort only covered the jobs rows).
-    const listicleJobs = await listListicleJobs(brandId);
+    // Fetch the jobs rows and the brand's listicle builds (projected as
+    // read-only pseudo-jobs) in parallel — the queries are independent.
+    // Then merge and re-sort the combined list with the same
+    // running-first-then-newest order the jobs query uses (the DB sort
+    // only covered the jobs rows).
+    const [rows, listicleJobs] = await Promise.all([
+      db
+        .select()
+        .from(schema.jobs)
+        .where(eq(schema.jobs.brandId, brandId))
+        .orderBy(
+          // running/queued first, then newest
+          sqlTag`case when ${schema.jobs.status} in ('queued','running') then 0 else 1 end`,
+          desc(schema.jobs.createdAt),
+        )
+        .limit(50),
+      listListicleJobs(brandId),
+    ]);
     const isActive = (s: string) => s === "queued" || s === "running";
     const merged = [...rows, ...listicleJobs].sort((a, b) => {
       const activeDelta = (isActive(a.status) ? 0 : 1) - (isActive(b.status) ? 0 : 1);
