@@ -493,6 +493,7 @@ export default function BrollAppPage() {
   // ---------- Durable batch jobs (images + videos) ----------
 
   /** Job-item input for one shot's image — same payload callImageModel sends, minus the call. */
+  // KEEP IN SYNC with callImageModel below — duplicated until Task 11 (plan 2026-07-08-generation-jobs.md) deletes the legacy path.
   function buildImageItemInput(shot: UiShot, prompt: string): Record<string, unknown> {
     const imageUrls = collectReferenceImagesForShot(shot);
     const hasImages = imageUrls.length > 0;
@@ -507,6 +508,7 @@ export default function BrollAppPage() {
   }
 
   /** Job-item input for one shot's video — same payload callVideoModel sends, minus the call. */
+  // KEEP IN SYNC with callVideoModel below — duplicated until Task 11 (plan 2026-07-08-generation-jobs.md) deletes the legacy path.
   function buildVideoItemInput(shot: UiShot, prompt: string): Record<string, unknown> {
     const productRefs = collectProductImageUrls();
     // Starting frame first, then product references (de-duped) — mirrors
@@ -558,13 +560,13 @@ export default function BrollAppPage() {
   }
 
   // Poll the active job(s) every 2.5s (the app's standard cadence) and mirror
-  // item states onto shots; stop when the job reaches a terminal status.
+  // item states onto shots; stop when a job reaches a terminal status. Image
+  // and video jobs are polled independently — the user can step back and
+  // start an image batch while a video job is still running.
   useEffect(() => {
-    const jobId = activeImageJobId ?? activeVideoJobId;
-    if (!jobId) return;
-    const isImage = jobId === activeImageJobId;
+    if (!activeImageJobId && !activeVideoJobId) return;
     let cancelled = false;
-    const tick = async () => {
+    const pollOne = async (jobId: string, isImage: boolean) => {
       try {
         const { job, items } = await getJob(jobId);
         if (cancelled) return;
@@ -576,12 +578,17 @@ export default function BrollAppPage() {
         /* transient — next tick retries */
       }
     };
-    void tick();
+    const tick = () => {
+      if (activeImageJobId) void pollOne(activeImageJobId, true);
+      if (activeVideoJobId) void pollOne(activeVideoJobId, false);
+    };
+    tick();
     const t = setInterval(tick, 2500);
     return () => { cancelled = true; clearInterval(t); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeImageJobId, activeVideoJobId]);
 
+  // KEEP IN SYNC with buildImageItemInput above — duplicated until Task 11 (plan 2026-07-08-generation-jobs.md) deletes the legacy path.
   async function callImageModel(shot: UiShot, prompt: string): Promise<string> {
     const imageUrls = collectReferenceImagesForShot(shot);
     const hasImages = imageUrls.length > 0;
@@ -714,6 +721,7 @@ export default function BrollAppPage() {
   // them inside the prompt as @Image1, @Image2, etc. @Image1 is the B-roll
   // starting frame; subsequent entries are the product hero / content image /
   // reference sheet so the model can match packaging + angles across the clip.
+  // KEEP IN SYNC with buildVideoItemInput above — duplicated until Task 11 (plan 2026-07-08-generation-jobs.md) deletes the legacy path.
   async function callVideoModel(prompt: string, imageUrl: string): Promise<string> {
     const productRefs = collectProductImageUrls();
     // Starting frame first, then product references (de-duped in case the
