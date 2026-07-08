@@ -1288,6 +1288,16 @@ function parseMessagesByAngle(text: string): MessageAngleGroup[] {
 
 // ---------- Jobs (durable generation jobs) ----------
 
+/**
+ * Durable server-side generation jobs — batches survive tab closes and
+ * deploys; the Dashboard lists them and apps resume from them.
+ * Spec: docs/superpowers/specs/2026-07-08-generation-jobs-design.md
+ *
+ * `app` / `type` are deliberately plain strings (not mirrored unions):
+ * every new generation app adds values, and the server validates them
+ * (app allowlist + registered job type) — don't "tighten" these here.
+ */
+
 export type JobStatus = "queued" | "running" | "complete" | "complete_with_errors" | "failed";
 export type JobItemStatus = "pending" | "running" | "complete" | "failed";
 
@@ -1318,6 +1328,9 @@ export type JobItem = {
   status: JobItemStatus;
   attempts: number;
   input: Record<string, unknown>;
+  /** Best-effort shape — matches the b-roll executor's return today. The
+   *  server stores untyped jsonb (executors return Record<string, unknown>),
+   *  so new executors can extend this; treat fields as optional. */
   output: {
     url?: string;
     model?: string;
@@ -1330,6 +1343,7 @@ export type JobItem = {
   finishedAt: string | null;
 };
 
+/** Creates + immediately starts a job; payload should snapshot the app session so the page can restore from it. */
 export function createJob(args: {
   app: string;
   type: string;
