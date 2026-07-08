@@ -22,15 +22,16 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Sparkles, ChevronDown, Check, X, RefreshCw, MessageSquare,
   Video, ArrowLeft, Package, Loader2,
-  AlertTriangle, Plus, Trash2, Download, User, Upload, Wand2,
+  AlertTriangle, Plus, Trash2, Download, RotateCcw, Upload, Wand2,
 } from "lucide-react";
 import {
   listProducts, getProductMechanism,
   listCharacters, createCharacter, deleteCharacter,
   generateSingleSceneImagePrompts, generateCharacterBrollVideoPrompts,
-  generateImage, generateText, generateVideo, saveBrandAssets,
-  ApiCallError,
+  generateText, saveBrandAssets,
+  createJob, getJob, listJobs,
   type Product, type ProductMechanism, type CharacterRef,
+  type Job, type JobItem,
 } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
 import { downloadViaBlob } from "@/lib/download";
@@ -69,6 +70,35 @@ let sceneIdCounter = 0;
 function newSceneId(): string {
   sceneIdCounter += 1;
   return `scene-${sceneIdCounter}`;
+}
+
+/**
+ * Detect a Gemini-classifier rejection in a job item's error string.
+ *
+ * The old direct-call flow detected this via ApiCallError{status:422,
+ * errorCode:"content_safety_rejected"}; durable-job items only surface the
+ * raw fal message text (FalContentSafetyError.message → item.error), so we
+ * match the same phrases the server groups under content safety. A 422 that
+ * is a genuine validation error carries field-level `detail[]` text instead
+ * and won't match — string matching is actually tighter than the old
+ * status check here.
+ */
+function isContentSafetyErrorText(msg: string): boolean {
+  return /did not generate the expected output|unsafe content|content policy/i.test(msg);
+}
+
+/**
+ * Shown when a scene fails the safety classifier even after its one automatic
+ * sanitize-retry — the raw fal message is useless to the user; this tells
+ * them what actually works.
+ */
+const SAFETY_REJECTION_HELP =
+  "The image model rejected this prompt as potentially unsafe even after auto-softening the language. Try regenerating with feedback — soften wardrobe terms (e.g. 'bra' → 'fitted top'), avoid describing body parts pressing against clothing, and keep the emotional beat on the face / posture rather than on clothing struggle.";
+
+/** Job-item label — scenes have no title (unlike b-roll shots), so use the
+ *  scene number plus a trimmed slice of the user's free-form line. */
+function sceneJobLabel(s: UiScene): string {
+  return `#${s.shot_id} — ${(s.description || "scene").slice(0, 60)}`;
 }
 
 function ApprovalBadge({ approval }: { approval: Approval }) {
@@ -144,6 +174,18 @@ export default function SingleSceneAppPage() {
   const [uiShots, setUiShots] = useState<UiScene[]>([]);
   const [productLine, setProductLine] = useState("");
 
+  // Durable-jobs pilot: batch generation runs server-side (survives reload +
+  // deploys). The page holds only the active job ids and mirrors item state
+  // onto scenes via the poll effect below.
+  const [activeImageJobId, setActiveImageJobId] = useState<string | null>(null);
+  const [activeVideoJobId, setActiveVideoJobId] = useState<string | null>(null);
+  // Session-resume banner: newest queued/running single-scene job for this
+  // brand — or, when none is live, the newest single-scene job of any
+  // status — offered as a one-click resume/restore when the page isn't
+  // already tracking a job. Dismissible (null) for the rest of the visit via
+  // the banner's X.
+  const [resumableJob, setResumableJob] = useState<Job | null>(null);
+
   // Inline feedback toggle — mirrors b-roll
   const [imageFeedbackOpen, setImageFeedbackOpen] = useState<Set<string>>(new Set());
   function toggleImageFeedback(id: string) {
@@ -170,6 +212,35 @@ export default function SingleSceneAppPage() {
 
   const imagesAutoKickedRef = useRef(false);
   const videosAutoKickedRef = useRef(false);
+
+  // Synchronous re-entrancy guards for the batch creators. During their
+  // multi-second awaits (adoptUnfinishedJob, prompt writing) the active job
+  // id is still null, so a second trigger (stepper back + re-approve, banner
+  // click) could double-create a job — and double the fal spend.
+  const imagesBatchInFlightRef = useRef(false);
+  const videosBatchInFlightRef = useRef(false);
+
+  // Synchronous mirror of activeImageJobId (plus a "claiming" sentinel while
+  // a create is in flight). The poll's content-safety auto-retry runs from an
+  // effect closure and must check-and-claim the single image-job slot without
+  // waiting for a render — state alone can't do that. Every image-job id
+  // change goes through trackImageJob() so the mirror never drifts. Video
+  // jobs have no async claimant, so they keep the plain state setter.
+  const activeImageJobIdRef = useRef<string | null>(null);
+  // Scenes that already consumed their one automatic sanitize-retry — a
+  // second safety rejection surfaces SAFETY_REJECTION_HELP instead of
+  // looping rewrite+generate spend.
+  const sanitizedOnceRef = useRef<Set<string>>(new Set());
+  // Latest uiShots for the poll-driven sanitize retry: its effect closure
+  // goes stale as batch items land, but the session payload it snapshots
+  // onto the follow-up job must not lose those results.
+  const uiShotsRef = useRef<UiScene[]>([]);
+  useEffect(() => { uiShotsRef.current = uiShots; }, [uiShots]);
+
+  function trackImageJob(id: string | null) {
+    activeImageJobIdRef.current = id;
+    setActiveImageJobId(id);
+  }
 
   // ── Load products ───────────────────────────────────────────────
   useEffect(() => {
@@ -370,63 +441,422 @@ export default function SingleSceneAppPage() {
     return Array.from(new Set(refs));
   }
 
-  // Detect Gemini-classifier rejection from the server (route returns 422 +
-  // errorCode "content_safety_rejected"). Backstop on raw fal message in
-  // case the typed error is missing.
-  function isContentSafetyRejection(err: unknown): boolean {
-    if (err instanceof ApiCallError) {
-      if (err.status === 422) return true;
-      if (err.errorCode === "content_safety_rejected") return true;
-    }
-    const msg = err instanceof Error ? err.message : String(err);
-    return /did not generate the expected output|unsafe content|content policy/i.test(msg);
+  // ── Durable batch jobs (images + videos) ────────────────────────
+
+  // Builds the fal payload for one scene's image — used by both the batch
+  // (generateAllImages) and single-scene (regenerateImage) durable jobs.
+  // References go through the same collector the direct calls used: character
+  // portrait always first, product refs only when the prompt references the
+  // product (see collectImageRefs above) — the jobs path must not change
+  // which scenes see the product.
+  function buildImageItemInput(scene: UiScene, prompt: string): Record<string, unknown> {
+    const imageUrls = collectImageRefs(scene, prompt);
+    const hasImages = imageUrls.length > 0;
+    return {
+      shotId: scene.id,
+      kind: "image",
+      model: hasImages ? IMAGE_MODEL_ID : "fal-ai/flux-pro/v1.1",
+      falInput: hasImages
+        ? { prompt, image_urls: imageUrls, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" }
+        : { prompt, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" },
+    };
   }
 
-  async function callImageModel(scene: UiScene, prompt: string, extraRefs: string[] = []): Promise<string> {
-    const baseRefs = collectImageRefs(scene, prompt);
-    const imageUrls = Array.from(new Set([...extraRefs, ...baseRefs]));
-    const model = imageUrls.length > 0 ? IMAGE_MODEL_ID : "fal-ai/flux-pro/v1.1";
+  // Builds the fal payload for one scene's video — used by both the batch
+  // (generateAllVideos) and single-scene (regenerateVideo) durable jobs.
+  //
+  // Kling Video v3 (image-to-video). The starting frame already contains the
+  // character and the full scene — Kling animates from that single frame.
+  // Identity comes from the frame. When the prompt references the product we
+  // ALSO supply Kling's `elements` parameter — one element bundling every
+  // product reference we have — so the model has visual ground truth if the
+  // camera turns the product mid-clip. (The single_scene_videos job executor
+  // has NO Seedance→Kling fallback: this app runs on Kling natively.)
+  function buildVideoItemInput(scene: UiScene, prompt: string): Record<string, unknown> {
+    const productUrls = collectProductImageUrls();
+    const wantsProduct = productUrls.length > 0 && promptReferencesProduct(prompt);
+    const falInput: Record<string, unknown> = {
+      prompt,
+      start_image_url: scene.imageUrl!,
+      // 8 seconds (was 5): standard tier accepts 3-15. 8s is enough room for
+      // a real scene beat — a stretch, a sip, a turn — without paying for
+      // 10s+. Cost scales linearly per-second.
+      duration: "8",
+      // Audio off: we never use the generated audio. Drops Kling v3 cost from
+      // $0.126/s → $0.084/s (~33%) and shaves time off generation.
+      generate_audio: false,
+    };
+    if (wantsProduct) {
+      falInput.elements = [
+        {
+          reference_image_urls: productUrls,
+          frontal_image_url: selectedProduct?.productImageUrl ?? productUrls[0],
+        },
+      ];
+    }
+    return {
+      shotId: scene.id,
+      kind: "video",
+      // Standard tier (~40% faster + ~33% cheaper than /pro). Combined with
+      // generate_audio:false above, this is the cost/speed sweet spot for
+      // first-draft review. Swap back to /pro for final-delivery quality.
+      model: "fal-ai/kling-video/v3/standard/image-to-video",
+      falInput,
+    };
+  }
 
-    const buildInput = (p: string): Record<string, unknown> =>
-      imageUrls.length > 0
-        ? { prompt: p, image_urls: imageUrls, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" }
-        : { prompt: p, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" };
+  /** Full working-state snapshot stored on the job so a reload can restore the session. */
+  function buildSessionPayload(): Record<string, unknown> {
+    return {
+      productId: selectedProductId,
+      productName: selectedProduct?.name ?? null,
+      // Character context — collectImageRefs() anchors every image call on
+      // characterImageUrl, so post-resume regenerates need it; characterId
+      // re-highlights the picker tile; the video ref URL rides along for a
+      // potential Seedance re-switch.
+      characterId: selectedCharacterId,
+      characterImageUrl,
+      characterVideoRefUrl,
+      // The raw setup-step inputs — restoring them keeps step 0 editable
+      // after a resume (each line maps 1:1 onto a UiScene).
+      sceneLines: sceneLines.map((l) => ({ id: l.id, text: l.text })),
+      // Read via the ref (not the closure) so the poll-driven sanitize retry
+      // snapshots the latest scene results, not the state as of job creation.
+      scenes: uiShotsRef.current.map((s) => ({
+        id: s.id, shot_id: s.shot_id, description: s.description,
+        imagePrompt: s.imagePrompt ?? null, imageUrl: s.imageUrl ?? null,
+        imageApproval: s.imageApproval,
+        videoPrompt: s.videoPrompt ?? null, videoUrl: s.videoUrl ?? null,
+        videoApproval: s.videoApproval,
+      })),
+    };
+  }
 
+  /** Mirror a job item's state onto its scene. */
+  function applyItemToShot(it: JobItem, isImage: boolean) {
+    const shotId = (it.input as { shotId?: string }).shotId;
+    if (!shotId) return;
+    const url = it.output?.url;
+    if (isImage) {
+      if (it.status === "complete" && url) patchShot(shotId, { imageStatus: "ready", imageUrl: url });
+      else if (it.status === "failed") patchShot(shotId, { imageStatus: "failed", imageError: it.error ?? "Generation failed" });
+    } else {
+      if (it.status === "complete" && url) patchShot(shotId, { videoStatus: "ready", videoUrl: url });
+      else if (it.status === "failed") patchShot(shotId, { videoStatus: "failed", videoError: it.error ?? "Generation failed" });
+    }
+  }
+
+  /**
+   * Content-safety auto-retry — the durable-jobs edition of the old
+   * callImageModel catch block. When an IMAGE item comes back failed with
+   * the Gemini classifier's rejection text, rewrite the prompt via the
+   * image_prompt_safety_rewrite master prompt (adds ~5-8s on Haiku, but
+   * turns a hard failure into a success in the majority of body-image /
+   * clothing scenes that trip the classifier) and re-run the scene as a
+   * fresh 1-item job — ONCE per scene (sanitizedOnceRef); a second rejection
+   * surfaces SAFETY_REJECTION_HELP instead of looping spend.
+   *
+   * Slot discipline: the page tracks ONE image job at a time (B-roll's
+   * one-id-per-kind pattern). This flow only fires after its source job has
+   * gone terminal — the poll frees the slot before invoking us — but the
+   * sanitize call leaves a window where a manual regenerate / batch /
+   * banner resume can claim the slot first. In that case we do NOT queue a
+   * second job: the scene is marked failed with the sanitized prompt staged
+   * on it, so a manual "Regen" retries with the softened language.
+   */
+  async function autoSanitizeRetry(it: JobItem) {
+    const input = it.input as { shotId?: string; kind?: string; model?: string; falInput?: Record<string, unknown> };
+    const shotId = input.shotId;
+    if (!shotId || !activeBrandId) return;
+    // Consume the one-retry budget synchronously so duplicate poll ticks
+    // can't double-fire for the same scene.
+    sanitizedOnceRef.current.add(shotId);
+    // Keep the scene spinning while the rewrite runs — from the user's view
+    // this is still the same generation attempt.
+    patchShot(shotId, { imageStatus: "generating", imageError: undefined });
     try {
-      const res = await generateImage("single_scene_image", { input: buildInput(prompt), model });
-      const url = res.urls[0];
-      if (!url) throw new Error("No image URL returned");
-      return url;
-    } catch (err) {
-      if (!isContentSafetyRejection(err)) throw err;
-      // First attempt rejected by Gemini safety. Sanitize via the dedicated
-      // rewrite prompt (Haiku, ~5-8s) and retry once. Most body-image /
-      // clothing-fit prompts pass after softening "bra"→"fitted top",
-      // dropping body-anatomy + struggle combos, and reframing the emotional
-      // beat through face / posture instead of clothing-against-body.
       console.warn("[single-scene] content-safety rejection — sanitizing and retrying once");
-      const rewrite = await generateText("image_prompt_safety_rewrite", { original_prompt: prompt });
+      const originalPrompt = String(input.falInput?.prompt ?? "");
+      const rewrite = await generateText("image_prompt_safety_rewrite", { original_prompt: originalPrompt });
       const sanitized = rewrite.text.trim();
-      if (!sanitized) throw err;
-      const res = await generateImage("single_scene_image", { input: buildInput(sanitized), model });
-      const url = res.urls[0];
-      if (!url) throw new Error("No image URL returned (after safety rewrite)");
-      return url;
+      // Sanitizer returned empty → surface the original rejection.
+      if (!sanitized) throw new Error(it.error ?? "Content-safety rejection (sanitizer returned an empty rewrite)");
+      if (activeImageJobIdRef.current) {
+        // Slot got claimed while we were sanitizing — don't queue a second
+        // job behind it. Stage the sanitized prompt so a manual Regen
+        // (fresh path reuses imagePrompt) retries with the soft language.
+        patchShot(shotId, {
+          imageStatus: "failed",
+          imagePrompt: sanitized,
+          imageError:
+            "Rejected by the content-safety filter. A softened prompt is staged, but another image job is already running — click Regen to retry manually once it finishes.",
+        });
+        return;
+      }
+      // Claim the slot BEFORE the createJob await so parallel safety
+      // retries from the same terminal batch can't both create a job.
+      activeImageJobIdRef.current = "pending:sanitize-retry";
+      try {
+        const { job } = await createJob({
+          app: "single_scene",
+          type: "single_scene_images",
+          brandId: activeBrandId,
+          productId: selectedProductId || null,
+          title: `Single scene image safety retry — ${it.label}`,
+          payload: buildSessionPayload(),
+          // Same item shape as the rejected attempt with ONLY the prompt
+          // swapped — refs/model stay exactly what the original pass used
+          // (mirrors the old direct-call retry, which reused its computed
+          // image_urls for the sanitized attempt).
+          items: [{ label: it.label, input: { ...input, falInput: { ...(input.falInput ?? {}), prompt: sanitized } } }],
+        });
+        patchShot(shotId, { imagePrompt: sanitized });
+        trackImageJob(job.id);
+      } catch (err) {
+        activeImageJobIdRef.current = null;
+        throw err;
+      }
+    } catch (err) {
+      patchShot(shotId, {
+        imageStatus: "failed",
+        imageError: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
-  async function generateImageForScene(scene: UiScene, prompt: string) {
-    patchShot(scene.id, { imageStatus: "generating", imageError: undefined, imagePrompt: prompt });
-    try {
-      const url = await callImageModel(scene, prompt);
-      patchShot(scene.id, { imageStatus: "ready", imageUrl: url });
-    } catch (err) {
-      const friendly = isContentSafetyRejection(err)
-        ? "The image model rejected this prompt as potentially unsafe even after auto-softening the language. Try regenerating with feedback — soften wardrobe terms (e.g. 'bra' → 'fitted top'), avoid describing body parts pressing against clothing, and keep the emotional beat on the face / posture rather than on clothing struggle."
-        : (err instanceof Error ? err.message : String(err));
-      patchShot(scene.id, { imageStatus: "failed", imageError: friendly });
+  // Poll the active job(s) every 2.5s (the app's standard cadence) and mirror
+  // item states onto scenes; stop when a job reaches a terminal status. Image
+  // and video jobs are polled independently — the user can step back and
+  // start an image batch while a video job is still running.
+  useEffect(() => {
+    if (!activeImageJobId && !activeVideoJobId) return;
+    let cancelled = false;
+    const pollOne = async (jobId: string, isImage: boolean) => {
+      try {
+        const { job, items } = await getJob(jobId);
+        if (cancelled) return;
+        const jobActive = job.status === "queued" || job.status === "running";
+        // Free the slot BEFORE processing items: the content-safety
+        // auto-retry below may claim it for its 1-item follow-up job, and
+        // its occupancy check must not see this (finished) job.
+        if (!jobActive) {
+          if (isImage) trackImageJob(null);
+          else setActiveVideoJobId(null);
+        }
+        for (const it of items) {
+          const shotId = (it.input as { shotId?: string }).shotId;
+          if (isImage && shotId && it.status === "failed" && isContentSafetyErrorText(it.error ?? "")) {
+            // IMAGE item rejected by the content-safety classifier:
+            //  - first rejection for this scene AND the job is done → run the
+            //    automatic sanitize-and-retry (fire-and-forget; it patches
+            //    the scene itself). While the job is still running we leave
+            //    the raw failure on screen and let the terminal tick retry
+            //    it — the single image-job slot is occupied until then
+            //    anyway.
+            //  - already sanitize-retried once → keep it failed, but swap
+            //    the raw fal message for actionable guidance.
+            if (!jobActive && !sanitizedOnceRef.current.has(shotId)) {
+              void autoSanitizeRetry(it);
+              continue;
+            }
+            if (sanitizedOnceRef.current.has(shotId)) {
+              patchShot(shotId, { imageStatus: "failed", imageError: SAFETY_REJECTION_HELP });
+              continue;
+            }
+          }
+          applyItemToShot(it, isImage);
+        }
+      } catch {
+        /* transient — next tick retries */
+      }
+    };
+    const tick = () => {
+      if (activeImageJobId) void pollOne(activeImageJobId, true);
+      if (activeVideoJobId) void pollOne(activeVideoJobId, false);
+    };
+    tick();
+    const t = setInterval(tick, 2500);
+    return () => { cancelled = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeImageJobId, activeVideoJobId]);
+
+  /**
+   * Restore the page's full working session from a job: the payload snapshot
+   * (buildSessionPayload) provides the scene list — prompts/urls/approvals as
+   * of trigger time; item outputs overlay whatever finished after the
+   * snapshot. Adopts the job as the active poll target when it is still
+   * running, marks the matching auto-kick ref(s) as fired so entering the
+   * step below can't fire a duplicate batch, and moves the user to the step
+   * that matches the job type.
+   */
+  async function hydrateFromJob(jobId: string) {
+    const { job, items } = await getJob(jobId);
+    const payload = job.payload as {
+      productId?: string | null;
+      productName?: string | null;
+      characterId?: string | null;
+      characterImageUrl?: string | null;
+      characterVideoRefUrl?: string | null;
+      sceneLines?: Array<{ id?: string; text?: string }>;
+      scenes?: Array<Record<string, unknown>>;
+    };
+    if (payload.productId && payload.productId !== selectedProductId) {
+      // selectedProduct is a derived lookup (researchedProducts.find), so
+      // setting the id before the products fetch resolves is safe — it
+      // simply matches once the existing effect lands.
+      setSelectedProductId(payload.productId);
     }
+    // The prompt writers compose against productLine; restore a usable value
+    // from the snapshot so post-resume regenerates aren't product-blind.
+    if (payload.productName) setProductLine(payload.productName);
+    // Character context: collectImageRefs() anchors every image call on
+    // characterImageUrl — without restoring it, a post-resume regenerate
+    // would silently drop the character from the frame.
+    if (payload.characterId) setSelectedCharacterId(payload.characterId);
+    if (payload.characterImageUrl) setCharacterImageUrl(payload.characterImageUrl);
+    if (payload.characterVideoRefUrl) setCharacterVideoRefUrl(payload.characterVideoRefUrl);
+    // Restore the raw setup inputs so stepping back to Setup shows the lines
+    // that produced this session instead of a single empty row.
+    if (payload.sceneLines && payload.sceneLines.length > 0) {
+      setSceneLines(
+        payload.sceneLines.map((l, i) => ({
+          id: l.id ?? `line-restored-${i}`,
+          text: l.text ?? "",
+        })),
+      );
+    }
+    const isImage = job.type === "single_scene_images";
+    // A job can be adopted well after it ended (e.g. deep link opened later,
+    // or a dev-server restart marked queued/running jobs failed). If the job
+    // itself is no longer active, any item still "pending"/"running" will
+    // never be picked up by a worker — mapping those to "generating" would
+    // leave the scene spinning forever. Only map to "generating" while the
+    // job itself is still active; otherwise treat unfinished items as failed.
+    const jobIsActive = job.status === "queued" || job.status === "running";
+    const byScene = new Map(items.map((it) => [(it.input as { shotId?: string }).shotId, it] as const));
+    const restored: UiScene[] = (payload.scenes ?? []).map((s) => {
+      const base: UiScene = {
+        id: s.id as string,
+        shot_id: s.shot_id as number,
+        description: (s.description as string) ?? "",
+        imageStatus: s.imageUrl ? "ready" : "idle",
+        imageApproval: ((s.imageApproval as Approval) ?? "pending"),
+        imageUrl: (s.imageUrl as string) ?? undefined,
+        imagePrompt: (s.imagePrompt as string) ?? undefined,
+        imageFeedback: "",
+        videoStatus: s.videoUrl ? "ready" : "idle",
+        videoApproval: ((s.videoApproval as Approval) ?? "pending"),
+        videoUrl: (s.videoUrl as string) ?? undefined,
+        videoPrompt: (s.videoPrompt as string) ?? undefined,
+        videoFeedback: "",
+      };
+      const it = byScene.get(s.id as string);
+      if (!it) return base;
+      const url = it.output?.url;
+      if (isImage) {
+        if (it.status === "complete" && url) return { ...base, imageStatus: "ready" as const, imageUrl: url };
+        if (it.status === "failed") return { ...base, imageStatus: "failed" as const, imageError: it.error ?? undefined };
+        return {
+          ...base,
+          imageStatus: jobIsActive ? ("generating" as const) : ("failed" as const),
+          ...(jobIsActive ? {} : { imageError: "Interrupted — job ended before this scene finished. Regenerate to retry." }),
+        };
+      }
+      if (it.status === "complete" && url) return { ...base, videoStatus: "ready" as const, videoUrl: url };
+      if (it.status === "failed") return { ...base, videoStatus: "failed" as const, videoError: it.error ?? undefined };
+      return {
+        ...base,
+        videoStatus: jobIsActive ? ("generating" as const) : ("failed" as const),
+        ...(jobIsActive ? {} : { videoError: "Interrupted — job ended before this scene finished. Regenerate to retry." }),
+      };
+    });
+    // Restored ids came from a previous session's newSceneId() sequence, but
+    // this session's module-level counter restarts at 0 on a fresh page load.
+    // Bump it past the highest restored suffix so a post-resume scene build
+    // can't mint an id (and React key) that collides with a restored scene.
+    for (const s of restored) {
+      const m = /^scene-(\d+)$/.exec(s.id);
+      if (m) sceneIdCounter = Math.max(sceneIdCounter, Number(m[1]));
+    }
+    // Restored ids may repeat ids from an earlier run or hydration in this
+    // visit — give every restored session a fresh sanitize-retry budget.
+    sanitizedOnceRef.current.clear();
+    setUiShots(restored);
+    if (job.status === "queued" || job.status === "running") {
+      if (isImage) trackImageJob(job.id);
+      else setActiveVideoJobId(job.id);
+    }
+    // Mark the restored step's auto-kick as already fired BEFORE navigating —
+    // otherwise the step-entry effect would immediately create a new batch
+    // over the restored scenes. A videos job implies images are done too.
+    imagesAutoKickedRef.current = true;
+    if (!isImage) videosAutoKickedRef.current = true;
+    setCurrentStep(isImage ? 1 : 2);
   }
+
+  /** Returns true when an unfinished single-scene job of the given type
+   *  for the current product was handled — adopted (session hydrated, poll
+   *  target set), or found but adoption failed (error surfaced; never fall
+   *  through to creating a duplicate over a live job). Returns false only
+   *  when there is nothing to adopt, so a normal create may proceed. */
+  async function adoptUnfinishedJob(type: "single_scene_images" | "single_scene_videos"): Promise<boolean> {
+    if (!activeBrandId) return false;
+    let candidate: Job | undefined;
+    try {
+      const { jobs } = await listJobs(activeBrandId);
+      candidate = jobs.find(
+        (x) =>
+          x.app === "single_scene" &&
+          x.type === type &&
+          (x.status === "queued" || x.status === "running") &&
+          (x.productId ?? null) === (selectedProductId || null),
+      );
+    } catch {
+      // Couldn't check — proceed with a normal create rather than blocking the user.
+      return false;
+    }
+    if (!candidate) return false;
+    try {
+      await hydrateFromJob(candidate.id);
+    } catch (err) {
+      // A job to adopt EXISTS but adoption failed — surface it and report
+      // "handled" so the caller does NOT create a duplicate over a live job.
+      setPipelineError(err instanceof Error ? err.message : String(err));
+    }
+    return true;
+  }
+
+  // Deep link from the dashboard: ?job=<id> restores that session.
+  useEffect(() => {
+    const jobId = new URLSearchParams(window.location.search).get("job");
+    if (jobId) {
+      void hydrateFromJob(jobId).catch((err) =>
+        setPipelineError(err instanceof Error ? err.message : String(err)),
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Session-resume banner source: prefer the newest queued/running
+  // single-scene job; with none, fall back to the newest single-scene job of
+  // ANY status so users can jump straight back into their LAST session even
+  // after it finished (hydrateFromJob handles terminal jobs — spinners end
+  // as failed/complete). The server lists running/queued first, then newest,
+  // so within the single-scene subset the first entry of each group is the
+  // right pick.
+  useEffect(() => {
+    if (!activeBrandId) return;
+    let cancelled = false;
+    void listJobs(activeBrandId)
+      .then(({ jobs }) => {
+        if (cancelled) return;
+        const mine = jobs.filter((x) => x.app === "single_scene");
+        const running = mine.find((x) => x.status === "queued" || x.status === "running");
+        setResumableJob(running ?? mine[0] ?? null);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeBrandId]);
 
   // Parallel: one Claude call per scene. Was a single batched call where
   // Claude wrote all prompts sequentially inside its response. Parallelizing
@@ -456,13 +886,42 @@ export default function SingleSceneAppPage() {
 
   async function generateAllImages() {
     const queue = uiShots.filter((s) => s.imageStatus === "idle" || s.imageStatus === "failed");
-    if (queue.length === 0) return;
-    setPipelineError(null);
+    if (queue.length === 0 || !activeBrandId || activeImageJobId) return;
+    // Synchronous in-flight guard — activeImageJobId only flips once createJob
+    // returns, so without this a concurrent second call (auto-kick + banner
+    // click, stepper back-and-re-approve) races through the awaits below and
+    // creates a duplicate job.
+    if (imagesBatchInFlightRef.current) return;
+    imagesBatchInFlightRef.current = true;
     try {
-      const prompts = await writeImagePrompts(queue);
-      await Promise.all(queue.map((s, i) => generateImageForScene(s, prompts[i] ?? "")));
-    } catch (err) {
-      setPipelineError(err instanceof Error ? err.message : String(err));
+      // Duplicate-guard: a reload loses activeImageJobId, and re-walking the
+      // flow re-enters this path (auto-kick or button) while the original batch
+      // may still be running server-side. Adopt that job instead of paying fal
+      // for a second one.
+      if (await adoptUnfinishedJob("single_scene_images")) return;
+      setPipelineError(null);
+      try {
+        const prompts = await writeImagePrompts(queue);
+        queue.forEach((s, i) => patchShot(s.id, { imageStatus: "generating", imageError: undefined, imagePrompt: prompts[i] ?? "" }));
+        const { job } = await createJob({
+          app: "single_scene",
+          type: "single_scene_images",
+          brandId: activeBrandId,
+          productId: selectedProductId || null,
+          title: `Single scene images — ${selectedProduct?.name ?? "no product"} · ${queue.length} scene(s)`,
+          payload: buildSessionPayload(),
+          items: queue.map((s, i) => ({ label: sceneJobLabel(s), input: buildImageItemInput(s, prompts[i] ?? "") })),
+        });
+        trackImageJob(job.id);
+      } catch (err) {
+        setPipelineError(err instanceof Error ? err.message : String(err));
+        // Roll the optimistic "generating" state back so scenes stay actionable.
+        // `queue` is the pre-patch snapshot, so each scene's imageStatus is its
+        // pre-call value ("idle" or "failed").
+        queue.forEach((s) => patchShot(s.id, { imageStatus: s.imageStatus === "failed" ? "failed" : "idle" }));
+      }
+    } finally {
+      imagesBatchInFlightRef.current = false;
     }
   }
 
@@ -476,8 +935,15 @@ export default function SingleSceneAppPage() {
    *     slightly different rendering of the same scene line.)
    */
   async function regenerateImage(sceneId: string, feedback?: string) {
+    // Can't run two image jobs at once — mirrors the batch guard, and keeps
+    // the regenerate buttons effectively inert while a batch is in flight.
+    if (activeImageJobId) return;
     const target = uiShots.find((s) => s.id === sceneId);
     if (!target) return;
+    // Double-click guard: without a live job id yet (e.g. this very call is
+    // mid-flight through its awaits), a second click on the same scene would
+    // re-enter and fire a duplicate regenerate for a scene already in flight.
+    if (target.imageStatus === "generating") return;
     setPipelineError(null);
     const feedbackText = (feedback ?? target.imageFeedback ?? "").trim();
     if (feedbackText) closeImageFeedback(sceneId);
@@ -493,6 +959,10 @@ export default function SingleSceneAppPage() {
         // B-Roll and Product B-Roll. The helper prepends the source
         // image; extraRefs order follows the model's reference priority
         // (identity first, then product).
+        //
+        // This path stays a direct call (not a durable job): it goes through
+        // the server's prompt-template route (action + vars.feedback), which
+        // the job executor's flat `falInput` shape has no equivalent for.
         const extraRefs: string[] = [];
         if (characterImageUrl && characterImageUrl !== target.imageUrl) {
           extraRefs.push(characterImageUrl);
@@ -509,14 +979,36 @@ export default function SingleSceneAppPage() {
         patchShot(sceneId, { imageStatus: "ready", imageUrl: newUrl });
         return;
       }
+      // FRESH-REGEN PATH — no feedback (or no prior image yet). Re-run the
+      // scene prompt for a different take, no prior image as ref. Runs as a
+      // 1-item durable job so it survives reload the same way the batch
+      // generations do.
       let basePrompt = target.imagePrompt;
       if (!basePrompt) {
         const [written] = await writeImagePrompts([target]);
         basePrompt = written ?? "";
       }
       patchShot(sceneId, { imagePrompt: basePrompt });
-      const url = await callImageModel(target, basePrompt, []);
-      patchShot(sceneId, { imageStatus: "ready", imageUrl: url });
+      if (!activeBrandId) throw new Error("No active brand selected.");
+      try {
+        const { job } = await createJob({
+          app: "single_scene",
+          type: "single_scene_images",
+          brandId: activeBrandId,
+          productId: selectedProductId || null,
+          title: `Single scene image regenerate — ${sceneJobLabel(target)}`,
+          payload: buildSessionPayload(),
+          items: [{ label: sceneJobLabel(target), input: buildImageItemInput(target, basePrompt) }],
+        });
+        trackImageJob(job.id);
+      } catch (err) {
+        // A failed job CREATION must not leave the scene stuck "generating" —
+        // mirrors the batch fns' rollback style.
+        patchShot(sceneId, {
+          imageStatus: "failed",
+          imageError: err instanceof Error ? err.message : String(err),
+        });
+      }
     } catch (err) {
       patchShot(sceneId, { imageStatus: "failed", imageError: err instanceof Error ? err.message : String(err) });
     }
@@ -563,67 +1055,50 @@ export default function SingleSceneAppPage() {
     }
   }
 
-  async function callVideoModel(scene: UiScene, prompt: string, imageUrl: string): Promise<string> {
-    const productUrls = collectProductImageUrls();
-    const wantsProduct = productUrls.length > 0 && promptReferencesProduct(prompt);
-    const input: Record<string, unknown> = {
-      prompt,
-      start_image_url: imageUrl,
-      // 8 seconds (was 5): standard tier accepts 3-15. 8s is enough room for
-      // a real scene beat — a stretch, a sip, a turn — without paying for
-      // 10s+. Cost scales linearly per-second.
-      duration: "8",
-      // Audio off: we never use the generated audio. Drops Kling v3 cost from
-      // $0.126/s → $0.084/s (~33%) and shaves time off generation.
-      generate_audio: false,
-    };
-    if (wantsProduct) {
-      input.elements = [
-        {
-          reference_image_urls: productUrls,
-          frontal_image_url: selectedProduct?.productImageUrl ?? productUrls[0],
-        },
-      ];
-    }
-    const res = await generateVideo("single_scene_video", {
-      input,
-      // Standard tier (~40% faster + ~33% cheaper than /pro). Combined with
-      // generate_audio:false above, this is the cost/speed sweet spot for
-      // first-draft review. Swap back to /pro for final-delivery quality.
-      model: "fal-ai/kling-video/v3/standard/image-to-video",
-    });
-    const url = res.urls[0];
-    if (!url) throw new Error("No video URL returned");
-    return url;
-  }
-
-  async function generateVideoForScene(scene: UiScene, prompt: string) {
-    if (!scene.imageUrl) return;
-    patchShot(scene.id, { videoStatus: "generating", videoError: undefined, videoPrompt: prompt });
-    try {
-      const url = await callVideoModel(scene, prompt, scene.imageUrl);
-      patchShot(scene.id, { videoStatus: "ready", videoUrl: url });
-    } catch (err) {
-      patchShot(scene.id, { videoStatus: "failed", videoError: err instanceof Error ? err.message : String(err) });
-    }
-  }
-
   async function generateAllVideos() {
     const approved = uiShots.filter((s) => s.imageApproval === "approved" && s.imageUrl);
     const queue = approved.filter((s) => s.videoStatus === "idle" || s.videoStatus === "failed");
-    if (queue.length === 0) return;
-    setPipelineError(null);
+    if (queue.length === 0 || !activeBrandId || activeVideoJobId) return;
+    // Synchronous in-flight guard — see generateAllImages; same race window.
+    if (videosBatchInFlightRef.current) return;
+    videosBatchInFlightRef.current = true;
     try {
-      const prompts = await writeVideoPrompts(queue);
-      await Promise.all(queue.map((s, i) => generateVideoForScene(s, prompts[i] ?? "")));
-    } catch (err) {
-      setPipelineError(err instanceof Error ? err.message : String(err));
+      // Duplicate-guard — see generateAllImages; same reload/double-spend risk.
+      if (await adoptUnfinishedJob("single_scene_videos")) return;
+      setPipelineError(null);
+      try {
+        const prompts = await writeVideoPrompts(queue);
+        queue.forEach((s, i) => patchShot(s.id, { videoStatus: "generating", videoError: undefined, videoPrompt: prompts[i] ?? "" }));
+        const { job } = await createJob({
+          app: "single_scene",
+          type: "single_scene_videos",
+          brandId: activeBrandId,
+          productId: selectedProductId || null,
+          title: `Single scene videos — ${selectedProduct?.name ?? "no product"} · ${queue.length} scene(s)`,
+          payload: buildSessionPayload(),
+          items: queue.map((s, i) => ({ label: sceneJobLabel(s), input: buildVideoItemInput(s, prompts[i] ?? "") })),
+        });
+        setActiveVideoJobId(job.id);
+      } catch (err) {
+        setPipelineError(err instanceof Error ? err.message : String(err));
+        // Same rollback rationale as generateAllImages.
+        queue.forEach((s) => patchShot(s.id, { videoStatus: s.videoStatus === "failed" ? "failed" : "idle" }));
+      }
+    } finally {
+      videosBatchInFlightRef.current = false;
     }
   }
 
   async function regenerateVideo(sceneId: string, feedback?: string) {
+    // Can't run two video jobs at once — mirrors the batch guard, and keeps
+    // the regenerate buttons effectively inert while a batch is in flight.
+    if (activeVideoJobId) return;
     const target = uiShots.find((s) => s.id === sceneId);
     if (!target || !target.imageUrl) return;
+    // Double-click guard: mirrors regenerateImage — without a live job id yet,
+    // a second click on the same scene would re-enter and fire a duplicate
+    // regenerate for a scene already in flight.
+    if (target.videoStatus === "generating") return;
     setPipelineError(null);
     const feedbackText = (feedback ?? target.videoFeedback ?? "").trim();
     if (feedbackText) closeVideoFeedback(sceneId);
@@ -643,8 +1118,26 @@ export default function SingleSceneAppPage() {
         ? `${basePrompt}\n\nAdditional direction from user: ${feedbackText}`
         : basePrompt;
       patchShot(sceneId, { videoPrompt: finalPrompt });
-      const url = await callVideoModel(target, finalPrompt, target.imageUrl);
-      patchShot(sceneId, { videoStatus: "ready", videoUrl: url });
+      if (!activeBrandId) throw new Error("No active brand selected.");
+      try {
+        const { job } = await createJob({
+          app: "single_scene",
+          type: "single_scene_videos",
+          brandId: activeBrandId,
+          productId: selectedProductId || null,
+          title: `Single scene video regenerate — ${sceneJobLabel(target)}`,
+          payload: buildSessionPayload(),
+          items: [{ label: sceneJobLabel(target), input: buildVideoItemInput(target, finalPrompt) }],
+        });
+        setActiveVideoJobId(job.id);
+      } catch (err) {
+        // A failed job CREATION must not leave the scene stuck "generating" —
+        // mirrors the batch fns' rollback style.
+        patchShot(sceneId, {
+          videoStatus: "failed",
+          videoError: err instanceof Error ? err.message : String(err),
+        });
+      }
     } catch (err) {
       patchShot(sceneId, { videoStatus: "failed", videoError: err instanceof Error ? err.message : String(err) });
     }
@@ -869,6 +1362,54 @@ export default function SingleSceneAppPage() {
 
       <div className="flex-1 flex overflow-hidden" style={{ background: "#0A0B0E" }}>
         <main className="flex-1 overflow-auto">
+          {/* Session-resume banner — running jobs resume live, finished jobs
+              restore the last session. Hidden while the page is already
+              mirroring a job (then the progress UI covers it). Not a single
+              <button> because the dismiss X needs its own button (nested
+              buttons are invalid HTML). */}
+          {resumableJob && !activeImageJobId && !activeVideoJobId && (
+            <div className="max-w-7xl mx-auto px-6 md:px-10 pt-6">
+              <div className="mb-4 w-full rounded-md border border-cyan-400/30 bg-cyan-400/10 flex items-stretch">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const j = resumableJob;
+                    setResumableJob(null);
+                    if (j) {
+                      void hydrateFromJob(j.id).catch((err) =>
+                        setPipelineError(err instanceof Error ? err.message : String(err)),
+                      );
+                    }
+                  }}
+                  className="flex-1 min-w-0 p-3 flex items-start gap-2 text-left hover:bg-cyan-400/15 transition-colors rounded-l-md"
+                >
+                  <RotateCcw size={14} className="text-cyan-400 shrink-0 mt-0.5" />
+                  <p className="text-[11px] font-mono text-cyan-200/80 break-words">
+                    {resumableJob.status === "queued" || resumableJob.status === "running" ? (
+                      <>
+                        <span className="font-medium text-cyan-200">A generation is still running: {resumableJob.title}</span>
+                        {" "}— click to resume this session.
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-medium text-cyan-200">Jump back into your last session: {resumableJob.title}</span>
+                        {" "}— click to restore it.
+                      </>
+                    )}
+                  </p>
+                </button>
+                <button
+                  type="button"
+                  aria-label="Dismiss"
+                  title="Dismiss"
+                  onClick={() => setResumableJob(null)}
+                  className="px-3 flex items-center justify-center text-cyan-400/60 hover:text-cyan-200 hover:bg-cyan-400/15 transition-colors rounded-r-md shrink-0"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+          )}
           <AnimatePresence mode="wait">
             {currentStep === 0 && (
               <motion.div
@@ -1089,7 +1630,7 @@ export default function SingleSceneAppPage() {
                 <div className="flex items-center gap-3 pt-2">
                   <button
                     onClick={() => void handleGenerateScenes()}
-                    disabled={!setupReady || generating}
+                    disabled={!setupReady || generating || Boolean(activeImageJobId)}
                     className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg border bg-violet-500/15 text-violet-300 border-violet-500/40 hover:bg-violet-500/25 transition-all text-sm font-mono uppercase tracking-wider disabled:opacity-30 disabled:cursor-not-allowed"
                   >
                     {generating ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
@@ -1138,7 +1679,7 @@ export default function SingleSceneAppPage() {
                       </button>
                       <button
                         onClick={handleAdvanceToVideos}
-                        disabled={imagesApproved === 0}
+                        disabled={imagesApproved === 0 || Boolean(activeVideoJobId)}
                         className="px-4 py-2 rounded text-xs font-mono uppercase tracking-wider bg-violet-500/15 text-violet-300 border border-violet-500/40 hover:bg-violet-500/25 transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-2"
                       >
                         <Video size={11} /> Generate videos ({imagesApproved})
