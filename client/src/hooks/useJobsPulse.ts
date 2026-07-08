@@ -38,7 +38,7 @@ export function useJobsPulse(brandId: string | null, currentUserId: string | nul
           if (finished.status === "complete") {
             toast.success(`${prev.title} — done`, { description: "Open the Dashboard to review the results." });
           } else if (finished.status === "complete_with_errors") {
-            toast.warning(`${prev.title} — done, ${finished.errorCount} item(s) failed`, { description: "Open the Dashboard to retry the failed items." });
+            toast.warning(`${prev.title} — done, ${finished.errorCount} item(s) failed`, { description: "Open the Dashboard to jump back in and retry the failed shots." });
           } else {
             toast.error(`${prev.title} — failed`, { description: finished.error ?? "Open the Dashboard for details." });
           }

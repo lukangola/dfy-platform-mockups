@@ -640,6 +640,13 @@ export default function BrollAppPage() {
     // from the snapshot so post-resume regenerates aren't product-blind.
     if (payload.productName) setProductLine(payload.productName);
     const isImage = job.type === "broll_images";
+    // A job can be adopted well after it ended (e.g. deep link opened later,
+    // or a dev-server restart marked queued/running jobs failed). If the job
+    // itself is no longer active, any item still "pending"/"running" will
+    // never be picked up by a worker — mapping those to "generating" would
+    // leave the shot spinning forever. Only map to "generating" while the
+    // job itself is still active; otherwise treat unfinished items as failed.
+    const jobIsActive = job.status === "queued" || job.status === "running";
     const byShot = new Map(items.map((it) => [(it.input as { shotId?: string }).shotId, it] as const));
     const restored: UiShot[] = (payload.shots ?? []).map((s) => {
       const base: UiShot = {
@@ -667,11 +674,19 @@ export default function BrollAppPage() {
       if (isImage) {
         if (it.status === "complete" && url) return { ...base, imageStatus: "ready" as const, imageUrl: url };
         if (it.status === "failed") return { ...base, imageStatus: "failed" as const, imageError: it.error ?? undefined };
-        return { ...base, imageStatus: "generating" as const };
+        return {
+          ...base,
+          imageStatus: jobIsActive ? ("generating" as const) : ("failed" as const),
+          ...(jobIsActive ? {} : { imageError: "Interrupted — job ended before this shot finished. Regenerate to retry." }),
+        };
       }
       if (it.status === "complete" && url) return { ...base, videoStatus: "ready" as const, videoUrl: url };
       if (it.status === "failed") return { ...base, videoStatus: "failed" as const, videoError: it.error ?? undefined };
-      return { ...base, videoStatus: "generating" as const };
+      return {
+        ...base,
+        videoStatus: jobIsActive ? ("generating" as const) : ("failed" as const),
+        ...(jobIsActive ? {} : { videoError: "Interrupted — job ended before this shot finished. Regenerate to retry." }),
+      };
     });
     // Restored ids came from a previous session's newUiShotId() sequence, but
     // this session's module-level counter restarts at 0 on a fresh page load.
@@ -802,6 +817,10 @@ export default function BrollAppPage() {
     if (activeImageJobId) return;
     const target = uiShots.find((s) => s.id === shotId);
     if (!target) return;
+    // Double-click guard: without a live job id yet (e.g. this very call is
+    // mid-flight through its awaits), a second click on the same shot would
+    // re-enter and fire a duplicate regenerate for a shot already in flight.
+    if (target.imageStatus === "generating") return;
     setPipelineError(null);
     const feedbackText = (feedback ?? target.imageFeedback ?? "").trim();
     patchShot(shotId, {
@@ -942,6 +961,10 @@ export default function BrollAppPage() {
     if (activeVideoJobId) return;
     const target = uiShots.find((s) => s.id === shotId);
     if (!target || !target.imageUrl) return;
+    // Double-click guard: mirrors regenerateImage — without a live job id yet,
+    // a second click on the same shot would re-enter and fire a duplicate
+    // regenerate for a shot already in flight.
+    if (target.videoStatus === "generating") return;
     setPipelineError(null);
     const feedbackText = (feedback ?? target.videoFeedback ?? "").trim();
     patchShot(shotId, {
