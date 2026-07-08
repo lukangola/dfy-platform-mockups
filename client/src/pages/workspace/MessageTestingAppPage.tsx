@@ -490,6 +490,10 @@ export default function MessageTestingAppPage() {
   const totalCount = generatedAds.length;
 
   const handleProductSelect = (productId: string) => {
+    // A manual pick always resets: clear any hydrate latch a still-in-flight
+    // hydrateFromJob may have set (its restore would target the same product,
+    // so the ref would otherwise stay latched and skip one future reset).
+    hydratingRef.current = false;
     setSelectedProductId(productId);
     setProductDropdownOpen(false);
   };
@@ -657,9 +661,13 @@ export default function MessageTestingAppPage() {
       productId: selectedProductId,
       productName: selectedProduct?.name ?? null,
       angleNames: selectedAngleNames,
+      language: selectedLanguage,
       messageGroups,
       approvedReferenceUrl: approvedRef,
       templatePreviewUrl,
+      // Frozen alongside the approved reference: post-resume single-ad
+      // reworks re-append the same feedback suffix the batch rendered with.
+      templateFeedback,
       // Snapshots are always taken from (or headed to) the review grid.
       step: 4,
       ads: ads.map((a): AdSnapshot => ({
@@ -755,9 +763,11 @@ export default function MessageTestingAppPage() {
       productId?: string | null;
       productName?: string | null;
       angleNames?: string[];
+      language?: string;
       messageGroups?: MessageAngleGroup[];
       approvedReferenceUrl?: string | null;
       templatePreviewUrl?: string | null;
+      templateFeedback?: string;
       step?: number;
       ads?: AdSnapshot[];
     };
@@ -773,6 +783,12 @@ export default function MessageTestingAppPage() {
       // Reaching the review grid implies every restored angle was confirmed.
       setConfirmedAngleNames(new Set(payload.angleNames));
     }
+    // Restore the message language so a post-resume angle regenerate writes
+    // copy in the session's language instead of the default (English).
+    if (payload.language) setSelectedLanguage(payload.language);
+    // Restore the frozen feedback (may be empty — restore that too so a
+    // stale draft doesn't leak into post-resume reworks).
+    if (typeof payload.templateFeedback === "string") setTemplateFeedback(payload.templateFeedback);
     if (payload.messageGroups?.length) setMessageGroups(payload.messageGroups);
     if (payload.approvedReferenceUrl) setApprovedReferenceUrl(payload.approvedReferenceUrl);
     if (payload.templatePreviewUrl) setTemplatePreviewUrl(payload.templatePreviewUrl);
