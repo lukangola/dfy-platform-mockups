@@ -27,13 +27,14 @@ import {
   ArrowLeft, ChevronDown, Check, Loader2, Package, Layers, Type,
   Sparkles, Copy as CopyIcon, FolderDown, Send, RefreshCw, AlertTriangle,
   FileText, MessageSquare, Globe, Wand2, Lightbulb, Edit3, ArrowRight,
-  BadgePercent,
+  BadgePercent, RotateCcw, X,
 } from "lucide-react";
 import { marked } from "marked";
 import {
-  listProducts, generateText, saveBrandAssets,
+  listProducts, saveBrandAssets,
   getAdPipelineCard, extractProductOffer,
-  type Product, type ProductAngle,
+  createJob, getJob, listJobs,
+  type Product, type ProductAngle, type Job,
 } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
 import { LANGUAGES } from "@/lib/mockData";
@@ -167,6 +168,20 @@ export default function CopyEngineAppPage() {
   const [savingToAssets, setSavingToAssets] = useState(false);
   const [savedToAssets, setSavedToAssets] = useState(false);
 
+  // Durable-jobs: the single Claude call (~60-120s) runs server-side as a
+  // 1-item "copy_engine_text" job, so a closed tab / deploy doesn't kill the
+  // draft. The page holds only the active job id; the poll effect below
+  // mirrors the item's terminal state onto draft/chatHistory. `generating`
+  // stays true from create until the job goes terminal.
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  // Synchronous re-entrancy guard: during the createJob await activeJobId is
+  // still null, so a double-click (or autorun + click race) could create two
+  // jobs — and pay Claude twice — without this.
+  const jobInFlightRef = useRef(false);
+  // Session-resume banner: newest queued/running copy_engine job for this
+  // brand (unfinished-only). Dismissible for the rest of the visit via the X.
+  const [resumableJob, setResumableJob] = useState<Job | null>(null);
+
   const [pipelineCardId, setPipelineCardId] = useState<string | null>(null);
   // `autorun=1` deep-link flag — when set, the page fetches the transcript +
   // offer and kicks off the rewrite automatically once everything is ready.
@@ -266,17 +281,20 @@ export default function CopyEngineAppPage() {
     }
   }, [selectedProductId]);
 
-  // Reset draft state when any selector changes — keeps the user honest:
-  // changing inputs requires hitting Generate again. (We don't reset on
-  // free-text fields like `offer`, `guidance`, `sourceCopy` because users
-  // type into those incrementally and we'd flicker the right pane.)
-  useEffect(() => {
+  // Reset draft state when the USER changes a selector — keeps the user
+  // honest: changing inputs requires hitting Generate again. Called from the
+  // selector click handlers (not a deps effect) so programmatic restores —
+  // the ?job= hydration sets mode/product/angle/language AND the draft they
+  // produced — don't wipe their own result. (We don't reset on free-text
+  // fields like `offer`, `guidance`, `sourceCopy` because users type into
+  // those incrementally and we'd flicker the right pane.)
+  function resetDraftState() {
     setDraft(null);
     setGenError(null);
     setChatHistory([]);
     setFeedbackInput("");
     setSavedToAssets(false);
-  }, [mode, copyTypeId, selectedProductId, selectedAngleName, selectedLanguage]);
+  }
 
   // ── Auto-flow: pull the real ad transcript from the pipeline card ──
   // The "Recreate now" deep-link doesn't pass a `source` param — the transcript
@@ -337,7 +355,9 @@ export default function CopyEngineAppPage() {
   }, [autorun, pipelineCardId, selectedProductId, offer]);
 
   // When the user goes back to the mode picker, fully reset the side inputs
-  // so re-entering a different mode starts clean.
+  // so re-entering a different mode starts clean. A still-running job is NOT
+  // cancelled (it's durable server-side) — we just stop tracking it here;
+  // the resume banner / Dashboard offer the way back in.
   function handleChangeMode() {
     setMode(null);
     setCopyTypeId(null);
@@ -351,6 +371,8 @@ export default function CopyEngineAppPage() {
     setChatHistory([]);
     setFeedbackInput("");
     setSavedToAssets(false);
+    setActiveJobId(null);
+    setGenerating(false);
   }
 
   // Build the brand_context blob from the active brand's guidelines.
@@ -381,11 +403,41 @@ export default function CopyEngineAppPage() {
       selectedAngleName &&
       offerReady &&
       sourceCopyReady &&
-      !generating,
+      !generating &&
+      !activeJobId,
   );
 
-  async function runGeneration(opts: { feedback?: string; previousDraft?: string } = {}) {
-    if (!mode || !selectedCopyType || !selectedProduct || !selectedAngle) return;
+  // "Rewritten Copy" mirrors the Save-to-Assets naming: in rewrite mode the
+  // format is dictated by the source, not the (hidden, locked) type dropdown.
+  const copyTypeLabel = mode === "rewrite" ? "Rewritten Copy" : (selectedCopyType?.name ?? "Copy");
+
+  /**
+   * Full working-state snapshot stored on the job so a reload / deep link can
+   * restore the session. `feedback` doubles as the iteration marker — the
+   * poll appends the assistant ack to chatHistory only when it's set.
+   */
+  function buildSessionPayload(opts: { feedback?: string; previousDraft?: string; history?: ChatMsg[] } = {}): Record<string, unknown> {
+    return {
+      mode,
+      copyTypeId,
+      productId: selectedProductId,
+      productName: selectedProduct?.name ?? null,
+      angleName: selectedAngleName,
+      language: selectedLanguage,
+      offer,
+      guidance,
+      sourceCopy,
+      // The draft the job started FROM (feedback runs) — the fresh result
+      // lives on the item output and overlays this on restore.
+      draft: opts.previousDraft ?? draft ?? null,
+      chatHistory: opts.history ?? chatHistory,
+      feedback: opts.feedback ?? null,
+      ...(pipelineCardId ? { pipelineCardId } : {}),
+    };
+  }
+
+  async function runGeneration(opts: { feedback?: string; previousDraft?: string; history?: ChatMsg[] } = {}) {
+    if (!mode || !selectedCopyType || !selectedProduct || !selectedAngle || !activeBrandId) return;
     if (mode === "rewrite" && !sourceCopy.trim()) {
       toast.error("Paste the source copy you want rewritten before generating.");
       return;
@@ -394,6 +446,11 @@ export default function CopyEngineAppPage() {
       toast.error("Describe your front-end offer (discount %, free gifts, etc.) before generating.");
       return;
     }
+    // One copy job at a time. activeJobId only flips once createJob returns,
+    // so the synchronous ref is what stops a double-click (or the autorun
+    // effect racing a manual click) from paying for two Claude runs.
+    if (activeJobId || jobInFlightRef.current) return;
+    jobInFlightRef.current = true;
     setGenerating(true);
     setGenError(null);
     try {
@@ -418,7 +475,7 @@ export default function CopyEngineAppPage() {
 
       const guidanceBlock = guidance.trim() || "(no extra guidance — follow the rules above)";
 
-      const vars: Record<string, unknown> = {
+      const vars: Record<string, string> = {
         product: selectedProduct.name,
         angle: `${selectedAngle.name}\n\n${selectedAngle.block}`,
         brand_context: brandContext,
@@ -446,27 +503,188 @@ export default function CopyEngineAppPage() {
         vars.source_copy = sourceCopy.trim();
       }
 
-      const res = await generateText(action, vars, {
-        maxTokens: 8000,
-        ...(pipelineCardId ? { meta: { pipelineCardId } } : {}),
+      // Durable 1-item job — the ~60-120s Claude call runs server-side, so a
+      // closed tab doesn't kill it. The poll effect below lands the result.
+      const title = `Copy — ${copyTypeLabel} · ${selectedProduct.name}`;
+      const { job } = await createJob({
+        app: "copy_engine",
+        type: "copy_engine_text",
+        brandId: activeBrandId,
+        productId: selectedProductId || null,
+        title,
+        payload: buildSessionPayload(opts),
+        items: [{
+          label: title,
+          input: {
+            action,
+            vars,
+            maxTokens: 8000,
+            // Logged top-level in generations.inputs by the executor so the
+            // Ad Pipeline's live-draft lookup keeps resolving (route parity).
+            ...(pipelineCardId ? { pipelineCardId } : {}),
+          },
+        }],
       });
-      setDraft(res.text);
-      setSavedToAssets(false);
-      // Scroll the output to top after a fresh draft.
-      requestAnimationFrame(() => {
-        const el = document.getElementById("copy-engine-output");
-        if (el) el.scrollTop = 0;
-      });
+      setActiveJobId(job.id);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setGenError(msg);
       toast.error(`Copy generation failed: ${msg}`);
-    } finally {
       setGenerating(false);
+    } finally {
+      jobInFlightRef.current = false;
     }
   }
 
   const handleGenerate = () => { void runGeneration(); };
+
+  // Poll the active job every 2.5s (the app's standard cadence) and land the
+  // single item's terminal state: complete → draft (+ assistant ack for
+  // feedback runs), failed → the same error surface the direct call used.
+  useEffect(() => {
+    if (!activeJobId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const { job, items } = await getJob(activeJobId);
+        if (cancelled) return;
+        if (job.status === "queued" || job.status === "running") return;
+        setActiveJobId(null);
+        setGenerating(false);
+        const item = items[0];
+        const text = (item?.output as { text?: string } | null)?.text;
+        if (item?.status === "complete" && text) {
+          setDraft(text);
+          setSavedToAssets(false);
+          if ((job.payload as { feedback?: string | null }).feedback) {
+            setChatHistory((prev) => [
+              ...prev,
+              { role: "assistant", content: "Regenerated the draft with your feedback applied.", timestamp: Date.now() },
+            ]);
+          }
+          // Scroll the output to top after a fresh draft.
+          requestAnimationFrame(() => {
+            const el = document.getElementById("copy-engine-output");
+            if (el) el.scrollTop = 0;
+          });
+        } else {
+          const msg = item?.error ?? job.error ?? "Copy generation failed.";
+          setGenError(msg);
+          toast.error(`Copy generation failed: ${msg}`);
+        }
+      } catch {
+        /* transient — next tick retries */
+      }
+    };
+    void tick();
+    const t = setInterval(() => void tick(), 2500);
+    return () => { cancelled = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeJobId]);
+
+  /**
+   * Restore the page's session from a job: the payload snapshot provides the
+   * selections + free-text inputs + draft/chatHistory as of trigger time; the
+   * item output overlays the draft when the job completed. Unfinished jobs
+   * are adopted as the active poll target (the poll lands the result and the
+   * assistant ack). The angle rides through pendingAngleRef exactly like the
+   * Ad Pipeline deep-link prefill — the product-change reset effect applies
+   * it instead of clearing.
+   */
+  async function hydrateFromJob(jobId: string) {
+    const { job, items } = await getJob(jobId);
+    const payload = job.payload as {
+      mode?: string;
+      copyTypeId?: string;
+      productId?: string | null;
+      angleName?: string | null;
+      language?: string | null;
+      offer?: string;
+      guidance?: string;
+      sourceCopy?: string;
+      draft?: string | null;
+      chatHistory?: ChatMsg[];
+      feedback?: string | null;
+      pipelineCardId?: string | null;
+    };
+    if (payload.mode === "generate" || payload.mode === "rewrite") setMode(payload.mode);
+    const restoredType = COPY_TYPES.find((c) => c.id === payload.copyTypeId);
+    if (restoredType) setCopyTypeId(restoredType.id);
+    if (payload.productId) {
+      if (payload.productId === selectedProductId) {
+        // Product already selected (banner click mid-session) — the
+        // product-change effect won't fire, so apply the angle directly.
+        if (payload.angleName) setSelectedAngleName(payload.angleName);
+      } else {
+        if (payload.angleName) pendingAngleRef.current = payload.angleName;
+        setSelectedProductId(payload.productId);
+      }
+    }
+    if (payload.language) setSelectedLanguage(payload.language);
+    if (typeof payload.offer === "string") setOffer(payload.offer);
+    if (typeof payload.guidance === "string") setGuidance(payload.guidance);
+    if (typeof payload.sourceCopy === "string" && payload.sourceCopy) setSourceCopy(payload.sourceCopy);
+    if (payload.pipelineCardId) setPipelineCardId(payload.pipelineCardId);
+    setChatHistory(Array.isArray(payload.chatHistory) ? payload.chatHistory : []);
+    setGenError(null);
+    setSavedToAssets(false);
+
+    const item = items[0];
+    const outputText = (item?.output as { text?: string } | null)?.text;
+    if (job.status === "queued" || job.status === "running") {
+      // Unfinished → adopt as the live poll target; show the snapshot draft
+      // (if any) underneath the generating state.
+      setDraft(payload.draft ?? null);
+      setGenerating(true);
+      setActiveJobId(job.id);
+      return;
+    }
+    setGenerating(false);
+    setActiveJobId(null);
+    if (item?.status === "complete" && outputText) {
+      // Overlay the finished output; ack the feedback run like the live poll.
+      setDraft(outputText);
+      if (payload.feedback) {
+        setChatHistory([
+          ...(Array.isArray(payload.chatHistory) ? payload.chatHistory : []),
+          { role: "assistant", content: "Regenerated the draft with your feedback applied.", timestamp: Date.now() },
+        ]);
+      }
+    } else {
+      setDraft(payload.draft ?? null);
+      setGenError(item?.error ?? job.error ?? "Copy generation failed.");
+    }
+  }
+
+  // Deep link from the dashboard: ?job=<id> restores that session.
+  useEffect(() => {
+    const jobId = new URLSearchParams(window.location.search).get("job");
+    if (jobId) {
+      void hydrateFromJob(jobId).catch((err) =>
+        setGenError(err instanceof Error ? err.message : String(err)),
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Session-resume banner source: the newest queued/running copy_engine job
+  // for this brand (unfinished-only — finished drafts are one click away on
+  // the Dashboard, and auto-offering stale sessions here would fight the
+  // mode picker).
+  useEffect(() => {
+    if (!activeBrandId) return;
+    let cancelled = false;
+    void listJobs(activeBrandId)
+      .then(({ jobs }) => {
+        if (cancelled) return;
+        const running = jobs.find(
+          (x) => x.app === "copy_engine" && (x.status === "queued" || x.status === "running"),
+        );
+        setResumableJob(running ?? null);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeBrandId]);
 
   // ── Auto-flow: fire the rewrite automatically once everything is ready ──
   // Waits for the existing canGenerate gate (product + angle + offer + source
@@ -494,15 +712,15 @@ export default function CopyEngineAppPage() {
 
   const handleSendFeedback = async () => {
     const feedback = feedbackInput.trim();
-    if (!feedback || generating || !draft) return;
+    if (!feedback || generating || !draft || activeJobId) return;
     const userMsg: ChatMsg = { role: "user", content: feedback, timestamp: Date.now() };
     setChatHistory((prev) => [...prev, userMsg]);
     setFeedbackInput("");
-    await runGeneration({ feedback, previousDraft: draft });
-    setChatHistory((prev) => [
-      ...prev,
-      { role: "assistant", content: "Regenerated the draft with your feedback applied.", timestamp: Date.now() },
-    ]);
+    // New 1-item job with vars.feedback composed exactly as before. The
+    // history snapshot must include the message appended above (state hasn't
+    // flushed yet, so pass it explicitly). The assistant ack lands when the
+    // poll sees the job complete.
+    await runGeneration({ feedback, previousDraft: draft, history: [...chatHistory, userMsg] });
   };
 
   const handleCopyAll = async () => {
@@ -623,6 +841,46 @@ export default function CopyEngineAppPage() {
         </div>
       </header>
 
+      {/* Session-resume banner — an unfinished copy job for this brand can be
+          adopted with one click (hydrates the session + polls it live).
+          Hidden while the page is already tracking a job. Not a single
+          <button> because the dismiss X needs its own button (nested
+          buttons are invalid HTML). */}
+      {resumableJob && !activeJobId && (
+        <div className="px-6 pt-4">
+          <div className="w-full max-w-3xl mx-auto rounded-md border border-cyan-400/30 bg-cyan-400/10 flex items-stretch">
+            <button
+              type="button"
+              onClick={() => {
+                const j = resumableJob;
+                setResumableJob(null);
+                if (j) {
+                  void hydrateFromJob(j.id).catch((err) =>
+                    setGenError(err instanceof Error ? err.message : String(err)),
+                  );
+                }
+              }}
+              className="flex-1 min-w-0 p-3 flex items-start gap-2 text-left hover:bg-cyan-400/15 transition-colors rounded-l-md"
+            >
+              <RotateCcw size={14} className="text-cyan-400 shrink-0 mt-0.5" />
+              <p className="text-[11px] font-mono text-cyan-200/80 break-words">
+                <span className="font-medium text-cyan-200">A generation is still running: {resumableJob.title}</span>
+                {" "}— click to resume this session.
+              </p>
+            </button>
+            <button
+              type="button"
+              aria-label="Dismiss"
+              title="Dismiss"
+              onClick={() => setResumableJob(null)}
+              className="px-3 flex items-center justify-center text-cyan-400/60 hover:text-cyan-200 hover:bg-cyan-400/15 transition-colors rounded-r-md shrink-0"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ─── Mode picker (shown when no mode is selected yet) ─── */}
       {!mode && (
         <div className="flex-1 overflow-auto p-8 flex items-center justify-center">
@@ -658,6 +916,7 @@ export default function CopyEngineAppPage() {
                       // source copy — we lock it to "listicle" (the only
                       // supported rewrite prompt for v1) and hide its picker.
                       if (m.id === "rewrite") setCopyTypeId("listicle");
+                      resetDraftState();
                     }}
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -785,6 +1044,7 @@ export default function CopyEngineAppPage() {
                           disabled={!ct.available}
                           onClick={() => {
                             if (!ct.available) return;
+                            if (ct.id !== copyTypeId) resetDraftState();
                             setCopyTypeId(ct.id);
                             setCopyTypeDropdownOpen(false);
                           }}
@@ -901,6 +1161,7 @@ export default function CopyEngineAppPage() {
                         <button
                           key={product.id}
                           onClick={() => {
+                            if (product.id !== selectedProductId) resetDraftState();
                             setSelectedProductId(product.id);
                             setProductDropdownOpen(false);
                           }}
@@ -979,6 +1240,7 @@ export default function CopyEngineAppPage() {
                         <button
                           key={angle.name}
                           onClick={() => {
+                            if (angle.name !== selectedAngleName) resetDraftState();
                             setSelectedAngleName(angle.name);
                             setAngleDropdownOpen(false);
                           }}
@@ -1063,6 +1325,7 @@ export default function CopyEngineAppPage() {
                         <button
                           key={lang.code}
                           onClick={() => {
+                            if (lang.code !== selectedLanguage) resetDraftState();
                             setSelectedLanguage(lang.code);
                             setLangDropdownOpen(false);
                           }}

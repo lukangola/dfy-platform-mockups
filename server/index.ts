@@ -33,6 +33,7 @@ import { jobsRouter } from "./routes/jobs.js";
 import { sweepOrphanedJobs } from "./lib/jobRunner.js";
 import "./lib/jobExecutors/media.js"; // side-effect: registers broll/character/single-scene/message-testing media job types
 import "./lib/jobExecutors/staticAds.js"; // side-effect: registers static_ads_recreate
+import "./lib/jobExecutors/copyEngine.js"; // side-effect: registers copy_engine_text
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
