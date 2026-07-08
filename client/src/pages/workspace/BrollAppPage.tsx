@@ -679,26 +679,35 @@ export default function BrollAppPage() {
   }
 
   /** Returns true when an unfinished broll job of the given type for the
-   *  current product was adopted (session hydrated, poll target set) instead
-   *  of creating a duplicate — the guard that stops a reloaded page from
-   *  double-spending on a batch that is still running server-side. */
+   *  current product was handled — adopted (session hydrated, poll target
+   *  set), or found but adoption failed (error surfaced; never fall through
+   *  to creating a duplicate over a live job). Returns false only when there
+   *  is nothing to adopt, so a normal create may proceed. */
   async function adoptUnfinishedJob(type: "broll_images" | "broll_videos"): Promise<boolean> {
     if (!activeBrandId) return false;
+    let candidate: Job | undefined;
     try {
       const { jobs } = await listJobs(activeBrandId);
-      const j = jobs.find(
+      candidate = jobs.find(
         (x) =>
           x.app === "broll" &&
           x.type === type &&
           (x.status === "queued" || x.status === "running") &&
-          ((x.payload as { productId?: string | null })?.productId ?? null) === (selectedProductId || null),
+          (x.productId ?? null) === (selectedProductId || null),
       );
-      if (!j) return false;
-      await hydrateFromJob(j.id);
-      return true;
     } catch {
+      // Couldn't check — proceed with a normal create rather than blocking the user.
       return false;
     }
+    if (!candidate) return false;
+    try {
+      await hydrateFromJob(candidate.id);
+    } catch (err) {
+      // A job to adopt EXISTS but adoption failed — surface it and report
+      // "handled" so the caller does NOT create a duplicate over a live job.
+      setPipelineError(err instanceof Error ? err.message : String(err));
+    }
+    return true;
   }
 
   // Deep link from the dashboard: ?job=<id> restores that session.
