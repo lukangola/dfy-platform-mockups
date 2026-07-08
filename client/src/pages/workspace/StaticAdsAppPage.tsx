@@ -177,6 +177,12 @@ export default function StaticAdsAppPage() {
   // gains the id once createJob returns, so without this a second trigger
   // during the awaits (adoptUnfinishedJob, createJob) double-creates a job.
   const recreateInFlightRef = useRef(false);
+  // Monotonic hydration counter — hydrateFromJob bumps it FIRST thing. The
+  // batch creator captures it before its first await and re-checks it before
+  // createJob, so a resume-banner click (or ?job= deep link) that hydrates a
+  // session mid-await aborts the in-flight batch instead of stomping the
+  // adopted session.
+  const hydrationEpochRef = useRef(0);
   // referenceId → id of the job that most recently targeted it. Two live jobs
   // can both hold an item for the same reference (the original batch + a later
   // single-entry regenerate); without this the still-polled batch item would
@@ -574,6 +580,8 @@ export default function StaticAdsAppPage() {
    * still running and moves the user to the review step.
    */
   async function hydrateFromJob(jobId: string) {
+    // Invalidate any in-flight batch creator FIRST — see hydrationEpochRef.
+    hydrationEpochRef.current += 1;
     const { job, items } = await getJob(jobId);
     const payload = job.payload as {
       productId?: string | null;
@@ -717,11 +725,14 @@ export default function StaticAdsAppPage() {
     // awaits below and create a duplicate job.
     if (recreateInFlightRef.current) return;
     recreateInFlightRef.current = true;
+    const epoch = hydrationEpochRef.current;
     try {
       // Duplicate-guard: a reload loses activeJobIds, and re-walking the flow
       // re-enters this path while the original batch may still be running
       // server-side. Adopt that job instead of paying for a second one.
       if (await adoptUnfinishedJob()) return;
+      // Resume-banner race: a hydration landed during the adopt-check await — drop this stale batch so it can't stomp the adopted session.
+      if (hydrationEpochRef.current !== epoch) return;
       const selectedReferences = references.filter((r) => selectedRefs.has(r.id));
       if (selectedReferences.length === 0) return;
       const initial: Recreation[] = selectedReferences.map((reference) => ({

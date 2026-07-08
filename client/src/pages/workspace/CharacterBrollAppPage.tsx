@@ -362,6 +362,13 @@ export default function CharacterBrollAppPage() {
   const imagesBatchInFlightRef = useRef(false);
   const videosBatchInFlightRef = useRef(false);
 
+  // Monotonic hydration counter — hydrateFromJob bumps it FIRST thing. Batch
+  // creators capture it before their first await and re-check it before
+  // createJob, so a resume-banner click (or ?job= deep link) that hydrates a
+  // session mid-await aborts the in-flight batch instead of stomping the
+  // adopted session.
+  const hydrationEpochRef = useRef(0);
+
   // Synchronous mirror of activeImageJobId (plus a "claiming" sentinel while
   // a create is in flight). The poll's content-safety auto-retry runs from an
   // effect closure and must check-and-claim the single image-job slot without
@@ -1036,6 +1043,7 @@ export default function CharacterBrollAppPage() {
     // Consume the one-retry budget synchronously so duplicate poll ticks
     // can't double-fire for the same shot.
     sanitizedOnceRef.current.add(shotId);
+    const epoch = hydrationEpochRef.current;
     // Keep the shot spinning while the rewrite runs — from the user's view
     // this is still the same generation attempt.
     patchShot(shotId, { imageStatus: "generating", imageError: undefined });
@@ -1055,6 +1063,16 @@ export default function CharacterBrollAppPage() {
           imagePrompt: sanitized,
           imageError:
             "Rejected by the content-safety filter. A softened prompt is staged, but another image job is already running — click Regen to retry manually once it finishes.",
+        });
+        return;
+      }
+      // Resume-banner race: a hydration landed during the sanitize await — stage the softened prompt for a manual Regen instead of stomping the adopted session with a new job.
+      if (hydrationEpochRef.current !== epoch) {
+        patchShot(shotId, {
+          imageStatus: "failed",
+          imagePrompt: sanitized,
+          imageError:
+            "Rejected by the content-safety filter. A softened prompt is staged — click Regen to retry with the softened language.",
         });
         return;
       }
@@ -1155,6 +1173,8 @@ export default function CharacterBrollAppPage() {
    * that matches the job type.
    */
   async function hydrateFromJob(jobId: string) {
+    // Invalidate any in-flight batch creator FIRST — see hydrationEpochRef.
+    hydrationEpochRef.current += 1;
     const { job, items } = await getJob(jobId);
     const payload = job.payload as {
       productId?: string | null;
@@ -1333,6 +1353,7 @@ export default function CharacterBrollAppPage() {
     // creates a duplicate job.
     if (imagesBatchInFlightRef.current) return;
     imagesBatchInFlightRef.current = true;
+    const epoch = hydrationEpochRef.current;
     try {
       // Duplicate-guard: a reload loses activeImageJobId, and re-walking the
       // flow re-enters this path (auto-kick or button) while the original batch
@@ -1342,6 +1363,8 @@ export default function CharacterBrollAppPage() {
       setPipelineError(null);
       try {
         const prompts = await writeImagePrompts(queue);
+        // Resume-banner race: a hydration landed during the prompt-writing await — drop this stale batch so it can't stomp the adopted session.
+        if (hydrationEpochRef.current !== epoch) return;
         queue.forEach((s, i) => patchShot(s.id, { imageStatus: "generating", imageError: undefined, imagePrompt: prompts[i] ?? "" }));
         const { job } = await createJob({
           app: "character_broll",
@@ -1376,6 +1399,7 @@ export default function CharacterBrollAppPage() {
     // re-enter and fire a duplicate regenerate for a shot already in flight.
     if (target.imageStatus === "generating") return;
     setPipelineError(null);
+    const epoch = hydrationEpochRef.current;
     const feedbackText = (feedback ?? target.imageFeedback ?? "").trim();
     // Close the inline feedback panel as soon as the user fires a regen so
     // the UI snaps to the generating state without the textarea hanging around.
@@ -1464,6 +1488,11 @@ export default function CharacterBrollAppPage() {
         ...(feedbackText ? { videoPrompt: undefined } : {}),
       });
       if (!activeBrandId) throw new Error("No active brand selected.");
+      // Resume-banner race: a hydration landed during the awaits above — roll back this shot's optimistic spinner instead of stomping the adopted session with a stale job.
+      if (hydrationEpochRef.current !== epoch) {
+        patchShot(shotId, { imageStatus: target.imageStatus, imageApproval: target.imageApproval, imageError: target.imageError });
+        return;
+      }
       try {
         const { job } = await createJob({
           app: "character_broll",
@@ -1505,12 +1534,15 @@ export default function CharacterBrollAppPage() {
     // Synchronous in-flight guard — see generateAllImages; same race window.
     if (videosBatchInFlightRef.current) return;
     videosBatchInFlightRef.current = true;
+    const epoch = hydrationEpochRef.current;
     try {
       // Duplicate-guard — see generateAllImages; same reload/double-spend risk.
       if (await adoptUnfinishedJob("character_broll_videos")) return;
       setPipelineError(null);
       try {
         const prompts = await writeVideoPrompts(queue);
+        // Resume-banner race: a hydration landed during the prompt-writing await — drop this stale batch so it can't stomp the adopted session.
+        if (hydrationEpochRef.current !== epoch) return;
         queue.forEach((s, i) => patchShot(s.id, { videoStatus: "generating", videoError: undefined, videoPrompt: prompts[i] ?? "" }));
         const { job } = await createJob({
           app: "character_broll",
@@ -1543,6 +1575,7 @@ export default function CharacterBrollAppPage() {
     // regenerate for a shot already in flight.
     if (target.videoStatus === "generating") return;
     setPipelineError(null);
+    const epoch = hydrationEpochRef.current;
     const feedbackText = (feedback ?? target.videoFeedback ?? "").trim();
     patchShot(shotId, {
       videoStatus: "generating",
@@ -1561,6 +1594,11 @@ export default function CharacterBrollAppPage() {
         : basePrompt;
       patchShot(shotId, { videoPrompt: finalPrompt });
       if (!activeBrandId) throw new Error("No active brand selected.");
+      // Resume-banner race: a hydration landed during the awaits above — roll back this shot's optimistic spinner instead of stomping the adopted session with a stale job.
+      if (hydrationEpochRef.current !== epoch) {
+        patchShot(shotId, { videoStatus: target.videoStatus, videoApproval: target.videoApproval, videoError: target.videoError });
+        return;
+      }
       try {
         const { job } = await createJob({
           app: "character_broll",

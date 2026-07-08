@@ -293,6 +293,13 @@ export default function BrollAppPage() {
   const imagesBatchInFlightRef = useRef(false);
   const videosBatchInFlightRef = useRef(false);
 
+  // Monotonic hydration counter — hydrateFromJob bumps it FIRST thing. Batch
+  // creators capture it before their first await and re-check it before
+  // createJob, so a resume-banner click (or ?job= deep link) that hydrates a
+  // session mid-await aborts the in-flight batch instead of stomping the
+  // adopted session.
+  const hydrationEpochRef = useRef(0);
+
   // Fetch products for the active brand.
   useEffect(() => {
     if (!activeBrandId) return;
@@ -626,6 +633,8 @@ export default function BrollAppPage() {
    * that matches the job type.
    */
   async function hydrateFromJob(jobId: string) {
+    // Invalidate any in-flight batch creator FIRST — see hydrationEpochRef.
+    hydrationEpochRef.current += 1;
     const { job, items } = await getJob(jobId);
     const payload = job.payload as {
       productId?: string | null;
@@ -787,6 +796,7 @@ export default function BrollAppPage() {
     // creates a duplicate job.
     if (imagesBatchInFlightRef.current) return;
     imagesBatchInFlightRef.current = true;
+    const epoch = hydrationEpochRef.current;
     try {
       // Duplicate-guard: a reload loses activeImageJobId, and re-walking the
       // flow re-enters this path (auto-kick or button) while the original batch
@@ -796,6 +806,8 @@ export default function BrollAppPage() {
       setPipelineError(null);
       try {
         const prompts = await writeImagePrompts(queue);
+        // Resume-banner race: a hydration landed during the prompt-writing await — drop this stale batch so it can't stomp the adopted session.
+        if (hydrationEpochRef.current !== epoch) return;
         queue.forEach((s, i) => patchShot(s.id, { imageStatus: "generating", imageError: undefined, imagePrompt: prompts[i] ?? "" }));
         const { job } = await createJob({
           app: "broll",
@@ -830,6 +842,7 @@ export default function BrollAppPage() {
     // re-enter and fire a duplicate regenerate for a shot already in flight.
     if (target.imageStatus === "generating") return;
     setPipelineError(null);
+    const epoch = hydrationEpochRef.current;
     const feedbackText = (feedback ?? target.imageFeedback ?? "").trim();
     patchShot(shotId, {
       imageStatus: "generating",
@@ -895,6 +908,11 @@ export default function BrollAppPage() {
         ...(feedbackText ? { videoPrompt: undefined } : {}),
       });
       if (!activeBrand) throw new Error("No active brand selected.");
+      // Resume-banner race: a hydration landed during the awaits above — roll back this shot's optimistic spinner instead of stomping the adopted session with a stale job.
+      if (hydrationEpochRef.current !== epoch) {
+        patchShot(shotId, { imageStatus: target.imageStatus, imageApproval: target.imageApproval, imageError: target.imageError });
+        return;
+      }
       try {
         const { job } = await createJob({
           app: "broll",
@@ -936,12 +954,15 @@ export default function BrollAppPage() {
     // Synchronous in-flight guard — see generateAllImages; same race window.
     if (videosBatchInFlightRef.current) return;
     videosBatchInFlightRef.current = true;
+    const epoch = hydrationEpochRef.current;
     try {
       // Duplicate-guard — see generateAllImages; same reload/double-spend risk.
       if (await adoptUnfinishedJob("broll_videos")) return;
       setPipelineError(null);
       try {
         const prompts = await writeVideoPrompts(queue);
+        // Resume-banner race: a hydration landed during the prompt-writing await — drop this stale batch so it can't stomp the adopted session.
+        if (hydrationEpochRef.current !== epoch) return;
         queue.forEach((s, i) => patchShot(s.id, { videoStatus: "generating", videoError: undefined, videoPrompt: prompts[i] ?? "" }));
         const { job } = await createJob({
           app: "broll",
@@ -974,6 +995,7 @@ export default function BrollAppPage() {
     // regenerate for a shot already in flight.
     if (target.videoStatus === "generating") return;
     setPipelineError(null);
+    const epoch = hydrationEpochRef.current;
     const feedbackText = (feedback ?? target.videoFeedback ?? "").trim();
     patchShot(shotId, {
       videoStatus: "generating",
@@ -992,6 +1014,11 @@ export default function BrollAppPage() {
         : basePrompt;
       patchShot(shotId, { videoPrompt: finalPrompt });
       if (!activeBrand) throw new Error("No active brand selected.");
+      // Resume-banner race: a hydration landed during the awaits above — roll back this shot's optimistic spinner instead of stomping the adopted session with a stale job.
+      if (hydrationEpochRef.current !== epoch) {
+        patchShot(shotId, { videoStatus: target.videoStatus, videoApproval: target.videoApproval, videoError: target.videoError });
+        return;
+      }
       try {
         const { job } = await createJob({
           app: "broll",
