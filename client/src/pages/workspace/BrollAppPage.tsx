@@ -284,6 +284,13 @@ export default function BrollAppPage() {
   const imagesAutoKickedRef = useRef(false);
   const videosAutoKickedRef = useRef(false);
 
+  // Synchronous re-entrancy guards for the batch creators. During their
+  // multi-second awaits (adoptUnfinishedJob, prompt writing) the active job
+  // id is still null, so a second trigger (stepper back + re-approve, banner
+  // click) could double-create a job — and double the fal spend.
+  const imagesBatchInFlightRef = useRef(false);
+  const videosBatchInFlightRef = useRef(false);
+
   // Fetch products for the active brand.
   useEffect(() => {
     if (!activeBrandId) return;
@@ -650,6 +657,14 @@ export default function BrollAppPage() {
       if (it.status === "failed") return { ...base, videoStatus: "failed" as const, videoError: it.error ?? undefined };
       return { ...base, videoStatus: "generating" as const };
     });
+    // Restored ids came from a previous session's newUiShotId() sequence, but
+    // this session's module-level counter restarts at 0 on a fresh page load.
+    // Bump it past the highest restored suffix so a post-resume addShot can't
+    // mint an id (and React key) that collides with a restored shot.
+    for (const s of restored) {
+      const m = /^ui-shot-(\d+)$/.exec(s.id);
+      if (m) uiShotCounter = Math.max(uiShotCounter, Number(m[1]));
+    }
     setUiShots(restored);
     if (job.status === "queued" || job.status === "running") {
       if (isImage) setActiveImageJobId(job.id);
@@ -689,7 +704,11 @@ export default function BrollAppPage() {
   // Deep link from the dashboard: ?job=<id> restores that session.
   useEffect(() => {
     const jobId = new URLSearchParams(window.location.search).get("job");
-    if (jobId) void hydrateFromJob(jobId);
+    if (jobId) {
+      void hydrateFromJob(jobId).catch((err) =>
+        setPipelineError(err instanceof Error ? err.message : String(err)),
+      );
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -739,31 +758,41 @@ export default function BrollAppPage() {
       (s) => s.imageStatus === "idle" || s.imageStatus === "failed",
     );
     if (queue.length === 0 || !activeBrand || activeImageJobId) return;
-    // Duplicate-guard: a reload loses activeImageJobId, and re-walking the
-    // flow re-enters this path (auto-kick or button) while the original batch
-    // may still be running server-side. Adopt that job instead of paying fal
-    // for a second one.
-    if (await adoptUnfinishedJob("broll_images")) return;
-    setPipelineError(null);
+    // Synchronous in-flight guard — activeImageJobId only flips once createJob
+    // returns, so without this a concurrent second call (auto-kick + banner
+    // click, stepper back-and-re-approve) races through the awaits below and
+    // creates a duplicate job.
+    if (imagesBatchInFlightRef.current) return;
+    imagesBatchInFlightRef.current = true;
     try {
-      const prompts = await writeImagePrompts(queue);
-      queue.forEach((s, i) => patchShot(s.id, { imageStatus: "generating", imageError: undefined, imagePrompt: prompts[i] ?? "" }));
-      const { job } = await createJob({
-        app: "broll",
-        type: "broll_images",
-        brandId: activeBrand.id,
-        productId: selectedProductId || null,
-        title: `B-roll images — ${selectedProduct?.name ?? "product"} · ${queue.length} shot(s)`,
-        payload: buildSessionPayload(),
-        items: queue.map((s, i) => ({ label: s.title, input: buildImageItemInput(s, prompts[i] ?? "") })),
-      });
-      setActiveImageJobId(job.id);
-    } catch (err) {
-      setPipelineError(err instanceof Error ? err.message : String(err));
-      // Roll the optimistic "generating" state back so shots stay actionable.
-      // `queue` is the pre-patch snapshot, so each shot's imageStatus is its
-      // pre-call value ("idle" or "failed").
-      queue.forEach((s) => patchShot(s.id, { imageStatus: s.imageStatus === "failed" ? "failed" : "idle" }));
+      // Duplicate-guard: a reload loses activeImageJobId, and re-walking the
+      // flow re-enters this path (auto-kick or button) while the original batch
+      // may still be running server-side. Adopt that job instead of paying fal
+      // for a second one.
+      if (await adoptUnfinishedJob("broll_images")) return;
+      setPipelineError(null);
+      try {
+        const prompts = await writeImagePrompts(queue);
+        queue.forEach((s, i) => patchShot(s.id, { imageStatus: "generating", imageError: undefined, imagePrompt: prompts[i] ?? "" }));
+        const { job } = await createJob({
+          app: "broll",
+          type: "broll_images",
+          brandId: activeBrand.id,
+          productId: selectedProductId || null,
+          title: `B-roll images — ${selectedProduct?.name ?? "product"} · ${queue.length} shot(s)`,
+          payload: buildSessionPayload(),
+          items: queue.map((s, i) => ({ label: s.title, input: buildImageItemInput(s, prompts[i] ?? "") })),
+        });
+        setActiveImageJobId(job.id);
+      } catch (err) {
+        setPipelineError(err instanceof Error ? err.message : String(err));
+        // Roll the optimistic "generating" state back so shots stay actionable.
+        // `queue` is the pre-patch snapshot, so each shot's imageStatus is its
+        // pre-call value ("idle" or "failed").
+        queue.forEach((s) => patchShot(s.id, { imageStatus: s.imageStatus === "failed" ? "failed" : "idle" }));
+      }
+    } finally {
+      imagesBatchInFlightRef.current = false;
     }
   }
 
@@ -901,27 +930,34 @@ export default function BrollAppPage() {
         s.videoStatus !== "ready",
     );
     if (queue.length === 0 || !activeBrand || activeVideoJobId) return;
-    // Duplicate-guard — see generateAllImages; same reload/double-spend risk.
-    if (await adoptUnfinishedJob("broll_videos")) return;
-    setPipelineError(null);
+    // Synchronous in-flight guard — see generateAllImages; same race window.
+    if (videosBatchInFlightRef.current) return;
+    videosBatchInFlightRef.current = true;
     try {
-      const prompts = await writeVideoPrompts(queue);
-      queue.forEach((s, i) => patchShot(s.id, { videoStatus: "generating", videoError: undefined, videoPrompt: prompts[i] ?? "" }));
-      const { job } = await createJob({
-        app: "broll",
-        type: "broll_videos",
-        brandId: activeBrand.id,
-        productId: selectedProductId || null,
-        title: `B-roll videos — ${selectedProduct?.name ?? "product"} · ${queue.length} shot(s)`,
-        payload: buildSessionPayload(),
-        items: queue.map((s, i) => ({ label: s.title, input: buildVideoItemInput(s, prompts[i] ?? "") })),
-      });
-      setActiveVideoJobId(job.id);
-    } catch (err) {
-      setPipelineError(err instanceof Error ? err.message : String(err));
-      // Roll the optimistic "generating" state back so shots stay actionable.
-      // Pre-call status is "idle" or "failed" (the filter excludes the rest).
-      queue.forEach((s) => patchShot(s.id, { videoStatus: s.videoStatus === "failed" ? "failed" : "idle" }));
+      // Duplicate-guard — see generateAllImages; same reload/double-spend risk.
+      if (await adoptUnfinishedJob("broll_videos")) return;
+      setPipelineError(null);
+      try {
+        const prompts = await writeVideoPrompts(queue);
+        queue.forEach((s, i) => patchShot(s.id, { videoStatus: "generating", videoError: undefined, videoPrompt: prompts[i] ?? "" }));
+        const { job } = await createJob({
+          app: "broll",
+          type: "broll_videos",
+          brandId: activeBrand.id,
+          productId: selectedProductId || null,
+          title: `B-roll videos — ${selectedProduct?.name ?? "product"} · ${queue.length} shot(s)`,
+          payload: buildSessionPayload(),
+          items: queue.map((s, i) => ({ label: s.title, input: buildVideoItemInput(s, prompts[i] ?? "") })),
+        });
+        setActiveVideoJobId(job.id);
+      } catch (err) {
+        setPipelineError(err instanceof Error ? err.message : String(err));
+        // Roll the optimistic "generating" state back so shots stay actionable.
+        // Pre-call status is "idle" or "failed" (the filter excludes the rest).
+        queue.forEach((s) => patchShot(s.id, { videoStatus: s.videoStatus === "failed" ? "failed" : "idle" }));
+      }
+    } finally {
+      videosBatchInFlightRef.current = false;
     }
   }
 
@@ -1238,7 +1274,15 @@ export default function BrollAppPage() {
           {resumableJob && !activeImageJobId && !activeVideoJobId && (
             <button
               type="button"
-              onClick={() => { const j = resumableJob; setResumableJob(null); if (j) void hydrateFromJob(j.id); }}
+              onClick={() => {
+                const j = resumableJob;
+                setResumableJob(null);
+                if (j) {
+                  void hydrateFromJob(j.id).catch((err) =>
+                    setPipelineError(err instanceof Error ? err.message : String(err)),
+                  );
+                }
+              }}
               className="mb-4 w-full rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-4 py-2.5 text-left text-sm text-cyan-200 hover:bg-cyan-400/15 transition-colors"
             >
               A generation is still running: <span className="font-medium">{resumableJob.title}</span> — click to resume this session.
