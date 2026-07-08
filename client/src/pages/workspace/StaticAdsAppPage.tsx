@@ -16,9 +16,10 @@ import {
 } from "lucide-react";
 import { LANGUAGES } from "@/lib/mockData";
 import {
-  ApiCallError,
+  createJob, getJob, listJobs,
   createStaticAdReference, getAdPipelineCard, listProducts, listStaticAdReferences,
-  recreateStaticAd, saveBrandAssets,
+  saveBrandAssets,
+  type Job, type JobItem,
   type Product, type ProductAngle, type StaticAdReference,
 } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
@@ -160,6 +161,31 @@ export default function StaticAdsAppPage() {
   const [selectedRecreationId, setSelectedRecreationId] = useState<string | null>(null);
   const [feedbackOpen, setFeedbackOpen] = useState<Set<string>>(new Set());
   const [feedbackDrafts, setFeedbackDrafts] = useState<Record<string, string>>({});
+
+  // Durable jobs: recreations run server-side (survive reload + deploys).
+  // The page tracks the active job ids and mirrors item state onto entries
+  // via the poll effect below. Multiple ids can be live at once — the batch
+  // plus single-entry regenerates fired off already-completed cards.
+  const [activeJobIds, setActiveJobIds] = useState<string[]>([]);
+  // Unfinished-session banner: newest queued/running static_ads job for this
+  // brand, offered as a one-click resume when the page isn't tracking a job.
+  const [resumableJob, setResumableJob] = useState<Job | null>(null);
+  // Job orchestration errors (create/hydrate failures) — per-entry generation
+  // errors still render on the cards themselves.
+  const [jobError, setJobError] = useState<string | null>(null);
+  // Synchronous re-entrancy guard for the batch creator: activeJobIds only
+  // gains the id once createJob returns, so without this a second trigger
+  // during the awaits (adoptUnfinishedJob, createJob) double-creates a job.
+  const recreateInFlightRef = useRef(false);
+  // referenceId → id of the job that most recently targeted it. Two live jobs
+  // can both hold an item for the same reference (the original batch + a later
+  // single-entry regenerate); without this the still-polled batch item would
+  // stomp the regenerate's spinner/result with the old output every tick.
+  const jobOwnerRef = useRef<Map<string, string>>(new Map());
+  // Latest references list for hydrateFromJob — the mount-time deep-link
+  // effect closes over the initial (empty) references array.
+  const referencesRef = useRef<StaticAdReference[]>([]);
+  referencesRef.current = references;
 
   // Step 2 save state
   const [saving, setSaving] = useState(false);
@@ -376,84 +402,381 @@ export default function StaticAdsAppPage() {
     });
   };
 
-  // Fire one recreate call per selected reference in parallel. Update the
-  // matching recreation entry as each fetch resolves or rejects so the Step 2
-  // grid fills in progressively.
-  //
-  // When `previousOutputUrl` is set, the server enters feedback-edit mode:
-  // the previous output is the input image and the feedback text drives the
-  // edit. This is how the Regenerate-with-feedback button avoids rolling
-  // the dice from scratch every time the user types a note.
-  const runRecreate = async (
-    reference: StaticAdReference,
-    feedback?: string,
-    previousOutputUrl?: string,
-  ) => {
-    if (!selectedProductId || !activeAngle) return;
-    try {
-      const result = await recreateStaticAd({
-        productId: selectedProductId,
-        angleName: activeAngle,
-        language: selectedLanguage,
-        referenceId: reference.id,
-        brand: brand ?? null,
-        feedback,
-        previousOutputUrl,
-        ...(pipelineCardId ? { pipelineCardId } : {}),
-      });
+  // ---------- Durable-job machinery (mirrors BrollAppPage) ----------
+
+  /** Reference fields the review screen actually renders — snapshotted into
+   *  the job payload so a resumed session doesn't depend on the (async)
+   *  references fetch having landed. */
+  type ReferenceSnapshot = {
+    id: string;
+    title: string;
+    niche: string;
+    imageUrl: string;
+    thumbnailUrl: string | null;
+  };
+
+  type EntrySnapshot = {
+    referenceId: string;
+    status: RecreationStatus;
+    url: string | null;
+    error: string | null;
+    userStatus: UserStatus;
+    model: string | null;
+    durationMs: number | null;
+    promptVersion: string | null;
+    reference: ReferenceSnapshot;
+  };
+
+  /** Session snapshot stored on every job — enough to restore the review
+   *  screen (config chips + entry cards) without any other fetch. Item
+   *  outputs overlay whatever finished after the snapshot. */
+  function buildSessionPayload(entries: Recreation[]) {
+    return {
+      productId: selectedProductId,
+      productName: selectedProduct?.name ?? null,
+      angleName: activeAngle,
+      language: selectedLanguage,
+      ...(pipelineCardId ? { pipelineCardId } : {}),
+      referenceIds: entries.map((e) => e.referenceId),
+      entries: entries.map((e): EntrySnapshot => ({
+        referenceId: e.referenceId,
+        status: e.status,
+        url: e.url ?? null,
+        error: e.error ?? null,
+        userStatus: e.userStatus,
+        model: e.model ?? null,
+        durationMs: e.durationMs ?? null,
+        promptVersion: e.promptVersion ?? null,
+        reference: {
+          id: e.reference.id,
+          title: e.reference.title,
+          niche: e.reference.niche,
+          imageUrl: e.reference.imageUrl,
+          thumbnailUrl: e.reference.thumbnailUrl,
+        },
+      })),
+    };
+  }
+
+  /** item.input — the exact args the old POST /api/static-ads/recreate took
+   *  (the executor passes them verbatim to runStaticAdRecreate).
+   *
+   *  When `previousOutputUrl` is set, the server enters feedback-edit mode:
+   *  the previous output is the input image and the feedback text drives the
+   *  edit. This is how Regenerate-with-feedback avoids rolling the dice from
+   *  scratch every time the user types a note. */
+  function buildItemInput(referenceId: string, extra?: { feedback?: string; previousOutputUrl?: string }) {
+    return {
+      referenceId,
+      productId: selectedProductId,
+      angleName: activeAngle,
+      language: selectedLanguage,
+      brand: brand ?? null,
+      ...(extra?.feedback ? { feedback: extra.feedback } : {}),
+      ...(extra?.previousOutputUrl ? { previousOutputUrl: extra.previousOutputUrl } : {}),
+      ...(pipelineCardId ? { pipelineCardId } : {}),
+    };
+  }
+
+  /** Rebuild a renderable StaticAdReference from a payload snapshot when the
+   *  live references list doesn't (yet) contain it. Only the fields the
+   *  review screen reads (title / niche / imageUrl) matter; the rest are
+   *  placeholders — the synthesized object never enters the library grid. */
+  function synthesizeReference(snap: Partial<ReferenceSnapshot> & { id: string }): StaticAdReference {
+    return {
+      id: snap.id,
+      createdAt: new Date(0).toISOString(),
+      title: snap.title ?? snap.id,
+      niche: snap.niche ?? "other",
+      imageUrl: snap.imageUrl ?? "",
+      thumbnailUrl: snap.thumbnailUrl ?? null,
+      sourcePath: null,
+      sourceSignature: null,
+      deconstruction: null,
+      deconstructionStatus: "complete",
+      deconstructionError: null,
+      deconstructionGeneratedAt: null,
+      promptVersion: null,
+      model: null,
+    };
+  }
+
+  /** Mirror a job item's state onto its recreation entry. */
+  function applyItemToEntry(it: JobItem) {
+    const referenceId = (it.input as { referenceId?: string }).referenceId;
+    if (!referenceId) return;
+    // Only the job that most recently targeted this entry may write to it —
+    // see jobOwnerRef. (An owner is recorded on every create/adopt, so a
+    // missing owner just means "apply".)
+    const owner = jobOwnerRef.current.get(referenceId);
+    if (owner && owner !== it.jobId) return;
+    const out = (it.output ?? {}) as { url?: string; model?: string; durationMs?: number; promptVersion?: string };
+    if (it.status === "complete" && out.url) {
       setRecreations((prev) =>
         prev.map((r) =>
-          r.referenceId === reference.id
+          r.referenceId === referenceId && r.status === "generating"
             ? {
                 ...r,
                 status: "complete",
-                url: result.url,
-                durationMs: result.durationMs,
-                model: result.model,
-                promptVersion: result.promptVersion,
+                url: out.url,
+                model: out.model,
+                durationMs: out.durationMs,
+                promptVersion: out.promptVersion,
+                error: undefined,
+                errorCode: undefined,
+                errorRetryable: undefined,
               }
             : r,
         ),
       );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // When the server classified the failure, pull the code + retry hint so
-      // the card can render a specific explanation instead of a raw stack.
-      const apiErr = err instanceof ApiCallError ? err : undefined;
-      const errorCode = (apiErr?.errorCode as RecreationErrorCode | undefined) ?? "unknown";
-      const errorRetryable = apiErr?.retryable ?? true;
+    } else if (it.status === "failed") {
       setRecreations((prev) =>
         prev.map((r) =>
-          r.referenceId === reference.id
-            ? { ...r, status: "failed", error: msg, errorCode, errorRetryable }
+          r.referenceId === referenceId && r.status === "generating"
+            ? { ...r, status: "failed", url: undefined, error: it.error ?? "Generation failed", errorCode: "unknown", errorRetryable: true }
             : r,
         ),
       );
     }
-  };
+  }
 
-  const handleRecreate = () => {
-    if (selectedRefs.size === 0 || !selectedProductId || !activeAngle) return;
-    const selectedReferences = references.filter((r) => selectedRefs.has(r.id));
-    const initial: Recreation[] = selectedReferences.map((reference) => ({
-      referenceId: reference.id,
-      reference,
-      status: "generating",
-      userStatus: "pending",
-    }));
-    setRecreations(initial);
+  // Poll all active jobs every 2.5s (the app's standard cadence) and mirror
+  // item states onto entries; drop each job from the active set once it
+  // reaches a terminal status.
+  useEffect(() => {
+    if (activeJobIds.length === 0) return;
+    let cancelled = false;
+    const pollOne = async (jobId: string) => {
+      try {
+        const { job, items } = await getJob(jobId);
+        if (cancelled) return;
+        for (const it of items) applyItemToEntry(it);
+        if (job.status !== "queued" && job.status !== "running") {
+          setActiveJobIds((prev) => prev.filter((id) => id !== jobId));
+        }
+      } catch {
+        /* transient — next tick retries */
+      }
+    };
+    const tick = () => {
+      for (const id of activeJobIds) void pollOne(id);
+    };
+    tick();
+    const t = setInterval(tick, 2500);
+    return () => { cancelled = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeJobIds]);
+
+  /**
+   * Restore the full review session from a job: the payload snapshot provides
+   * the config + entry cards as of trigger time; item outputs overlay whatever
+   * finished after the snapshot. Adopts the job as a poll target when it is
+   * still running and moves the user to the review step.
+   */
+  async function hydrateFromJob(jobId: string) {
+    const { job, items } = await getJob(jobId);
+    const payload = job.payload as {
+      productId?: string | null;
+      angleName?: string;
+      language?: string;
+      pipelineCardId?: string;
+      referenceIds?: string[];
+      entries?: EntrySnapshot[];
+    };
+    // Restore the step-0/1 config so the summary chips render and post-resume
+    // regenerates aren't product/angle-blind. The angle is restored through
+    // the "select" mode slot even if it was custom — activeAngle resolves the
+    // same either way.
+    if (payload.productId && payload.productId !== selectedProductId) setSelectedProductId(payload.productId);
+    if (payload.angleName) { setAngleMode("select"); setSelectedAngle(payload.angleName); }
+    if (payload.language) setSelectedLanguage(payload.language);
+    if (payload.pipelineCardId) setPipelineCardId(payload.pipelineCardId);
+    if (payload.referenceIds?.length) setSelectedRefs(new Set(payload.referenceIds));
+    // A job can be adopted well after it ended. If the job is no longer
+    // active, any item still pending/running will never be picked up by a
+    // worker — mapping those to "generating" would spin forever, so treat
+    // them as failed with a retry hint instead.
+    const jobIsActive = job.status === "queued" || job.status === "running";
+    const byRef = new Map(items.map((it) => [(it.input as { referenceId?: string }).referenceId, it] as const));
+    const restored: Recreation[] = (payload.entries ?? []).map((e) => {
+      const live = referencesRef.current.find((r) => r.id === e.reference?.id);
+      const reference = live ?? synthesizeReference(e.reference ?? { id: e.referenceId });
+      const base: Recreation = {
+        referenceId: e.referenceId,
+        reference,
+        status: e.status === "complete" && e.url ? "complete" : e.status === "failed" ? "failed" : "generating",
+        url: e.url ?? undefined,
+        error: e.error ?? undefined,
+        userStatus: e.userStatus ?? "pending",
+        model: e.model ?? undefined,
+        durationMs: e.durationMs ?? undefined,
+        promptVersion: e.promptVersion ?? undefined,
+      };
+      const it = byRef.get(e.referenceId);
+      if (it) {
+        const out = (it.output ?? {}) as { url?: string; model?: string; durationMs?: number; promptVersion?: string };
+        if (it.status === "complete" && out.url) {
+          return { ...base, status: "complete" as const, url: out.url, model: out.model, durationMs: out.durationMs, promptVersion: out.promptVersion, error: undefined };
+        }
+        if (it.status === "failed") {
+          return { ...base, status: "failed" as const, url: undefined, error: it.error ?? "Generation failed", errorCode: "unknown" as const, errorRetryable: true };
+        }
+        return jobIsActive
+          ? { ...base, status: "generating" as const, url: undefined, error: undefined }
+          : { ...base, status: "failed" as const, url: undefined, error: "Interrupted — job ended before this ad finished. Retry to regenerate.", errorCode: "unknown" as const, errorRetryable: true };
+      }
+      // Not an item of THIS job — the snapshot state stands, except an entry
+      // that was generating under some other job can no longer be tracked.
+      if (base.status === "generating") {
+        return { ...base, status: "failed" as const, url: undefined, error: "Interrupted — this ad was still generating when the session was saved. Retry to regenerate.", errorCode: "unknown" as const, errorRetryable: true };
+      }
+      return base;
+    });
+    setRecreations(restored);
     setSelectedRecreationId(null);
     setFeedbackOpen(new Set());
     setFeedbackDrafts({});
     setSavedCount(0);
     setSaveError(null);
+    if (jobIsActive) {
+      for (const it of items) {
+        const rid = (it.input as { referenceId?: string }).referenceId;
+        if (rid) jobOwnerRef.current.set(rid, job.id);
+      }
+      setActiveJobIds([job.id]);
+    } else {
+      setActiveJobIds([]);
+    }
     setCurrentStep(2);
-    for (const reference of selectedReferences) void runRecreate(reference);
+  }
+
+  /** Returns true when an unfinished static_ads job for the current product
+   *  was handled — adopted (session hydrated, poll target set), or found but
+   *  adoption failed (error surfaced; never fall through to creating a
+   *  duplicate over a live job). Returns false only when there is nothing to
+   *  adopt, so a normal create may proceed. */
+  async function adoptUnfinishedJob(): Promise<boolean> {
+    if (!activeBrandId) return false;
+    let candidate: Job | undefined;
+    try {
+      const { jobs } = await listJobs(activeBrandId);
+      candidate = jobs.find(
+        (x) =>
+          x.app === "static_ads" &&
+          x.type === "static_ads_recreate" &&
+          (x.status === "queued" || x.status === "running") &&
+          (((x.payload as { productId?: string | null }).productId ?? null) === (selectedProductId || null)),
+      );
+    } catch {
+      // Couldn't check — proceed with a normal create rather than blocking the user.
+      return false;
+    }
+    if (!candidate) return false;
+    try {
+      await hydrateFromJob(candidate.id);
+    } catch (err) {
+      setJobError(err instanceof Error ? err.message : String(err));
+    }
+    return true;
+  }
+
+  // Deep link from the dashboard: ?job=<id> restores that session.
+  useEffect(() => {
+    const jobId = new URLSearchParams(window.location.search).get("job");
+    if (jobId) {
+      void hydrateFromJob(jobId).catch((err) =>
+        setJobError(err instanceof Error ? err.message : String(err)),
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Unfinished-session banner source: newest queued/running static_ads job.
+  useEffect(() => {
+    if (!activeBrandId) return;
+    let cancelled = false;
+    void listJobs(activeBrandId)
+      .then(({ jobs }) => {
+        if (cancelled) return;
+        const j = jobs.find(
+          (x) => x.app === "static_ads" && x.type === "static_ads_recreate" && (x.status === "queued" || x.status === "running"),
+        );
+        setResumableJob(j ?? null);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeBrandId]);
+
+  // Create ONE durable job for the whole batch (was: N parallel HTTP calls).
+  // The server fans the items out; the poll effect fills the grid in.
+  const handleRecreate = async () => {
+    if (selectedRefs.size === 0 || !selectedProductId || !activeAngle || !activeBrandId) return;
+    if (activeJobIds.length > 0) return;
+    // Synchronous in-flight guard — activeJobIds only gains the id once
+    // createJob returns, so a concurrent second call would race through the
+    // awaits below and create a duplicate job.
+    if (recreateInFlightRef.current) return;
+    recreateInFlightRef.current = true;
+    try {
+      // Duplicate-guard: a reload loses activeJobIds, and re-walking the flow
+      // re-enters this path while the original batch may still be running
+      // server-side. Adopt that job instead of paying for a second one.
+      if (await adoptUnfinishedJob()) return;
+      const selectedReferences = references.filter((r) => selectedRefs.has(r.id));
+      if (selectedReferences.length === 0) return;
+      const initial: Recreation[] = selectedReferences.map((reference) => ({
+        referenceId: reference.id,
+        reference,
+        status: "generating",
+        userStatus: "pending",
+      }));
+      setRecreations(initial);
+      setSelectedRecreationId(null);
+      setFeedbackOpen(new Set());
+      setFeedbackDrafts({});
+      setSavedCount(0);
+      setSaveError(null);
+      setJobError(null);
+      setCurrentStep(2);
+      try {
+        const { job } = await createJob({
+          app: "static_ads",
+          type: "static_ads_recreate",
+          brandId: activeBrandId,
+          productId: selectedProductId || null,
+          title: `Static ads — ${selectedReferences.length} recreation(s)`,
+          payload: buildSessionPayload(initial),
+          items: selectedReferences.map((reference) => ({
+            label: reference.title || reference.id,
+            input: buildItemInput(reference.id),
+          })),
+        });
+        for (const reference of selectedReferences) jobOwnerRef.current.set(reference.id, job.id);
+        setActiveJobIds((prev) => [...prev, job.id]);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setJobError(msg);
+        // Roll the optimistic "generating" cards into failed so they stay
+        // actionable — each card's Retry fires a fresh single-item job.
+        setRecreations((prev) =>
+          prev.map((r) => (r.status === "generating" ? { ...r, status: "failed", error: msg, errorCode: "unknown", errorRetryable: true } : r)),
+        );
+      }
+    } finally {
+      recreateInFlightRef.current = false;
+    }
   };
 
-  const handleRegenerate = (referenceId: string, feedback?: string) => {
+  // Single-entry retry / regenerate-with-feedback → a 1-item durable job.
+  // Runs alongside a still-active batch (each card is independent), which is
+  // why activeJobIds is a set-like array rather than a single id.
+  const handleRegenerate = async (referenceId: string, feedback?: string) => {
     const entry = recreations.find((r) => r.referenceId === referenceId);
-    if (!entry) return;
+    if (!entry || !selectedProductId || !activeAngle || !activeBrandId) return;
+    // Double-click guard: the entry flips to "generating" synchronously below,
+    // so a re-entrant click can't fire a duplicate job while createJob is
+    // still in flight.
+    if (entry.status === "generating") return;
     // Capture the previous output URL BEFORE we flip the entry to "generating"
     // and clear `url`. When feedback is present we pass it through so the
     // server edits the previous output instead of re-running the whole
@@ -461,13 +784,13 @@ export default function StaticAdsAppPage() {
     // server falls back to a fresh recreate (the "retry" semantics users
     // expect when they just click Regenerate without typing anything).
     const previousOutputUrl = feedback?.trim() ? entry.url : undefined;
-    setRecreations((prev) =>
-      prev.map((r) =>
-        r.referenceId === referenceId
-          ? { ...r, status: "generating", url: undefined, error: undefined, errorCode: undefined, errorRetryable: undefined, userStatus: "pending" }
-          : r,
-      ),
-    );
+    const feedbackText = feedback?.trim() || undefined;
+    setJobError(null);
+    const flip = (r: Recreation): Recreation =>
+      r.referenceId === referenceId
+        ? { ...r, status: "generating", url: undefined, error: undefined, errorCode: undefined, errorRetryable: undefined, userStatus: "pending" }
+        : r;
+    setRecreations((prev) => prev.map(flip));
     // Clear inline feedback state after firing.
     if (feedback) {
       setFeedbackOpen((prev) => {
@@ -481,7 +804,35 @@ export default function StaticAdsAppPage() {
         return next;
       });
     }
-    void runRecreate(entry.reference, feedback, previousOutputUrl);
+    try {
+      const { job } = await createJob({
+        app: "static_ads",
+        type: "static_ads_recreate",
+        brandId: activeBrandId,
+        productId: selectedProductId || null,
+        title: "Static ads — 1 recreation(s)",
+        // Snapshot the WHOLE review grid (with this entry flipped), not just
+        // the reworked card — resuming this job must restore every card.
+        payload: buildSessionPayload(recreations.map(flip)),
+        items: [
+          {
+            label: entry.reference.title || entry.referenceId,
+            input: buildItemInput(referenceId, { feedback: feedbackText, previousOutputUrl }),
+          },
+        ],
+      });
+      jobOwnerRef.current.set(referenceId, job.id);
+      setActiveJobIds((prev) => [...prev, job.id]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setRecreations((prev) =>
+        prev.map((r) =>
+          r.referenceId === referenceId
+            ? { ...r, status: "failed", url: undefined, error: msg, errorCode: "unknown", errorRetryable: true }
+            : r,
+        ),
+      );
+    }
   };
 
   const toggleFeedback = (referenceId: string) => {
@@ -658,6 +1009,34 @@ export default function StaticAdsAppPage() {
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
         <main className="flex-1 overflow-auto p-4">
+          {/* Unfinished-session resume banner — hidden while the page is
+              already mirroring a job (then the progress UI covers it). */}
+          {resumableJob && activeJobIds.length === 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                const j = resumableJob;
+                setResumableJob(null);
+                if (j) {
+                  void hydrateFromJob(j.id).catch((err) =>
+                    setJobError(err instanceof Error ? err.message : String(err)),
+                  );
+                }
+              }}
+              className="mb-4 w-full rounded-md border border-cyan-400/30 bg-cyan-400/10 p-3 flex items-start gap-2 text-left hover:bg-cyan-400/15 transition-colors"
+            >
+              <RotateCcw size={14} className="text-cyan-400 shrink-0 mt-0.5" />
+              <p className="text-[11px] font-mono text-cyan-200/80 break-words">
+                <span className="font-medium text-cyan-200">A generation is still running: {resumableJob.title}</span>
+                {" "}— click to resume this session.
+              </p>
+            </button>
+          )}
+          {jobError && (
+            <div className="mb-4 rounded-md border border-rose-500/30 bg-rose-500/5 px-4 py-3 text-[11px] font-mono text-rose-400">
+              {jobError}
+            </div>
+          )}
           <AnimatePresence mode="wait">
 
             {/* ============================================ */}
@@ -969,9 +1348,9 @@ export default function StaticAdsAppPage() {
                   </div>
                   <button
                     onClick={handleRecreate}
-                    disabled={selectedRefs.size === 0}
+                    disabled={selectedRefs.size === 0 || activeJobIds.length > 0}
                     className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-mono uppercase tracking-wider transition-all ${
-                      selectedRefs.size > 0
+                      selectedRefs.size > 0 && activeJobIds.length === 0
                         ? "bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 cursor-pointer"
                         : "bg-white/[0.03] text-white/20 border border-white/[0.06] cursor-not-allowed"
                     }`}

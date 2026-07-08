@@ -225,8 +225,10 @@ export default function BrollAppPage() {
   // onto shots via the poll effect below.
   const [activeImageJobId, setActiveImageJobId] = useState<string | null>(null);
   const [activeVideoJobId, setActiveVideoJobId] = useState<string | null>(null);
-  // Unfinished-session banner: newest queued/running broll job for this brand,
-  // offered as a one-click resume when the page isn't already tracking a job.
+  // Session-resume banner: newest queued/running broll job for this brand —
+  // or, when none is live, the newest broll job of any status — offered as a
+  // one-click resume/restore when the page isn't already tracking a job.
+  // Dismissible (null) for the rest of the visit via the banner's X.
   const [resumableJob, setResumableJob] = useState<Job | null>(null);
 
   // Review state
@@ -752,15 +754,21 @@ export default function BrollAppPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Unfinished-session banner source: newest queued/running broll job.
+  // Session-resume banner source: prefer the newest queued/running broll job;
+  // with none, fall back to the newest broll job of ANY status so users can
+  // jump straight back into their LAST session even after it finished
+  // (hydrateFromJob handles terminal jobs — spinners end as failed/complete).
+  // The server lists running/queued first, then newest, so within the broll
+  // subset the first entry of each group is the right pick.
   useEffect(() => {
     if (!activeBrandId) return;
     let cancelled = false;
     void listJobs(activeBrandId)
       .then(({ jobs }) => {
         if (cancelled) return;
-        const j = jobs.find((x) => x.app === "broll" && (x.status === "queued" || x.status === "running"));
-        setResumableJob(j ?? null);
+        const broll = jobs.filter((x) => x.app === "broll");
+        const running = broll.find((x) => x.status === "queued" || x.status === "running");
+        setResumableJob(running ?? broll[0] ?? null);
       })
       .catch(() => {});
     return () => { cancelled = true; };
@@ -1288,28 +1296,51 @@ export default function BrollAppPage() {
 
         {/* Center — Content Area */}
         <main className="flex-1 overflow-auto p-4">
-          {/* Unfinished-session resume banner — hidden while the page is
-              already mirroring a job (then the progress UI covers it). */}
+          {/* Session-resume banner — running jobs resume live, finished jobs
+              restore the last session. Hidden while the page is already
+              mirroring a job (then the progress UI covers it). Not a single
+              <button> because the dismiss X needs its own button (nested
+              buttons are invalid HTML). */}
           {resumableJob && !activeImageJobId && !activeVideoJobId && (
-            <button
-              type="button"
-              onClick={() => {
-                const j = resumableJob;
-                setResumableJob(null);
-                if (j) {
-                  void hydrateFromJob(j.id).catch((err) =>
-                    setPipelineError(err instanceof Error ? err.message : String(err)),
-                  );
-                }
-              }}
-              className="mb-4 w-full rounded-md border border-cyan-400/30 bg-cyan-400/10 p-3 flex items-start gap-2 text-left hover:bg-cyan-400/15 transition-colors"
-            >
-              <RotateCcw size={14} className="text-cyan-400 shrink-0 mt-0.5" />
-              <p className="text-[11px] font-mono text-cyan-200/80 break-words">
-                <span className="font-medium text-cyan-200">A generation is still running: {resumableJob.title}</span>
-                {" "}— click to resume this session.
-              </p>
-            </button>
+            <div className="mb-4 w-full rounded-md border border-cyan-400/30 bg-cyan-400/10 flex items-stretch">
+              <button
+                type="button"
+                onClick={() => {
+                  const j = resumableJob;
+                  setResumableJob(null);
+                  if (j) {
+                    void hydrateFromJob(j.id).catch((err) =>
+                      setPipelineError(err instanceof Error ? err.message : String(err)),
+                    );
+                  }
+                }}
+                className="flex-1 min-w-0 p-3 flex items-start gap-2 text-left hover:bg-cyan-400/15 transition-colors rounded-l-md"
+              >
+                <RotateCcw size={14} className="text-cyan-400 shrink-0 mt-0.5" />
+                <p className="text-[11px] font-mono text-cyan-200/80 break-words">
+                  {resumableJob.status === "queued" || resumableJob.status === "running" ? (
+                    <>
+                      <span className="font-medium text-cyan-200">A generation is still running: {resumableJob.title}</span>
+                      {" "}— click to resume this session.
+                    </>
+                  ) : (
+                    <>
+                      <span className="font-medium text-cyan-200">Jump back into your last session: {resumableJob.title}</span>
+                      {" "}— click to restore it.
+                    </>
+                  )}
+                </p>
+              </button>
+              <button
+                type="button"
+                aria-label="Dismiss"
+                title="Dismiss"
+                onClick={() => setResumableJob(null)}
+                className="px-3 flex items-center justify-center text-cyan-400/60 hover:text-cyan-200 hover:bg-cyan-400/15 transition-colors rounded-r-md shrink-0"
+              >
+                <X size={14} />
+              </button>
+            </div>
           )}
           <AnimatePresence mode="wait">
             {/* STEP 0: INPUT */}

@@ -7,7 +7,7 @@
  */
 import { useEffect, useState } from "react";
 import { Link } from "wouter";
-import { AlertTriangle, ArrowRight, CheckCircle2, Clapperboard, Film, ListOrdered, Loader2, MessageSquare, PenLine } from "lucide-react";
+import { AlertTriangle, ArrowRight, CheckCircle2, Clapperboard, Film, Image, ListOrdered, Loader2, MessageSquare, PenLine } from "lucide-react";
 import { listJobs, type Job } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
 
@@ -18,6 +18,7 @@ const APP_META: Record<string, { label: string; icon: React.ElementType; path: s
   message_testing: { label: "Message Testing", icon: MessageSquare, path: "/workspace/apps/message-testing" },
   listicle: { label: "Listicle Builder", icon: ListOrdered, path: "/workspace/apps/listicle-builder" },
   copy_engine: { label: "Copy Engine", icon: PenLine, path: "/workspace/apps/copy-engine" },
+  static_ads: { label: "Static Ads", icon: Image, path: "/workspace/apps/static-ads" },
 };
 
 function StatusChip({ job }: { job: Job }) {
