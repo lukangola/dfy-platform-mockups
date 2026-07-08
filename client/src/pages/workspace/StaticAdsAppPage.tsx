@@ -744,7 +744,7 @@ export default function StaticAdsAppPage() {
           type: "static_ads_recreate",
           brandId: activeBrandId,
           productId: selectedProductId || null,
-          title: `Static ads — ${selectedReferences.length} recreation(s)`,
+          title: `Static ads — ${selectedReferences.length} recreation${selectedReferences.length === 1 ? "" : "s"}`,
           payload: buildSessionPayload(initial),
           items: selectedReferences.map((reference) => ({
             label: reference.title || reference.id,
@@ -786,6 +786,13 @@ export default function StaticAdsAppPage() {
     const previousOutputUrl = feedback?.trim() ? entry.url : undefined;
     const feedbackText = feedback?.trim() || undefined;
     setJobError(null);
+    // Claim ownership BEFORE flipping the entry to "generating": during the
+    // createJob round-trip the batch job (if still polled) would otherwise
+    // still own this ref, and one of its ticks could re-apply the OLD
+    // terminal item to the just-flipped entry — after which the rework's
+    // output never lands (applies only touch "generating" entries). The
+    // placeholder matches no job id, so batch ticks are ignored immediately.
+    jobOwnerRef.current.set(referenceId, `pending:${Date.now()}`);
     const flip = (r: Recreation): Recreation =>
       r.referenceId === referenceId
         ? { ...r, status: "generating", url: undefined, error: undefined, errorCode: undefined, errorRetryable: undefined, userStatus: "pending" }
@@ -810,7 +817,7 @@ export default function StaticAdsAppPage() {
         type: "static_ads_recreate",
         brandId: activeBrandId,
         productId: selectedProductId || null,
-        title: "Static ads — 1 recreation(s)",
+        title: "Static ads — 1 recreation",
         // Snapshot the WHOLE review grid (with this entry flipped), not just
         // the reworked card — resuming this job must restore every card.
         payload: buildSessionPayload(recreations.map(flip)),
@@ -825,6 +832,9 @@ export default function StaticAdsAppPage() {
       setActiveJobIds((prev) => [...prev, job.id]);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // Hygiene: drop the placeholder — harmless if left (applies skip
+      // non-"generating" entries), but no job ever claimed this ref.
+      jobOwnerRef.current.delete(referenceId);
       setRecreations((prev) =>
         prev.map((r) =>
           r.referenceId === referenceId
