@@ -23,8 +23,9 @@ import {
   listProducts, getProductMechanism, generateBrollShots,
   generateBrollImagePrompts, generateBrollVideoPrompts,
   generateImage, generateVideo, saveBrandAssets,
+  createJob, getJob,
   type Product, type BrollShot, type BrollShotList,
-  type ProductMechanism,
+  type ProductMechanism, type JobItem,
 } from "@/lib/api";
 import { regenImageWithFeedback } from "@/lib/imageFeedbackRegen";
 import { useBrand } from "@/contexts/BrandContext";
@@ -218,6 +219,12 @@ export default function BrollAppPage() {
   const [imagePromptsWritten, setImagePromptsWritten] = useState(0);
   const [videoPromptsWritten, setVideoPromptsWritten] = useState(0);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
+
+  // Durable-jobs pilot: batch generation runs server-side (survives reload +
+  // deploys). The page holds only the active job ids and mirrors item state
+  // onto shots via the poll effect below.
+  const [activeImageJobId, setActiveImageJobId] = useState<string | null>(null);
+  const [activeVideoJobId, setActiveVideoJobId] = useState<string | null>(null);
 
   // Review state
   const [selectedType, setSelectedType] = useState<ShotType | "all">("all");
@@ -483,6 +490,98 @@ export default function BrollAppPage() {
     return productRefs;
   }
 
+  // ---------- Durable batch jobs (images + videos) ----------
+
+  /** Job-item input for one shot's image — same payload callImageModel sends, minus the call. */
+  function buildImageItemInput(shot: UiShot, prompt: string): Record<string, unknown> {
+    const imageUrls = collectReferenceImagesForShot(shot);
+    const hasImages = imageUrls.length > 0;
+    return {
+      shotId: shot.id,
+      kind: "image",
+      model: hasImages ? "fal-ai/nano-banana-pro/edit" : "fal-ai/flux-pro/v1.1",
+      falInput: hasImages
+        ? { prompt, image_urls: imageUrls, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" }
+        : { prompt, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" },
+    };
+  }
+
+  /** Job-item input for one shot's video — same payload callVideoModel sends, minus the call. */
+  function buildVideoItemInput(shot: UiShot, prompt: string): Record<string, unknown> {
+    const productRefs = collectProductImageUrls();
+    // Starting frame first, then product references (de-duped) — mirrors
+    // callVideoModel, including the [DEV TRIAL] fast-tier Seedance model.
+    const imageUrls = [shot.imageUrl!, ...productRefs.filter((u) => u !== shot.imageUrl)];
+    return {
+      shotId: shot.id,
+      kind: "video",
+      model: "bytedance/seedance-2.0/fast/reference-to-video",
+      falInput: {
+        prompt,
+        image_urls: imageUrls,
+        duration: "5",
+        aspect_ratio: "9:16",
+        resolution: "720p",
+        generate_audio: false,
+      },
+    };
+  }
+
+  /** Full working-state snapshot stored on the job so a reload can restore the session. */
+  function buildSessionPayload(): Record<string, unknown> {
+    return {
+      productId: selectedProductId,
+      productName: selectedProduct?.name ?? null,
+      shots: uiShots.map((s) => ({
+        id: s.id, shot_id: s.shot_id, type: s.type, userAdded: s.userAdded,
+        title: s.title, description: s.description, location: s.location,
+        imagePrompt: s.imagePrompt ?? null, imageUrl: s.imageUrl ?? null,
+        imageApproval: s.imageApproval,
+        videoPrompt: s.videoPrompt ?? null, videoUrl: s.videoUrl ?? null,
+        videoApproval: s.videoApproval,
+      })),
+    };
+  }
+
+  /** Mirror a job item's state onto its shot. */
+  function applyItemToShot(it: JobItem, isImage: boolean) {
+    const shotId = (it.input as { shotId?: string }).shotId;
+    if (!shotId) return;
+    const url = it.output?.url;
+    if (isImage) {
+      if (it.status === "complete" && url) patchShot(shotId, { imageStatus: "ready", imageUrl: url });
+      else if (it.status === "failed") patchShot(shotId, { imageStatus: "failed", imageError: it.error ?? "Generation failed" });
+    } else {
+      if (it.status === "complete" && url) patchShot(shotId, { videoStatus: "ready", videoUrl: url });
+      else if (it.status === "failed") patchShot(shotId, { videoStatus: "failed", videoError: it.error ?? "Generation failed" });
+    }
+  }
+
+  // Poll the active job(s) every 2.5s (the app's standard cadence) and mirror
+  // item states onto shots; stop when the job reaches a terminal status.
+  useEffect(() => {
+    const jobId = activeImageJobId ?? activeVideoJobId;
+    if (!jobId) return;
+    const isImage = jobId === activeImageJobId;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const { job, items } = await getJob(jobId);
+        if (cancelled) return;
+        for (const it of items) applyItemToShot(it, isImage);
+        if (job.status !== "queued" && job.status !== "running") {
+          if (isImage) setActiveImageJobId(null); else setActiveVideoJobId(null);
+        }
+      } catch {
+        /* transient — next tick retries */
+      }
+    };
+    void tick();
+    const t = setInterval(tick, 2500);
+    return () => { cancelled = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeImageJobId, activeVideoJobId]);
+
   async function callImageModel(shot: UiShot, prompt: string): Promise<string> {
     const imageUrls = collectReferenceImagesForShot(shot);
     const hasImages = imageUrls.length > 0;
@@ -513,15 +612,27 @@ export default function BrollAppPage() {
     const queue = uiShots.filter(
       (s) => s.imageStatus === "idle" || s.imageStatus === "failed",
     );
-    if (queue.length === 0) return;
+    if (queue.length === 0 || !activeBrand || activeImageJobId) return;
     setPipelineError(null);
     try {
       const prompts = await writeImagePrompts(queue);
-      await Promise.all(
-        queue.map((s, i) => generateImageForShot(s, prompts[i] ?? "")),
-      );
+      queue.forEach((s, i) => patchShot(s.id, { imageStatus: "generating", imageError: undefined, imagePrompt: prompts[i] ?? "" }));
+      const { job } = await createJob({
+        app: "broll",
+        type: "broll_images",
+        brandId: activeBrand.id,
+        productId: selectedProductId || null,
+        title: `B-roll images — ${selectedProduct?.name ?? "product"} · ${queue.length} shot(s)`,
+        payload: buildSessionPayload(),
+        items: queue.map((s, i) => ({ label: s.title, input: buildImageItemInput(s, prompts[i] ?? "") })),
+      });
+      setActiveImageJobId(job.id);
     } catch (err) {
       setPipelineError(err instanceof Error ? err.message : String(err));
+      // Roll the optimistic "generating" state back so shots stay actionable.
+      // `queue` is the pre-patch snapshot, so each shot's imageStatus is its
+      // pre-call value ("idle" or "failed").
+      queue.forEach((s) => patchShot(s.id, { imageStatus: s.imageStatus === "failed" ? "failed" : "idle" }));
     }
   }
 
@@ -657,15 +768,26 @@ export default function BrollAppPage() {
         s.videoStatus !== "generating" &&
         s.videoStatus !== "ready",
     );
-    if (queue.length === 0) return;
+    if (queue.length === 0 || !activeBrand || activeVideoJobId) return;
     setPipelineError(null);
     try {
       const prompts = await writeVideoPrompts(queue);
-      await Promise.all(
-        queue.map((s, i) => generateVideoForShot(s, prompts[i] ?? "")),
-      );
+      queue.forEach((s, i) => patchShot(s.id, { videoStatus: "generating", videoError: undefined, videoPrompt: prompts[i] ?? "" }));
+      const { job } = await createJob({
+        app: "broll",
+        type: "broll_videos",
+        brandId: activeBrand.id,
+        productId: selectedProductId || null,
+        title: `B-roll videos — ${selectedProduct?.name ?? "product"} · ${queue.length} shot(s)`,
+        payload: buildSessionPayload(),
+        items: queue.map((s, i) => ({ label: s.title, input: buildVideoItemInput(s, prompts[i] ?? "") })),
+      });
+      setActiveVideoJobId(job.id);
     } catch (err) {
       setPipelineError(err instanceof Error ? err.message : String(err));
+      // Roll the optimistic "generating" state back so shots stay actionable.
+      // Pre-call status is "idle" or "failed" (the filter excludes the rest).
+      queue.forEach((s) => patchShot(s.id, { videoStatus: s.videoStatus === "failed" ? "failed" : "idle" }));
     }
   }
 
@@ -1149,7 +1271,7 @@ export default function BrollAppPage() {
                   </h2>
                   <button
                     onClick={handleApproveShotList}
-                    disabled={uiShots.length === 0}
+                    disabled={uiShots.length === 0 || Boolean(activeImageJobId)}
                     className="flex items-center gap-1.5 px-4 py-2 rounded font-mono text-xs uppercase tracking-wider bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/30 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Sparkles size={12} /> Approve & Generate Images
@@ -1300,7 +1422,7 @@ export default function BrollAppPage() {
                     </button>
                     <button
                       onClick={handleAdvanceToVideos}
-                      disabled={imagesApprovedCount === 0}
+                      disabled={imagesApprovedCount === 0 || Boolean(activeVideoJobId)}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[10px] font-mono uppercase tracking-wider bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       <Video size={10} /> Generate Videos ({imagesApprovedCount})
