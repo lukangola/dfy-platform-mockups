@@ -23,9 +23,9 @@ import {
   listProducts, getProductMechanism, generateBrollShots,
   generateBrollImagePrompts, generateBrollVideoPrompts,
   generateImage, generateVideo, saveBrandAssets,
-  createJob, getJob,
+  createJob, getJob, listJobs,
   type Product, type BrollShot, type BrollShotList,
-  type ProductMechanism, type JobItem,
+  type ProductMechanism, type Job, type JobItem,
 } from "@/lib/api";
 import { regenImageWithFeedback } from "@/lib/imageFeedbackRegen";
 import { useBrand } from "@/contexts/BrandContext";
@@ -225,6 +225,9 @@ export default function BrollAppPage() {
   // onto shots via the poll effect below.
   const [activeImageJobId, setActiveImageJobId] = useState<string | null>(null);
   const [activeVideoJobId, setActiveVideoJobId] = useState<string | null>(null);
+  // Unfinished-session banner: newest queued/running broll job for this brand,
+  // offered as a one-click resume when the page isn't already tracking a job.
+  const [resumableJob, setResumableJob] = useState<Job | null>(null);
 
   // Review state
   const [selectedType, setSelectedType] = useState<ShotType | "all">("all");
@@ -588,6 +591,122 @@ export default function BrollAppPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeImageJobId, activeVideoJobId]);
 
+  /**
+   * Restore the page's full working session from a job: the payload snapshot
+   * (buildSessionPayload) provides the shot list — prompts/urls/approvals as
+   * of trigger time; item outputs overlay whatever finished after the
+   * snapshot. Adopts the job as the active poll target when it is still
+   * running, marks the matching auto-kick ref(s) as fired so entering the
+   * step below can't fire a duplicate batch, and moves the user to the step
+   * that matches the job type.
+   */
+  async function hydrateFromJob(jobId: string) {
+    const { job, items } = await getJob(jobId);
+    const payload = job.payload as {
+      productId?: string | null;
+      productName?: string | null;
+      shots?: Array<Record<string, unknown>>;
+    };
+    if (payload.productId && payload.productId !== selectedProductId) {
+      // selectedProduct is a derived lookup (researchedProducts.find), so
+      // setting the id before the products fetch resolves is safe — it
+      // simply matches once the existing effect lands.
+      setSelectedProductId(payload.productId);
+    }
+    // The prompt writers compose against productLine; restore a usable value
+    // from the snapshot so post-resume regenerates aren't product-blind.
+    if (payload.productName) setProductLine(payload.productName);
+    const isImage = job.type === "broll_images";
+    const byShot = new Map(items.map((it) => [(it.input as { shotId?: string }).shotId, it] as const));
+    const restored: UiShot[] = (payload.shots ?? []).map((s) => {
+      const base: UiShot = {
+        id: s.id as string,
+        shot_id: s.shot_id as number,
+        type: s.type as ShotType,
+        userAdded: Boolean(s.userAdded),
+        title: (s.title as string) ?? "",
+        description: (s.description as string) ?? "",
+        location: (s.location as string) ?? "",
+        imageStatus: s.imageUrl ? "ready" : "idle",
+        imageApproval: ((s.imageApproval as Approval) ?? "pending"),
+        imageUrl: (s.imageUrl as string) ?? undefined,
+        imagePrompt: (s.imagePrompt as string) ?? undefined,
+        imageFeedback: "",
+        videoStatus: s.videoUrl ? "ready" : "idle",
+        videoApproval: ((s.videoApproval as Approval) ?? "pending"),
+        videoUrl: (s.videoUrl as string) ?? undefined,
+        videoPrompt: (s.videoPrompt as string) ?? undefined,
+        videoFeedback: "",
+      };
+      const it = byShot.get(s.id as string);
+      if (!it) return base;
+      const url = it.output?.url;
+      if (isImage) {
+        if (it.status === "complete" && url) return { ...base, imageStatus: "ready" as const, imageUrl: url };
+        if (it.status === "failed") return { ...base, imageStatus: "failed" as const, imageError: it.error ?? undefined };
+        return { ...base, imageStatus: "generating" as const };
+      }
+      if (it.status === "complete" && url) return { ...base, videoStatus: "ready" as const, videoUrl: url };
+      if (it.status === "failed") return { ...base, videoStatus: "failed" as const, videoError: it.error ?? undefined };
+      return { ...base, videoStatus: "generating" as const };
+    });
+    setUiShots(restored);
+    if (job.status === "queued" || job.status === "running") {
+      if (isImage) setActiveImageJobId(job.id);
+      else setActiveVideoJobId(job.id);
+    }
+    // Mark the restored step's auto-kick as already fired BEFORE navigating —
+    // otherwise the step-entry effect would immediately create a new batch
+    // over the restored shots. A videos job implies images are done too.
+    imagesAutoKickedRef.current = true;
+    if (!isImage) videosAutoKickedRef.current = true;
+    setCurrentStep(isImage ? 2 : 3);
+  }
+
+  /** Returns true when an unfinished broll job of the given type for the
+   *  current product was adopted (session hydrated, poll target set) instead
+   *  of creating a duplicate — the guard that stops a reloaded page from
+   *  double-spending on a batch that is still running server-side. */
+  async function adoptUnfinishedJob(type: "broll_images" | "broll_videos"): Promise<boolean> {
+    if (!activeBrandId) return false;
+    try {
+      const { jobs } = await listJobs(activeBrandId);
+      const j = jobs.find(
+        (x) =>
+          x.app === "broll" &&
+          x.type === type &&
+          (x.status === "queued" || x.status === "running") &&
+          ((x.payload as { productId?: string | null })?.productId ?? null) === (selectedProductId || null),
+      );
+      if (!j) return false;
+      await hydrateFromJob(j.id);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Deep link from the dashboard: ?job=<id> restores that session.
+  useEffect(() => {
+    const jobId = new URLSearchParams(window.location.search).get("job");
+    if (jobId) void hydrateFromJob(jobId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Unfinished-session banner source: newest queued/running broll job.
+  useEffect(() => {
+    if (!activeBrandId) return;
+    let cancelled = false;
+    void listJobs(activeBrandId)
+      .then(({ jobs }) => {
+        if (cancelled) return;
+        const j = jobs.find((x) => x.app === "broll" && (x.status === "queued" || x.status === "running"));
+        setResumableJob(j ?? null);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeBrandId]);
+
   // KEEP IN SYNC with buildImageItemInput above — duplicated until Task 11 (plan 2026-07-08-generation-jobs.md) deletes the legacy path.
   async function callImageModel(shot: UiShot, prompt: string): Promise<string> {
     const imageUrls = collectReferenceImagesForShot(shot);
@@ -620,6 +739,11 @@ export default function BrollAppPage() {
       (s) => s.imageStatus === "idle" || s.imageStatus === "failed",
     );
     if (queue.length === 0 || !activeBrand || activeImageJobId) return;
+    // Duplicate-guard: a reload loses activeImageJobId, and re-walking the
+    // flow re-enters this path (auto-kick or button) while the original batch
+    // may still be running server-side. Adopt that job instead of paying fal
+    // for a second one.
+    if (await adoptUnfinishedJob("broll_images")) return;
     setPipelineError(null);
     try {
       const prompts = await writeImagePrompts(queue);
@@ -777,6 +901,8 @@ export default function BrollAppPage() {
         s.videoStatus !== "ready",
     );
     if (queue.length === 0 || !activeBrand || activeVideoJobId) return;
+    // Duplicate-guard — see generateAllImages; same reload/double-spend risk.
+    if (await adoptUnfinishedJob("broll_videos")) return;
     setPipelineError(null);
     try {
       const prompts = await writeVideoPrompts(queue);
@@ -1107,6 +1233,17 @@ export default function BrollAppPage() {
 
         {/* Center — Content Area */}
         <main className="flex-1 overflow-auto p-4">
+          {/* Unfinished-session resume banner — hidden while the page is
+              already mirroring a job (then the progress UI covers it). */}
+          {resumableJob && !activeImageJobId && !activeVideoJobId && (
+            <button
+              type="button"
+              onClick={() => { const j = resumableJob; setResumableJob(null); if (j) void hydrateFromJob(j.id); }}
+              className="mb-4 w-full rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-4 py-2.5 text-left text-sm text-cyan-200 hover:bg-cyan-400/15 transition-colors"
+            >
+              A generation is still running: <span className="font-medium">{resumableJob.title}</span> — click to resume this session.
+            </button>
+          )}
           <AnimatePresence mode="wait">
             {/* STEP 0: INPUT */}
             {currentStep === 0 && (
