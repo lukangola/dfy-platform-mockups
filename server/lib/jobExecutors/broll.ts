@@ -26,6 +26,13 @@ import {
 
 type MediaItemInput = { model?: string; falInput?: Record<string, unknown> };
 
+/**
+ * Foot-gun (accepted v1 trade-off, kept visible on purpose): this insert runs
+ * AFTER a successful render. If it throws, the executor throws, the runner
+ * classifies the DB error as "hard" (no retry), and the item fails — the
+ * already-rendered fal URL is lost with it. Swallowing the error would
+ * silently break cost accounting, so we choose the loud failure.
+ */
 async function logGeneration(args: {
   action: "broll_image" | "broll_video";
   kind: "image" | "video";
@@ -34,16 +41,20 @@ async function logGeneration(args: {
   model: string;
   durationMs: number;
   error?: string;
-}): Promise<void> {
-  await db.insert(schema.generations).values({
-    action: args.action,
-    kind: args.kind,
-    inputs: args.inputs,
-    output: args.output,
-    model: args.model,
-    error: args.error ?? null,
-    durationMs: args.durationMs,
-  });
+}): Promise<string | null> {
+  const [row] = await db
+    .insert(schema.generations)
+    .values({
+      action: args.action,
+      kind: args.kind,
+      inputs: args.inputs,
+      output: args.output,
+      model: args.model,
+      error: args.error ?? null,
+      durationMs: args.durationMs,
+    })
+    .returning({ id: schema.generations.id });
+  return row?.id ?? null;
 }
 
 const runImageItem: JobExecutor = async ({ item }) => {
@@ -51,7 +62,7 @@ const runImageItem: JobExecutor = async ({ item }) => {
   if (!input.falInput) throw new Error("item.input.falInput missing");
   const result = await generateImage({ model: input.model, input: input.falInput });
   const url = result.urls[0];
-  await logGeneration({
+  const generationId = await logGeneration({
     action: "broll_image",
     kind: "image",
     inputs: { jobItemId: item.id, input: input.falInput },
@@ -60,7 +71,7 @@ const runImageItem: JobExecutor = async ({ item }) => {
     durationMs: result.durationMs,
   });
   if (!url) throw new Error("No image URL returned");
-  return { url, model: result.model, durationMs: result.durationMs };
+  return { url, model: result.model, durationMs: result.durationMs, generationId };
 };
 
 const runVideoItem: JobExecutor = async ({ item }) => {
@@ -70,7 +81,7 @@ const runVideoItem: JobExecutor = async ({ item }) => {
   try {
     const result = await generateVideo({ model: primaryModel, input: input.falInput });
     const url = result.urls[0];
-    await logGeneration({
+    const generationId = await logGeneration({
       action: "broll_video",
       kind: "video",
       inputs: { jobItemId: item.id, input: input.falInput },
@@ -79,7 +90,7 @@ const runVideoItem: JobExecutor = async ({ item }) => {
       durationMs: result.durationMs,
     });
     if (!url) throw new Error("No video URL returned");
-    return { url, model: result.model, durationMs: result.durationMs };
+    return { url, model: result.model, durationMs: result.durationMs, generationId };
   } catch (err) {
     const status = (err as { status?: number })?.status;
     const msg = formatError(err);
@@ -89,7 +100,7 @@ const runVideoItem: JobExecutor = async ({ item }) => {
     console.warn(`[jobs] item ${item.id}: seedance likeness refusal — falling back to kling`);
     const result = await generateVideo({ model: fallback.model, input: fallback.input });
     const url = result.urls[0];
-    await logGeneration({
+    const generationId = await logGeneration({
       action: "broll_video",
       kind: "video",
       inputs: { jobItemId: item.id, input: fallback.input, fallbackFrom: primaryModel },
@@ -98,9 +109,18 @@ const runVideoItem: JobExecutor = async ({ item }) => {
       durationMs: result.durationMs,
     });
     if (!url) throw new Error("No video URL returned (kling fallback)");
-    return { url, model: result.model, durationMs: result.durationMs, fallbackFrom: primaryModel };
+    return {
+      url,
+      model: result.model,
+      durationMs: result.durationMs,
+      generationId,
+      fallbackFrom: primaryModel,
+    };
   }
 };
 
 registerJobType("broll_images", runImageItem);
 registerJobType("broll_videos", runVideoItem);
+
+// Exported for unit tests (registration above stays the side-effect entrypoint).
+export { runImageItem, runVideoItem };
