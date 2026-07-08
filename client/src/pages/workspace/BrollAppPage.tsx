@@ -17,12 +17,12 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Sparkles, ChevronDown, Check, X, RefreshCw, MessageSquare, ChevronRight,
   Send, Image as ImageIcon, Video, Eye, ArrowLeft, Package, Loader2,
-  AlertTriangle, Plus, Trash2, Download,
+  AlertTriangle, Plus, Trash2, Download, RotateCcw,
 } from "lucide-react";
 import {
   listProducts, getProductMechanism, generateBrollShots,
   generateBrollImagePrompts, generateBrollVideoPrompts,
-  generateImage, generateVideo, saveBrandAssets,
+  saveBrandAssets,
   createJob, getJob, listJobs,
   type Product, type BrollShot, type BrollShotList,
   type ProductMechanism, type Job, type JobItem,
@@ -461,7 +461,7 @@ export default function BrollAppPage() {
     }
   }
 
-  // ---------- Image generation ----------
+  // ---------- Image reference helpers ----------
 
   // Collect every visual reference we have for the product. nano-banana-pro/edit
   // can ingest multiple images — feeding it the hero shot, the supplementary
@@ -502,8 +502,8 @@ export default function BrollAppPage() {
 
   // ---------- Durable batch jobs (images + videos) ----------
 
-  /** Job-item input for one shot's image — same payload callImageModel sends, minus the call. */
-  // KEEP IN SYNC with callImageModel below — duplicated until Task 11 (plan 2026-07-08-generation-jobs.md) deletes the legacy path.
+  // Builds the fal payload for one shot's image — used by both the batch
+  // (generateAllImages) and single-shot (regenerateImage) durable jobs.
   function buildImageItemInput(shot: UiShot, prompt: string): Record<string, unknown> {
     const imageUrls = collectReferenceImagesForShot(shot);
     const hasImages = imageUrls.length > 0;
@@ -517,12 +517,12 @@ export default function BrollAppPage() {
     };
   }
 
-  /** Job-item input for one shot's video — same payload callVideoModel sends, minus the call. */
-  // KEEP IN SYNC with callVideoModel below — duplicated until Task 11 (plan 2026-07-08-generation-jobs.md) deletes the legacy path.
+  // Builds the fal payload for one shot's video — used by both the batch
+  // (generateAllVideos) and single-shot (regenerateVideo) durable jobs.
   function buildVideoItemInput(shot: UiShot, prompt: string): Record<string, unknown> {
     const productRefs = collectProductImageUrls();
-    // Starting frame first, then product references (de-duped) — mirrors
-    // callVideoModel, including the [DEV TRIAL] fast-tier Seedance model.
+    // Starting frame first, then product references (de-duped). Uses the
+    // [DEV TRIAL] fast-tier Seedance model (see model field below).
     const imageUrls = [shot.imageUrl!, ...productRefs.filter((u) => u !== shot.imageUrl)];
     return {
       shotId: shot.id,
@@ -735,32 +735,7 @@ export default function BrollAppPage() {
     return () => { cancelled = true; };
   }, [activeBrandId]);
 
-  // KEEP IN SYNC with buildImageItemInput above — duplicated until Task 11 (plan 2026-07-08-generation-jobs.md) deletes the legacy path.
-  async function callImageModel(shot: UiShot, prompt: string): Promise<string> {
-    const imageUrls = collectReferenceImagesForShot(shot);
-    const hasImages = imageUrls.length > 0;
-    const input: Record<string, unknown> = hasImages
-      ? { prompt, image_urls: imageUrls, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" }
-      : { prompt, aspect_ratio: "9:16", num_images: 1, output_format: "jpeg" };
-    const model = hasImages ? "fal-ai/nano-banana-pro/edit" : "fal-ai/flux-pro/v1.1";
-    const res = await generateImage("broll_image", { input, model });
-    const url = res.urls[0];
-    if (!url) throw new Error("No image URL returned");
-    return url;
-  }
-
-  async function generateImageForShot(shot: UiShot, prompt: string) {
-    patchShot(shot.id, { imageStatus: "generating", imageError: undefined, imagePrompt: prompt });
-    try {
-      const url = await callImageModel(shot, prompt);
-      patchShot(shot.id, { imageStatus: "ready", imageUrl: url });
-    } catch (err) {
-      patchShot(shot.id, {
-        imageStatus: "failed",
-        imageError: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  // ---------- Image generation (batch + single-shot jobs) ----------
 
   async function generateAllImages() {
     const queue = uiShots.filter(
@@ -806,6 +781,9 @@ export default function BrollAppPage() {
   }
 
   async function regenerateImage(shotId: string, feedback?: string) {
+    // Can't run two image jobs at once — mirrors the batch guard, and keeps
+    // the regenerate buttons effectively inert while a batch is in flight.
+    if (activeImageJobId) return;
     const target = uiShots.find((s) => s.id === shotId);
     if (!target) return;
     setPipelineError(null);
@@ -831,6 +809,10 @@ export default function BrollAppPage() {
       // prompt inverts that — feedback IS the directive, "preserve
       // everything else" is the constraint, and the prior image is the
       // edit source (image_urls[0]).
+      //
+      // This path stays a direct call (not a durable job): it goes through
+      // the server's prompt-template route (action + vars.feedback), which
+      // the job executor's flat `falInput` shape has no equivalent for.
       if (feedbackText && target.imageUrl) {
         const newUrl = await regenImageWithFeedback({
           feedback: feedbackText,
@@ -858,6 +840,8 @@ export default function BrollAppPage() {
       //     take of the same shot, no prior image as ref;
       //   - or this is the first generation attempt, so there's nothing
       //     to edit yet.
+      // Runs as a 1-item durable job so it survives reload the same way the
+      // batch generations do.
       let basePrompt = target.imagePrompt;
       if (!basePrompt) {
         const [written] = await writeImagePrompts([target]);
@@ -867,8 +851,26 @@ export default function BrollAppPage() {
         imagePrompt: basePrompt,
         ...(feedbackText ? { videoPrompt: undefined } : {}),
       });
-      const url = await callImageModel(target, basePrompt);
-      patchShot(shotId, { imageStatus: "ready", imageUrl: url });
+      if (!activeBrand) throw new Error("No active brand selected.");
+      try {
+        const { job } = await createJob({
+          app: "broll",
+          type: "broll_images",
+          brandId: activeBrand.id,
+          productId: selectedProductId || null,
+          title: `B-roll image regenerate — ${target.title}`,
+          payload: buildSessionPayload(),
+          items: [{ label: target.title, input: buildImageItemInput(target, basePrompt) }],
+        });
+        setActiveImageJobId(job.id);
+      } catch (err) {
+        // A failed job CREATION must not leave the shot stuck "generating" —
+        // mirrors the batch fns' rollback style.
+        patchShot(shotId, {
+          imageStatus: "failed",
+          imageError: err instanceof Error ? err.message : String(err),
+        });
+      }
     } catch (err) {
       patchShot(shotId, {
         imageStatus: "failed",
@@ -877,58 +879,7 @@ export default function BrollAppPage() {
     }
   }
 
-  // ---------- Video generation ----------
-
-  // Seedance 2.0 reference-to-video takes `image_urls` (up to 9) and references
-  // them inside the prompt as @Image1, @Image2, etc. @Image1 is the B-roll
-  // starting frame; subsequent entries are the product hero / content image /
-  // reference sheet so the model can match packaging + angles across the clip.
-  // KEEP IN SYNC with buildVideoItemInput above — duplicated until Task 11 (plan 2026-07-08-generation-jobs.md) deletes the legacy path.
-  async function callVideoModel(prompt: string, imageUrl: string): Promise<string> {
-    const productRefs = collectProductImageUrls();
-    // Starting frame first, then product references (de-duped in case the
-    // broll still is somehow one of the product URLs).
-    const imageUrls = [imageUrl, ...productRefs.filter((u) => u !== imageUrl)];
-    const res = await generateVideo("broll_video", {
-      input: {
-        prompt,
-        image_urls: imageUrls,
-        // 5 seconds (was 4): Seedance 2.0 supports 4-15. 5s gives the model
-        // a touch more room for product motion (rotation reveal, pour beat,
-        // unboxing slide) without a noticeable cost or latency hit.
-        duration: "5",
-        aspect_ratio: "9:16",
-        resolution: "720p",
-        // Audio off: we never use the generated audio track, and disabling it
-        // shaves generation time + drops Seedance/Kling cost noticeably.
-        generate_audio: false,
-      },
-      // [DEV TRIAL] Using the FAST variant on dev to compare label fidelity
-      // and motion quality against the regular tier. To roll back:
-      //   model: "bytedance/seedance-2.0/reference-to-video"
-      // Fast tier: ~2-3× faster, ~30-50% cheaper, accepts the same 9 reference
-      // images and 4-15s duration. Watch for: softer motion, label/text drift
-      // on packaging, color/lighting deviation from the starting frame.
-      model: "bytedance/seedance-2.0/fast/reference-to-video",
-    });
-    const url = res.urls[0];
-    if (!url) throw new Error("No video URL returned");
-    return url;
-  }
-
-  async function generateVideoForShot(shot: UiShot, prompt: string) {
-    if (!shot.imageUrl) return;
-    patchShot(shot.id, { videoStatus: "generating", videoError: undefined, videoPrompt: prompt });
-    try {
-      const url = await callVideoModel(prompt, shot.imageUrl);
-      patchShot(shot.id, { videoStatus: "ready", videoUrl: url });
-    } catch (err) {
-      patchShot(shot.id, {
-        videoStatus: "failed",
-        videoError: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  // ---------- Video generation (batch + single-shot jobs) ----------
 
   async function generateAllVideos() {
     const queue = uiShots.filter(
@@ -961,8 +912,7 @@ export default function BrollAppPage() {
         setActiveVideoJobId(job.id);
       } catch (err) {
         setPipelineError(err instanceof Error ? err.message : String(err));
-        // Roll the optimistic "generating" state back so shots stay actionable.
-        // Pre-call status is "idle" or "failed" (the filter excludes the rest).
+        // Same rollback rationale as generateAllImages.
         queue.forEach((s) => patchShot(s.id, { videoStatus: s.videoStatus === "failed" ? "failed" : "idle" }));
       }
     } finally {
@@ -971,6 +921,9 @@ export default function BrollAppPage() {
   }
 
   async function regenerateVideo(shotId: string, feedback?: string) {
+    // Can't run two video jobs at once — mirrors the batch guard, and keeps
+    // the regenerate buttons effectively inert while a batch is in flight.
+    if (activeVideoJobId) return;
     const target = uiShots.find((s) => s.id === shotId);
     if (!target || !target.imageUrl) return;
     setPipelineError(null);
@@ -991,8 +944,26 @@ export default function BrollAppPage() {
         ? `${basePrompt}\n\nAdditional direction from user: ${feedbackText}`
         : basePrompt;
       patchShot(shotId, { videoPrompt: finalPrompt });
-      const url = await callVideoModel(finalPrompt, target.imageUrl);
-      patchShot(shotId, { videoStatus: "ready", videoUrl: url });
+      if (!activeBrand) throw new Error("No active brand selected.");
+      try {
+        const { job } = await createJob({
+          app: "broll",
+          type: "broll_videos",
+          brandId: activeBrand.id,
+          productId: selectedProductId || null,
+          title: `B-roll video regenerate — ${target.title}`,
+          payload: buildSessionPayload(),
+          items: [{ label: target.title, input: buildVideoItemInput(target, finalPrompt) }],
+        });
+        setActiveVideoJobId(job.id);
+      } catch (err) {
+        // A failed job CREATION must not leave the shot stuck "generating" —
+        // mirrors the batch fns' rollback style.
+        patchShot(shotId, {
+          videoStatus: "failed",
+          videoError: err instanceof Error ? err.message : String(err),
+        });
+      }
     } catch (err) {
       patchShot(shotId, {
         videoStatus: "failed",
@@ -1292,9 +1263,13 @@ export default function BrollAppPage() {
                   );
                 }
               }}
-              className="mb-4 w-full rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-4 py-2.5 text-left text-sm text-cyan-200 hover:bg-cyan-400/15 transition-colors"
+              className="mb-4 w-full rounded-md border border-cyan-400/30 bg-cyan-400/10 p-3 flex items-start gap-2 text-left hover:bg-cyan-400/15 transition-colors"
             >
-              A generation is still running: <span className="font-medium">{resumableJob.title}</span> — click to resume this session.
+              <RotateCcw size={14} className="text-cyan-400 shrink-0 mt-0.5" />
+              <p className="text-[11px] font-mono text-cyan-200/80 break-words">
+                <span className="text-sm text-cyan-200">A generation is still running: {resumableJob.title}</span>
+                {" "}— click to resume this session.
+              </p>
             </button>
           )}
           <AnimatePresence mode="wait">
