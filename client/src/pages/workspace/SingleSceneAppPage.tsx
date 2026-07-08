@@ -82,9 +82,14 @@ function newSceneId(): string {
  * is a genuine validation error carries field-level `detail[]` text instead
  * and won't match — string matching is actually tighter than the old
  * status check here.
+ *
+ * The alternates mirror fal.ts's isTransientGenerationRefusal phrase set
+ * (same source of truth): any of those Gemini-refusal phrasings can land
+ * verbatim in item.error once fal's bounded retries are exhausted, and
+ * fal.ts promises the client soften-and-retry flow kicks in for them.
  */
 function isContentSafetyErrorText(msg: string): boolean {
-  return /did not generate the expected output|unsafe content|content policy/i.test(msg);
+  return /did not generate the expected output|could not generate images with the given|try again with different inputs|model did not generate|unsafe content|content policy/i.test(msg);
 }
 
 /**
