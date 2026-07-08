@@ -454,6 +454,11 @@ export default function CopyEngineAppPage() {
     setGenerating(true);
     setGenError(null);
     try {
+      // Duplicate-guard: a reload loses activeJobId while the job keeps
+      // running server-side, and the Ad-Pipeline autorun deep-link re-fires
+      // this path on a fresh mount (autorunFiredRef resets with the page).
+      // Adopt that live job instead of paying Opus for a second 60-120s run.
+      if (await adoptUnfinishedJob()) return;
       const feedbackBlock = opts.feedback?.trim()
         ? [
             "Previous draft:",
@@ -654,6 +659,42 @@ export default function CopyEngineAppPage() {
       setDraft(payload.draft ?? null);
       setGenError(item?.error ?? job.error ?? "Copy generation failed.");
     }
+  }
+
+  /** Returns true when an unfinished copy_engine_text job for the current
+   *  product was handled — adopted (session hydrated, poll target set), or
+   *  found but adoption failed (error surfaced; never fall through to
+   *  creating a duplicate over a live job). Returns false only when there is
+   *  nothing to adopt, so a normal create may proceed. The server lists
+   *  running/queued first, then newest, so `find` picks the right candidate. */
+  async function adoptUnfinishedJob(): Promise<boolean> {
+    if (!activeBrandId) return false;
+    let candidate: Job | undefined;
+    try {
+      const { jobs } = await listJobs(activeBrandId);
+      candidate = jobs.find(
+        (x) =>
+          x.app === "copy_engine" &&
+          x.type === "copy_engine_text" &&
+          (x.status === "queued" || x.status === "running") &&
+          (x.productId ?? null) === (selectedProductId || null),
+      );
+    } catch {
+      // Couldn't check — proceed with a normal create rather than blocking the user.
+      return false;
+    }
+    if (!candidate) return false;
+    try {
+      await hydrateFromJob(candidate.id);
+    } catch (err) {
+      // A job to adopt EXISTS but adoption failed — surface it and report
+      // "handled" so the caller does NOT create a duplicate over a live job.
+      // The caller flipped `generating` on before checking us; clear it,
+      // since no poll target was adopted that would clear it later.
+      setGenError(err instanceof Error ? err.message : String(err));
+      setGenerating(false);
+    }
+    return true;
   }
 
   // Deep link from the dashboard: ?job=<id> restores that session.

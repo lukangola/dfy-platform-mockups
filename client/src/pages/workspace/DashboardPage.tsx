@@ -76,6 +76,8 @@ function metaLine(job: Job): string {
 function jobHref(job: Job): string {
   const meta = APP_META[job.app] ?? APP_META.broll;
   const listicleId = (job.payload as { listicleId?: string })?.listicleId;
+  // Abandoned mid-pipeline listicles project as RUNNING until 20 newer ones
+  // push them out — accepted v1 semantics.
   if (job.app === "listicle" && listicleId) return `${meta.path}?listicle=${listicleId}`;
   return `${meta.path}?job=${job.id}`;
 }

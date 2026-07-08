@@ -55,6 +55,8 @@ function projectListicleAsJob(
     // "when it reached this state" timestamp for terminal rows.
     finishedAt: terminal ? row.updatedAt : null,
     brandId: row.brandId,
+    // null userId also suppresses useJobsPulse completion toasts for listicles
+    // (creator-filtered) — intentional for the read-only projection.
     userId: null,
     productId: row.productId,
     app: "listicle",

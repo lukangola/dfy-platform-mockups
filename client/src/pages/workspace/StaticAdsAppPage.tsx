@@ -1031,27 +1031,40 @@ export default function StaticAdsAppPage() {
       <div className="flex-1 flex overflow-hidden">
         <main className="flex-1 overflow-auto p-4">
           {/* Unfinished-session resume banner — hidden while the page is
-              already mirroring a job (then the progress UI covers it). */}
+              already mirroring a job (then the progress UI covers it).
+              Not a single <button> because the dismiss X needs its own
+              button (nested buttons are invalid HTML). */}
           {resumableJob && activeJobIds.length === 0 && (
-            <button
-              type="button"
-              onClick={() => {
-                const j = resumableJob;
-                setResumableJob(null);
-                if (j) {
-                  void hydrateFromJob(j.id).catch((err) =>
-                    setJobError(err instanceof Error ? err.message : String(err)),
-                  );
-                }
-              }}
-              className="mb-4 w-full rounded-md border border-cyan-400/30 bg-cyan-400/10 p-3 flex items-start gap-2 text-left hover:bg-cyan-400/15 transition-colors"
-            >
-              <RotateCcw size={14} className="text-cyan-400 shrink-0 mt-0.5" />
-              <p className="text-[11px] font-mono text-cyan-200/80 break-words">
-                <span className="font-medium text-cyan-200">A generation is still running: {resumableJob.title}</span>
-                {" "}— click to resume this session.
-              </p>
-            </button>
+            <div className="mb-4 w-full rounded-md border border-cyan-400/30 bg-cyan-400/10 flex items-stretch">
+              <button
+                type="button"
+                onClick={() => {
+                  const j = resumableJob;
+                  setResumableJob(null);
+                  if (j) {
+                    void hydrateFromJob(j.id).catch((err) =>
+                      setJobError(err instanceof Error ? err.message : String(err)),
+                    );
+                  }
+                }}
+                className="flex-1 min-w-0 p-3 flex items-start gap-2 text-left hover:bg-cyan-400/15 transition-colors rounded-l-md"
+              >
+                <RotateCcw size={14} className="text-cyan-400 shrink-0 mt-0.5" />
+                <p className="text-[11px] font-mono text-cyan-200/80 break-words">
+                  <span className="font-medium text-cyan-200">A generation is still running: {resumableJob.title}</span>
+                  {" "}— click to resume this session.
+                </p>
+              </button>
+              <button
+                type="button"
+                aria-label="Dismiss"
+                title="Dismiss"
+                onClick={() => setResumableJob(null)}
+                className="px-3 flex items-center justify-center text-cyan-400/60 hover:text-cyan-200 hover:bg-cyan-400/15 transition-colors rounded-r-md shrink-0"
+              >
+                <X size={14} />
+              </button>
+            </div>
           )}
           {jobError && (
             <div className="mb-4 rounded-md border border-rose-500/30 bg-rose-500/5 px-4 py-3 text-[11px] font-mono text-rose-400">
