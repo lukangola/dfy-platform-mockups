@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { patchBrand, retriggerBrandResearch, uploadBrandLogoRaw } from "@/lib/api";
+import { patchBrand, retriggerBrandResearch, uploadBrandLogoRaw, uploadBrandFontRaw, type BrandFontFace } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
 
 // ── Logo upload widget ────────────────────────────────────────────────
@@ -362,39 +362,178 @@ function ColorPaletteSection({ colors }: { colors: ParsedColor[] }) {
   );
 }
 
-/** Typography section — pulls the bolded font names + previews the actual font. */
-function TypographySection({ fonts, markdown }: { fonts: ParsedFont[]; markdown: string }) {
+/** Map a parsed guidelines role → the BrandFontFace role we persist. */
+function faceRoleFor(parsedRole: string): BrandFontFace["role"] {
+  const r = parsedRole.toLowerCase();
+  if (r.startsWith("secondary")) return "body";
+  if (r.startsWith("accent")) return "accent";
+  return "heading";
+}
+function defaultFallbackFor(role: BrandFontFace["role"]): BrandFontFace["fallback"] {
+  return role === "accent" ? "cursive" : "sans-serif";
+}
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(new Error("Could not read the file"));
+    r.readAsDataURL(file);
+  });
+}
+/** Client-side @font-face CSS so the previews render in the uploaded files. */
+function previewFaceCss(faces: BrandFontFace[]): string {
+  const fmt = (url: string) =>
+    /\.woff2($|\?)/i.test(url) ? "woff2" : /\.woff($|\?)/i.test(url) ? "woff"
+      : /\.otf($|\?)/i.test(url) ? "opentype" : /\.ttf($|\?)/i.test(url) ? "truetype" : "woff2";
+  const rules: string[] = [];
+  for (const f of faces) {
+    if (!f.family) continue;
+    if (f.regularUrl) rules.push(`@font-face{font-family:"${f.family}";font-style:normal;font-weight:400;font-display:swap;src:url("${f.regularUrl}") format("${fmt(f.regularUrl)}");}`);
+    if (f.italicUrl) rules.push(`@font-face{font-family:"${f.family}";font-style:italic;font-weight:400;font-display:swap;src:url("${f.italicUrl}") format("${fmt(f.italicUrl)}");}`);
+  }
+  return rules.join("\n");
+}
+
+/**
+ * Typography section — previews each brand font AND lets an operator upload the
+ * real licensed font FILES (regular + optional italic). Uploaded files are
+ * hosted on fal.storage and saved to brand.brandFonts; the listicle renderer
+ * then embeds them via @font-face so landers render in the genuine typeface.
+ * The `family` we store is the exact name from the guidelines, so generations
+ * and the uploaded files always line up.
+ */
+function TypographySection({
+  fonts, markdown, brandFonts, onSaveFonts,
+}: {
+  fonts: ParsedFont[];
+  markdown: string;
+  brandFonts: BrandFontFace[];
+  onSaveFonts: (next: BrandFontFace[]) => Promise<void>;
+}) {
+  const [busySlot, setBusySlot] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Inject @font-face for uploaded files so the previews below render in the
+  // real typeface (not the Google approximation).
+  useEffect(() => {
+    const css = previewFaceCss(brandFonts ?? []);
+    if (!css) return;
+    const el = document.createElement("style");
+    el.setAttribute("data-brand-fonts-preview", "");
+    el.textContent = css;
+    document.head.appendChild(el);
+    return () => { document.head.removeChild(el); };
+  }, [brandFonts]);
+
   if (fonts.length === 0) return null;
-  // Pull the body of `## 4. Typography` so the prose / size table beneath
-  // the previews still gets rendered (line heights, recommended sizes).
   const typoBody = sectionBody(markdown, "## 4. Typography");
+
+  const faceFor = (parsedRole: string) =>
+    (brandFonts ?? []).find((bf) => bf.role === faceRoleFor(parsedRole)) ?? null;
+
+  async function handleUpload(f: ParsedFont, slot: "regular" | "italic", file: File | null) {
+    if (!file) return;
+    const role = faceRoleFor(f.role);
+    const key = `${role}:${slot}`;
+    setBusySlot(key);
+    setErr(null);
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const { url } = await uploadBrandFontRaw(dataUrl, file.name);
+      const existing = faceFor(f.role);
+      const nextFace: BrandFontFace = {
+        role,
+        family: f.name,
+        regularUrl: slot === "regular" ? url : existing?.regularUrl ?? null,
+        italicUrl: slot === "italic" ? url : existing?.italicUrl ?? null,
+        fallback: existing?.fallback ?? defaultFallbackFor(role),
+      };
+      await onSaveFonts([...(brandFonts ?? []).filter((bf) => bf.role !== role), nextFace]);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusySlot(null);
+    }
+  }
+
+  async function handleRemove(f: ParsedFont) {
+    const role = faceRoleFor(f.role);
+    setBusySlot(`${role}:remove`);
+    setErr(null);
+    try {
+      await onSaveFonts((brandFonts ?? []).filter((bf) => bf.role !== role));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusySlot(null);
+    }
+  }
+
   return (
     <section className="rounded-xl border border-white/[0.06] bg-white/[0.015] p-5">
       <SectionHeader icon={Type} title="Typography" />
+      {err && (
+        <div className="mb-3 text-[10px] font-mono text-rose-300 border border-rose-500/30 bg-rose-500/10 rounded-lg px-3 py-2">
+          {err}
+        </div>
+      )}
       <div className="grid gap-3 mb-5">
-        {fonts.map((f) => (
-          <div key={`${f.role}-${f.name}`} className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-4">
-            <div className="flex items-baseline justify-between mb-2">
-              <span className="text-[10px] font-mono text-white/30 uppercase tracking-widest">{f.role}</span>
-              <span className="text-[11px] font-mono text-cyan-400/60">{f.name}</span>
+        {fonts.map((f) => {
+          const face = faceFor(f.role);
+          const role = faceRoleFor(f.role);
+          const hasReal = Boolean(face?.regularUrl);
+          // Preview in the real file when uploaded, else the Google approximation.
+          const previewFamily = hasReal
+            ? `"${f.name}", ${face?.fallback ?? defaultFallbackFor(role)}`
+            : fontFamilyFor(f.name);
+          const busyReg = busySlot === `${role}:regular`;
+          const busyItal = busySlot === `${role}:italic`;
+          const busyRem = busySlot === `${role}:remove`;
+          return (
+            <div key={`${f.role}-${f.name}`} className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-4">
+              <div className="flex items-baseline justify-between mb-2">
+                <span className="text-[10px] font-mono text-white/30 uppercase tracking-widest">{f.role}</span>
+                <span className="text-[11px] font-mono text-cyan-400/60">{f.name}</span>
+              </div>
+              <div className="text-3xl text-white/90 mb-1 leading-tight" style={{ fontFamily: previewFamily, fontWeight: 600 }}>
+                The quick brown fox
+              </div>
+              <div className="text-sm text-white/55 leading-relaxed" style={{ fontFamily: previewFamily, fontWeight: 400 }}>
+                Jumps over the lazy dog. 1 2 3 4 5 6 7 8 9 0.
+              </div>
+
+              {/* Real font-file upload row */}
+              <div className="mt-3 pt-3 border-t border-white/[0.06] flex flex-wrap items-center gap-2">
+                {hasReal ? (
+                  <span className="inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 rounded-full px-2.5 py-1">
+                    <CheckCircle2 size={11} /> Real font{face?.italicUrl ? " + italic" : ""}
+                  </span>
+                ) : (
+                  <span className="text-[10px] font-mono text-white/30">Using closest web font — upload the real file for pixel-perfect landers</span>
+                )}
+                <label className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-mono cursor-pointer border transition-all ${busyReg ? "opacity-50 pointer-events-none " : ""}text-white/60 border-white/[0.1] hover:text-cyan-400 hover:border-cyan-500/40`}>
+                  {busyReg ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />}
+                  {hasReal ? "Replace regular" : "Upload regular"}
+                  <input type="file" accept=".woff2,.woff,.otf,.ttf,font/*" className="hidden"
+                    onChange={(e) => { void handleUpload(f, "regular", e.target.files?.[0] ?? null); e.currentTarget.value = ""; }} />
+                </label>
+                <label className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-mono cursor-pointer border transition-all ${busyItal ? "opacity-50 pointer-events-none " : ""}text-white/60 border-white/[0.1] hover:text-cyan-400 hover:border-cyan-500/40`}>
+                  {busyItal ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />}
+                  {face?.italicUrl ? "Replace italic" : "Upload italic"}
+                  <input type="file" accept=".woff2,.woff,.otf,.ttf,font/*" className="hidden"
+                    onChange={(e) => { void handleUpload(f, "italic", e.target.files?.[0] ?? null); e.currentTarget.value = ""; }} />
+                </label>
+                {hasReal && (
+                  <button onClick={() => void handleRemove(f)} disabled={busyRem}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-mono text-white/40 border border-white/[0.08] hover:text-rose-300 hover:border-rose-500/40 transition-all disabled:opacity-40">
+                    {busyRem ? <Loader2 size={11} className="animate-spin" /> : <XCircle size={11} />} Remove
+                  </button>
+                )}
+              </div>
             </div>
-            <div
-              className="text-3xl text-white/90 mb-1 leading-tight"
-              style={{ fontFamily: fontFamilyFor(f.name), fontWeight: 600 }}
-            >
-              The quick brown fox
-            </div>
-            <div
-              className="text-sm text-white/55 leading-relaxed"
-              style={{ fontFamily: fontFamilyFor(f.name), fontWeight: 400 }}
-            >
-              Jumps over the lazy dog. 1 2 3 4 5 6 7 8 9 0.
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
-      {/* Render the rest of the Typography section's content (size table,
-          line heights, etc.) below the font previews. */}
       <div className="prose-section">
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{typoBody}</ReactMarkdown>
       </div>
@@ -727,6 +866,15 @@ export default function BrandInfoPage() {
     }
   };
 
+  // Persist the brand's real uploaded font files. The TypographySection owns
+  // the upload UX and hands us the full next BrandFontFace[]; we save + refresh.
+  const handleSaveFonts = async (nextFonts: BrandFontFace[]) => {
+    if (!activeBrandId) return;
+    setSaveError(null);
+    await patchBrand(activeBrandId, { brandFonts: nextFonts });
+    await refreshBrand(activeBrandId);
+  };
+
   const handleReExtract = async () => {
     if (!activeBrandId) return;
     setReExtracting(true);
@@ -886,7 +1034,12 @@ export default function BrandInfoPage() {
             <MarkdownSection icon={Eye} title="Brand Overview" headingExact="## 1. Brand Overview" markdown={guidelinesMd} />
             <MarkdownSection icon={ImageIcon} title="Logo Usage" headingExact="## 2. Logo Usage" markdown={guidelinesMd} />
             <ColorPaletteSection colors={colors} />
-            <TypographySection fonts={fonts} markdown={guidelinesMd} />
+            <TypographySection
+              fonts={fonts}
+              markdown={guidelinesMd}
+              brandFonts={activeBrand?.brandFonts ?? []}
+              onSaveFonts={handleSaveFonts}
+            />
             <MarkdownSection icon={ImageIcon} title="Imagery" headingExact="## 5. Imagery" markdown={guidelinesMd} />
             <VoiceToneSection markdown={guidelinesMd} />
             <MarkdownSection icon={Layers} title="Applications" headingExact="## 7. Applications" markdown={guidelinesMd} />

@@ -3,6 +3,7 @@ import {
   fontFormatFromUrl,
   buildFontFaceCss,
   injectBrandFontFaces,
+  sanitizeBrandFonts,
   type BrandFontFace,
 } from "./brandFonts.js";
 
@@ -75,5 +76,42 @@ describe("injectBrandFontFaces", () => {
     const out = injectBrandFontFaces("<head><body>hi", [SOFIA]);
     expect(out).toContain('<style id="brand-fonts">');
     expect(out.indexOf("<head>")).toBeLessThan(out.indexOf('<style id="brand-fonts">'));
+  });
+});
+
+describe("sanitizeBrandFonts", () => {
+  it("returns [] for non-arrays", () => {
+    expect(sanitizeBrandFonts(null)).toEqual([]);
+    expect(sanitizeBrandFonts("nope")).toEqual([]);
+  });
+  it("keeps valid faces in canonical role order, drops junk", () => {
+    const out = sanitizeBrandFonts([
+      { role: "body", family: "Sofia Pro", regularUrl: "https://x/s.woff2", fallback: "sans-serif" },
+      { role: "heading", family: "Meno Banner", regularUrl: "https://x/m.woff2", italicUrl: "https://x/mi.woff2", fallback: "serif" },
+      { role: "bogus", family: "X", regularUrl: "https://x/x.woff2" },
+      { role: "accent", family: "Paris", regularUrl: "http://insecure/p.woff2" }, // non-https url dropped → no urls → skipped
+    ]);
+    expect(out.map((f) => f.role)).toEqual(["heading", "body"]);
+    expect(out[0].family).toBe("Meno Banner");
+    expect(out[0].italicUrl).toBe("https://x/mi.woff2");
+  });
+  it("drops entries with no family or no urls, and last-wins per role", () => {
+    const out = sanitizeBrandFonts([
+      { role: "heading", family: "", regularUrl: "https://x/a.woff2" },
+      { role: "heading", family: "Only Italic", regularUrl: null, italicUrl: "https://x/i.woff2" },
+      { role: "heading", family: "Winner", regularUrl: "https://x/w.woff2" },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].family).toBe("Winner");
+  });
+  it("defaults fallback by role when missing/invalid", () => {
+    const out = sanitizeBrandFonts([
+      { role: "accent", family: "Paris", regularUrl: "https://x/p.woff2" },
+      { role: "heading", family: "Meno", regularUrl: "https://x/m.woff2", fallback: "nonsense" },
+    ]);
+    const accent = out.find((f) => f.role === "accent")!;
+    const heading = out.find((f) => f.role === "heading")!;
+    expect(accent.fallback).toBe("cursive");
+    expect(heading.fallback).toBe("sans-serif");
   });
 });

@@ -104,6 +104,19 @@ export type BrandResearch = {
   [key: string]: unknown;
 };
 
+/**
+ * One uploaded real typeface for a brand. `family` MUST match the font name in
+ * the guidelines Typography section so the CSS `font-family` a generation emits
+ * resolves to the `@font-face` the renderer injects from these files.
+ */
+export type BrandFontFace = {
+  role: "heading" | "body" | "accent";
+  family: string;
+  regularUrl: string | null;
+  italicUrl?: string | null;
+  fallback: "serif" | "sans-serif" | "cursive" | "monospace";
+};
+
 export type Brand = {
   id: string;
   createdAt: string;
@@ -119,6 +132,13 @@ export type Brand = {
   guidelinesMarkdown: string | null;
   /** @deprecated — legacy JSON dossier kept until boot-time backfill regenerates as markdown. */
   research: BrandResearch | null;
+  /**
+   * Real, client-supplied font FILES (hosted on fal.storage) — one entry per
+   * role, keyed to the family named in the guidelines Typography section. When
+   * present, the listicle renderer embeds these via `@font-face` so landers
+   * render in the genuine typeface. null / [] = fall back to the named web font.
+   */
+  brandFonts: BrandFontFace[] | null;
   researchStatus: "pending" | "researching" | "complete" | "failed";
   researchError: string | null;
   /**
@@ -209,6 +229,8 @@ export async function patchBrand(
     guidelinesMarkdown?: string;
     /** @deprecated — legacy JSON shape; new code writes guidelinesMarkdown. */
     research?: BrandResearch;
+    /** Real uploaded font files; server sanitises before storing on brand.brandFonts. */
+    brandFonts?: BrandFontFace[];
   },
 ): Promise<{ brand: Brand }> {
   const res = await fetch(`/api/brands/${id}`, {
@@ -263,6 +285,19 @@ export function uploadBrandLogoRaw(
   filename?: string,
 ): Promise<{ url: string; converted: boolean }> {
   return post<{ url: string; converted: boolean }>("/api/uploads/brand-logo", { dataUrl, filename });
+}
+
+/**
+ * Upload a real brand font file (.woff2 / .woff / .otf / .ttf). Hosts it on
+ * fal.storage and returns the URL to record on the brand's `brandFonts`. The
+ * server preserves the extension so the renderer can pick the right
+ * `@font-face` format hint.
+ */
+export function uploadBrandFontRaw(
+  dataUrl: string,
+  filename?: string,
+): Promise<{ url: string }> {
+  return post<{ url: string }>("/api/uploads/brand-font", { dataUrl, filename });
 }
 
 // ---------- Products ----------

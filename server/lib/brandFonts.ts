@@ -82,6 +82,40 @@ export function buildFontFaceCss(faces: BrandFontFace[] | null | undefined): str
   return rules.join("\n");
 }
 
+const ROLES: BrandFontRole[] = ["heading", "body", "accent"];
+const FALLBACKS = new Set(["serif", "sans-serif", "cursive", "monospace"]);
+
+/**
+ * Validate + normalise untrusted `brandFonts` input (from the PATCH body) into
+ * a clean BrandFontFace[]. Drops malformed entries rather than throwing so a
+ * partially-filled onboarding form still persists what's valid. Keeps at most
+ * one entry per role (last wins), URLs must be https, family is required.
+ */
+export function sanitizeBrandFonts(input: unknown): BrandFontFace[] {
+  if (!Array.isArray(input)) return [];
+  const byRole = new Map<BrandFontRole, BrandFontFace>();
+  for (const raw of input) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    const role = r.role as BrandFontRole;
+    if (!ROLES.includes(role)) continue;
+    const family = typeof r.family === "string" ? r.family.trim() : "";
+    if (!family || family.length > 60) continue;
+    const httpsOrNull = (v: unknown): string | null =>
+      typeof v === "string" && /^https:\/\//i.test(v.trim()) ? v.trim() : null;
+    const regularUrl = httpsOrNull(r.regularUrl);
+    const italicUrl = httpsOrNull(r.italicUrl);
+    // An entry with no files is meaningless — skip it.
+    if (!regularUrl && !italicUrl) continue;
+    const fallback = (typeof r.fallback === "string" && FALLBACKS.has(r.fallback)
+      ? r.fallback
+      : role === "accent" ? "cursive" : "sans-serif") as BrandFontFace["fallback"];
+    byRole.set(role, { role, family, regularUrl, italicUrl, fallback });
+  }
+  // Emit in canonical role order for stable storage.
+  return ROLES.map((role) => byRole.get(role)).filter((f): f is BrandFontFace => Boolean(f));
+}
+
 /**
  * Inject a brand's `@font-face` rules into a rendered HTML document so the
  * page's `font-family` declarations resolve to the real files. Idempotent-ish:

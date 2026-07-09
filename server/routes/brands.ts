@@ -96,8 +96,15 @@ brandsRouter.patch("/:id", requireAuth, async (req: Request, res: Response) => {
       logoUrl?: string | null;
       guidelinesMarkdown?: string;
       research?: unknown;
+      brandFonts?: unknown;
     };
     const updates: Record<string, unknown> = {};
+    if (body.brandFonts !== undefined) {
+      // Real uploaded font files (family + regular/italic fal URLs + fallback).
+      // Sanitised so a malformed onboarding payload can't poison the column.
+      const { sanitizeBrandFonts } = await import("../lib/brandFonts.js");
+      updates.brandFonts = sanitizeBrandFonts(body.brandFonts);
+    }
     if (typeof body.name === "string" && body.name.trim()) updates.name = body.name.trim();
     if (body.brandUrl !== undefined) updates.brandUrl = body.brandUrl ?? null;
     if (body.logoUrl !== undefined) {
