@@ -7,18 +7,25 @@
  */
 import { useEffect, useState } from "react";
 import { Link } from "wouter";
-import { AlertTriangle, ArrowRight, CheckCircle2, Clapperboard, Film, Image, ListOrdered, Loader2, MessageSquare, PenLine } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, CheckCircle2, Clapperboard, Film, Image, ListOrdered, Loader2, MessageSquare, PenLine } from "lucide-react";
 import { listJobs, type Job } from "@/lib/api";
 import { useBrand } from "@/contexts/BrandContext";
 
-const APP_META: Record<string, { label: string; icon: React.ElementType; path: string }> = {
-  broll: { label: "B-Roll", icon: Film, path: "/workspace/apps/broll" },
-  character_broll: { label: "Character B-Roll", icon: Clapperboard, path: "/workspace/apps/character-broll" },
-  single_scene: { label: "Single Scene", icon: Film, path: "/workspace/apps/single-scene" },
-  message_testing: { label: "Message Testing", icon: MessageSquare, path: "/workspace/apps/message-testing" },
-  listicle: { label: "Listicle Builder", icon: ListOrdered, path: "/workspace/apps/listicle-builder" },
-  copy_engine: { label: "Copy Engine", icon: PenLine, path: "/workspace/apps/copy-engine" },
-  static_ads: { label: "Static Ads", icon: Image, path: "/workspace/apps/static-ads" },
+/**
+ * Per-app metadata. `stages` names the APP PROCESS steps (not job statuses);
+ * `stageIndexForType` maps a job's `type` to the stage that job executes.
+ * A job's status only describes its own batch — a DONE image batch does not
+ * mean the process is done (videos haven't started) — so the dashboard shows
+ * the process stage separately; see processStage().
+ */
+const APP_META: Record<string, { label: string; icon: React.ElementType; path: string; stages: string[]; stageIndexForType: Record<string, number> }> = {
+  broll: { label: "B-Roll", icon: Film, path: "/workspace/apps/broll", stages: ["Shots", "Images", "Videos"], stageIndexForType: { broll_images: 1, broll_videos: 2 } },
+  character_broll: { label: "Character B-Roll", icon: Clapperboard, path: "/workspace/apps/character-broll", stages: ["Shots", "Images", "Videos"], stageIndexForType: { character_broll_images: 1, character_broll_videos: 2 } },
+  single_scene: { label: "Single Scene", icon: Film, path: "/workspace/apps/single-scene", stages: ["Scenes", "Images", "Videos"], stageIndexForType: { single_scene_images: 1, single_scene_videos: 2 } },
+  message_testing: { label: "Message Testing", icon: MessageSquare, path: "/workspace/apps/message-testing", stages: ["Messages", "Template", "Ads"], stageIndexForType: { message_testing_images: 2 } },
+  listicle: { label: "Listicle Builder", icon: ListOrdered, path: "/workspace/apps/listicle-builder", stages: ["Copy", "Images", "Render", "Deploy"], stageIndexForType: {} },
+  copy_engine: { label: "Copy Engine", icon: PenLine, path: "/workspace/apps/copy-engine", stages: ["Setup", "Copy"], stageIndexForType: { copy_engine_text: 1 } },
+  static_ads: { label: "Static Ads", icon: Image, path: "/workspace/apps/static-ads", stages: ["Select", "Recreate", "Review"], stageIndexForType: { static_ads_recreate: 1 } },
 };
 
 function StatusChip({ job }: { job: Job }) {
@@ -55,17 +62,88 @@ function jobStage(job: Job): string | null {
 }
 
 /**
- * "product · stage · 7/11 items" meta line. Stage only exists on listicle
- * projections; the item counts are hidden when a listicle has no image rows
- * yet (totalCount 0 would render a meaningless "0/0 items").
+ * "product · 7/11 items" meta line. The item counts are hidden when a
+ * listicle has no image rows yet (totalCount 0 would render a meaningless
+ * "0/0 items"). The listicle pipeline stage now renders as the StageStrip
+ * instead of inline text here.
  */
 function metaLine(job: Job): string {
   const showCounts = job.totalCount > 0 || !jobStage(job);
   return [
     productName(job),
-    jobStage(job),
     showCounts ? `${job.doneCount + job.errorCount}/${job.totalCount} items` : null,
   ].filter(Boolean).join(" · ");
+}
+
+/** listicles.status (mirrored into payload.stage) → index into the listicle
+ *  stages ["Copy", "Images", "Render", "Deploy"]. "failed" carries no
+ *  positional info (the row loses its stage), so it is deliberately absent —
+ *  processStage() returns null and no strip renders for failed listicles. */
+const LISTICLE_STAGE_INDEX: Record<string, number> = {
+  drafting: 0,
+  analyzing: 0,
+  images: 1,
+  rendering: 2,
+  ready: 3,
+  deployed: 3,
+};
+
+/**
+ * Where the APP PROCESS stands, derived from this job. Rules:
+ * - listicle: payload.stage is authoritative (the projection's own status
+ *   machine already tracks the whole pipeline) — no terminal-advance.
+ * - other apps: the job's type pins the stage it executes; while
+ *   queued/running (or failed — stuck) the process sits at that stage, and
+ *   when the job finishes (complete/complete_with_errors) the process
+ *   ADVANCES to the next stage if one exists ("images done → you're at
+ *   Videos" — the job being DONE must not read as the process being done).
+ * - processComplete: the finished job WAS the last stage (or listicle
+ *   reached ready/deployed) — every stage renders checked.
+ * Returns null for unknown apps/types (render nothing — graceful).
+ */
+function processStage(job: Job): { stages: string[]; current: number; processComplete: boolean } | null {
+  const meta = APP_META[job.app];
+  if (!meta) return null;
+  if (job.app === "listicle") {
+    const stage = jobStage(job);
+    const idx = stage ? LISTICLE_STAGE_INDEX[stage] : undefined;
+    if (idx === undefined) return null;
+    return { stages: meta.stages, current: idx, processComplete: stage === "ready" || stage === "deployed" };
+  }
+  const typeIndex = meta.stageIndexForType[job.type];
+  if (typeIndex === undefined) return null;
+  const terminal = job.status === "complete" || job.status === "complete_with_errors";
+  const current = terminal ? Math.min(typeIndex + 1, meta.stages.length - 1) : typeIndex;
+  return { stages: meta.stages, current, processComplete: terminal && typeIndex === meta.stages.length - 1 };
+}
+
+/**
+ * Compact one-line process visualization: checked past stages, a cyan pill
+ * for the current one (dot pulses only while the job is actually running),
+ * dimmed future stages. When the process is complete every stage is checked.
+ */
+function StageStrip({ stages, current, processComplete, running }: { stages: string[]; current: number; processComplete: boolean; running: boolean }) {
+  return (
+    <div className="mt-1 flex items-center gap-1 text-[10px] font-mono whitespace-nowrap overflow-hidden">
+      {stages.map((name, i) => {
+        const done = processComplete || i < current;
+        return (
+          <span key={name} className="inline-flex items-center gap-1">
+            {i > 0 && <span className="text-white/20">›</span>}
+            {done ? (
+              <span className="inline-flex items-center gap-0.5 text-white/45"><Check size={9} /> {name}</span>
+            ) : i === current ? (
+              <span className="inline-flex items-center gap-1 rounded-full border border-cyan-400/30 bg-cyan-400/15 px-1.5 text-cyan-300">
+                <span className={running ? "animate-pulse" : undefined}>●</span> {name}
+              </span>
+            ) : (
+              <span className="text-white/25">○ {name}</span>
+            )}
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 /**
@@ -102,6 +180,12 @@ function HeroCard({ job }: { job: Job }) {
   const meta = APP_META[job.app] ?? APP_META.broll;
   const Icon = meta.icon;
   const active = isActive(job);
+  const stage = processStage(job);
+  const terminal = job.status === "complete" || job.status === "complete_with_errors";
+  // "Review & Continue" only when the job finished but the process didn't —
+  // there is a next stage to move into. Failed jobs and finished last stages
+  // stay plain "Review".
+  const reviewAndContinue = terminal && stage !== null && !stage.processComplete;
   return (
     <section>
       <h2 className="text-[11px] font-mono uppercase tracking-wide text-cyan-300/70 mb-2">Jump back in</h2>
@@ -113,13 +197,16 @@ function HeroCard({ job }: { job: Job }) {
           <div className="text-[11px] font-mono text-white/35">{meta.label}</div>
           <div className="text-base font-medium text-white/90 truncate">{job.title}</div>
           <div className="truncate text-[11px] font-mono text-white/40">
-            {metaLine(job)} · {relTime(job.createdAt)} · <StatusChip job={job} />
+            {[metaLine(job), relTime(job.createdAt)].filter(Boolean).join(" · ")} · <StatusChip job={job} />
           </div>
+          {stage && <StageStrip {...stage} running={active} />}
           {active && <ProgressBar job={job} />}
         </div>
         <Link href={jobHref(job)}>
           <div className="inline-flex items-center gap-2 rounded-lg border border-cyan-400/30 bg-cyan-400/15 px-4 py-2 text-sm text-cyan-200 hover:bg-cyan-400/25 transition-colors cursor-pointer shrink-0">
-            {active ? (<>Continue <ArrowRight size={14} /></>) : "Review"}
+            {active ? (<>Continue <ArrowRight size={14} /></>)
+              : reviewAndContinue ? (<>Review &amp; Continue <ArrowRight size={14} /></>)
+              : "Review"}
           </div>
         </Link>
       </div>
@@ -130,6 +217,8 @@ function HeroCard({ job }: { job: Job }) {
 function JobRow({ job }: { job: Job }) {
   const meta = APP_META[job.app] ?? APP_META.broll;
   const Icon = meta.icon;
+  const active = isActive(job);
+  const stage = processStage(job);
   return (
     <Link href={jobHref(job)}>
       <div className="p-4 flex items-center gap-4 hover:bg-white/[0.02] cursor-pointer">
@@ -141,9 +230,10 @@ function JobRow({ job }: { job: Job }) {
           <div className="text-sm font-medium text-white/85 truncate">{job.title}</div>
           <div className="truncate text-[11px] font-mono text-white/40">
             {metaLine(job)}
-            {job.status === "failed" && job.error && <> · <span className="text-rose-400/80">{job.error}</span></>}
+            {job.status === "failed" && job.error && <>{metaLine(job) && " · "}<span className="text-rose-400/80">{job.error}</span></>}
           </div>
-          {isActive(job) && <ProgressBar job={job} />}
+          {stage && <StageStrip {...stage} running={active} />}
+          {active && <ProgressBar job={job} />}
         </div>
         <div className="text-right shrink-0">
           <StatusChip job={job} />
