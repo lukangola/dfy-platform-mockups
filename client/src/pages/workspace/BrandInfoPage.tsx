@@ -482,9 +482,10 @@ function TypographySection({
           const face = faceFor(f.role);
           const role = faceRoleFor(f.role);
           const hasReal = Boolean(face?.regularUrl);
-          // Preview in the real file when uploaded, else the Google approximation.
+          // Preview in the real file when uploaded (bind to the stored family so
+          // it always matches the injected @font-face), else the web approximation.
           const previewFamily = hasReal
-            ? `"${f.name}", ${face?.fallback ?? defaultFallbackFor(role)}`
+            ? `"${face?.family ?? f.name}", ${face?.fallback ?? defaultFallbackFor(role)}`
             : fontFamilyFor(f.name);
           const busyReg = busySlot === `${role}:regular`;
           const busyItal = busySlot === `${role}:italic`;
@@ -493,7 +494,12 @@ function TypographySection({
             <div key={`${f.role}-${f.name}`} className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-4">
               <div className="flex items-baseline justify-between mb-2">
                 <span className="text-[10px] font-mono text-white/30 uppercase tracking-widest">{f.role}</span>
-                <span className="text-[11px] font-mono text-cyan-400/60">{f.name}</span>
+                <span className="inline-flex items-baseline gap-2">
+                  {hasReal && (
+                    <span className="text-[8px] font-mono uppercase tracking-widest text-emerald-400 border border-emerald-500/30 rounded px-1.5 py-0.5">real file</span>
+                  )}
+                  <span className="text-[11px] font-mono text-cyan-400/60">{f.name}</span>
+                </span>
               </div>
               <div className="text-3xl text-white/90 mb-1 leading-tight" style={{ fontFamily: previewFamily, fontWeight: 600 }}>
                 The quick brown fox
@@ -501,6 +507,12 @@ function TypographySection({
               <div className="text-sm text-white/55 leading-relaxed" style={{ fontFamily: previewFamily, fontWeight: 400 }}>
                 Jumps over the lazy dog. 1 2 3 4 5 6 7 8 9 0.
               </div>
+              {face?.italicUrl && (
+                <div className="text-sm text-white/45 leading-relaxed mt-1" style={{ fontFamily: previewFamily, fontStyle: "italic", fontWeight: 400 }}>
+                  <span className="not-italic text-[9px] font-mono uppercase tracking-widest text-white/25 mr-2">italic</span>
+                  Custom-made cosmetics, elevated.
+                </div>
+              )}
 
               {/* Real font-file upload row */}
               <div className="mt-3 pt-3 border-t border-white/[0.06] flex flex-wrap items-center gap-2">
