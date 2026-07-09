@@ -541,12 +541,11 @@ export default function BrollAppPage() {
     return {
       shotId: shot.id,
       kind: "video",
-      // [DEV TRIAL] Using the FAST variant on dev to compare label fidelity
-      // and motion quality against the regular tier. To roll back:
-      //   model: "bytedance/seedance-2.0/reference-to-video"
-      // Fast tier: ~2-3× faster, ~30-50% cheaper, accepts the same 9 reference
-      // images and 4-15s duration. Watch for: softer motion, label/text drift
-      // on packaging, color/lighting deviation from the starting frame.
+      // Fast tier is the PRODUCTION choice (decided 2026-07-09): ~2-3× faster,
+      // ~30-50% cheaper, same 9 reference images and 4-15s duration as the
+      // regular tier. If quality issues appear (softer motion, label/text
+      // drift on packaging, color/lighting deviation from the starting
+      // frame), the rollback is: model: "bytedance/seedance-2.0/reference-to-video"
       model: "bytedance/seedance-2.0/fast/reference-to-video",
       falInput: {
         prompt,
