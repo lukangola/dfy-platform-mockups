@@ -108,7 +108,9 @@ function processStage(job: Job): { stages: string[]; current: number; processCom
     const stage = jobStage(job);
     const idx = stage ? LISTICLE_STAGE_INDEX[stage] : undefined;
     if (idx === undefined) return null;
-    return { stages: meta.stages, current: idx, processComplete: stage === "ready" || stage === "deployed" };
+    // "ready" sits AT the Deploy stage but hasn't shipped — the process only
+    // completes on "deployed", so a ready listicle offers "Review & Continue".
+    return { stages: meta.stages, current: idx, processComplete: stage === "deployed" };
   }
   const typeIndex = meta.stageIndexForType[job.type];
   if (typeIndex === undefined) return null;
