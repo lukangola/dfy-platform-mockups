@@ -1845,6 +1845,17 @@ listiclesRouter.post("/:id/render-html", async (req: Request, res: Response) => 
         }
       }
 
+      // Embed the brand's REAL uploaded font files (when it has any) as
+      // `@font-face` rules so the lander renders in the genuine typeface
+      // instead of the browser fallback. The Typography section only names
+      // the font (e.g. "Meno Banner"); without these rules a non-web font
+      // silently degrades to sans-serif. No-op for brands with no uploads.
+      const { injectBrandFontFaces } = await import("../lib/brandFonts.js");
+      html = injectBrandFontFaces(
+        html,
+        brand.brandFonts as import("../lib/brandFonts.js").BrandFontFace[] | null,
+      );
+
       await touch(row.id, { renderedHtml: html, status: "ready", error: null });
       res.json({ renderedHtml: html });
     } catch (err) {

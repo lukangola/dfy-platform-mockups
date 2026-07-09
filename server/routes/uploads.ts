@@ -63,6 +63,48 @@ async function handleLogoUpload(req: Request, res: Response) {
   }
 }
 
+/**
+ * Brand-font upload. Hosts a real client-supplied font FILE on fal.storage so
+ * the listicle lander can embed it via `@font-face` and render in the genuine
+ * typeface. Same dataUrl contract as the image uploads, but gated to font
+ * MIME types / extensions. Returns the hosted URL; the caller records it on the
+ * brand's `brandFonts` (family + role + regular/italic URL). We deliberately do
+ * NOT transcode here — woff2/woff/otf/ttf all work in `@font-face`, and the
+ * extension is preserved so the CSS `format(...)` hint stays accurate.
+ */
+async function handleFontUpload(req: Request, res: Response) {
+  try {
+    const body = (req.body ?? {}) as { dataUrl?: string; filename?: string };
+    if (!body.dataUrl || !body.dataUrl.startsWith("data:")) {
+      return sendError(res, 400, "dataUrl (data:<mime>;base64,...) is required");
+    }
+    const match = body.dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (!match) return sendError(res, 400, "dataUrl must be base64-encoded");
+    const mime = match[1];
+    // Browsers set font MIME types inconsistently (font/*, application/*, or
+    // octet-stream from drag-drop), so validate by extension too.
+    const extFromName = (body.filename ?? "").toLowerCase().match(/\.(woff2|woff|otf|ttf)$/)?.[1] ?? null;
+    const mimeLooksLikeFont = /^font\//i.test(mime) || /(font|woff|ttf|otf|sfnt)/i.test(mime);
+    if (!extFromName && !mimeLooksLikeFont) {
+      return sendError(res, 400, "Only font files (.woff2, .woff, .otf, .ttf) are allowed");
+    }
+    const buffer = Buffer.from(match[2], "base64");
+    if (buffer.byteLength > 4 * 1024 * 1024) return sendError(res, 413, "Font exceeds 4MB limit");
+
+    const ext = extFromName ?? "woff2";
+    const safeName = body.filename?.replace(/[^a-z0-9._-]/gi, "_") || `brand-font-${Date.now()}.${ext}`;
+    // Ensure the hosted filename carries a font extension so fontFormatFromUrl
+    // can derive the correct `format(...)` hint downstream.
+    const finalName = /\.(woff2|woff|otf|ttf)$/i.test(safeName) ? safeName : `${safeName}.${ext}`;
+    const url = await uploadToFalStorage(buffer, mime, finalName);
+    res.json({ url });
+  } catch (err) {
+    console.error("[uploads] brand-font failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+}
+
 uploadsRouter.post("/character-image", (req, res) => handleImageUpload(req, res, "character"));
 uploadsRouter.post("/product-image", (req, res) => handleImageUpload(req, res, "product"));
 uploadsRouter.post("/brand-logo", handleLogoUpload);
+uploadsRouter.post("/brand-font", handleFontUpload);

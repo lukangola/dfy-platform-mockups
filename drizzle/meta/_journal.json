@@ -204,6 +204,13 @@
       "when": 1783507708500,
       "tag": "0028_previous_shockwave",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1783617937994,
+      "tag": "0029_wide_nomad",
+      "breakpoints": true
     }
   ]
 }

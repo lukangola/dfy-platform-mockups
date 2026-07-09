@@ -89,6 +89,21 @@ export const brands = pgTable("brands", {
    * (ad-library vs organic).
    */
   searchTerms: jsonb("search_terms"),
+  /**
+   * Real, client-supplied font FILES for this brand — the actual typefaces
+   * named in the Typography section of `guidelinesMarkdown`, hosted on
+   * fal.storage. NULL (the default) means "no uploaded files — fall back to
+   * the closest Google/web font by name", which is how every brand behaves
+   * until a client sends their real font files.
+   *
+   * Shape: BrandFontFace[] (see server/lib/brandFonts.ts). Each entry pairs a
+   * CSS family name with its regular (+ optional italic) file URL and a
+   * generic fallback. Consumed by the listicle HTML renderer, which emits
+   * `@font-face` rules from these so landers render in the genuine typeface
+   * (image-model surfaces like static ads can only reference the font by
+   * NAME — they cannot load a file — so those keep using the family name).
+   */
+  brandFonts: jsonb("brand_fonts"),
 });
 
 export const products = pgTable("products", {
