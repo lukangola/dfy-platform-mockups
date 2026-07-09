@@ -21,7 +21,7 @@ import {
   setProductMainImage, addProductImageCandidate, deleteProductImageCandidate,
   generateReferenceSheet, deleteProduct, addProductAngle, addProductAngleManual, deleteProductAngle,
   updateProductResearch, updateProductMechanism, patchProduct, generateAngleArtifact,
-  updateAngleArtifactContent,
+  updateAngleArtifactContent, updateProductAngle,
   getProductFeedback, updateFeedbackStatus,
   type Product, type ProductImageCandidate, type ProductMechanism,
   type ProductAngle, type AngleArtifactKind,
@@ -432,6 +432,44 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
   const [deleteAngleConfirm, setDeleteAngleConfirm] = useState("");
   const [deleteAngleBusy, setDeleteAngleBusy] = useState(false);
   const [deleteAngleError, setDeleteAngleError] = useState<string | null>(null);
+
+  // Angle description edit: one angle editable at a time. The draft holds the
+  // RAW `block` (including any Customer Statements subsection the read view
+  // strips) so a save can never silently drop content.
+  const [editingAngleId, setEditingAngleId] = useState<string | null>(null);
+  const [angleBlockDraft, setAngleBlockDraft] = useState("");
+  const [angleBlockSaving, setAngleBlockSaving] = useState(false);
+  const [angleBlockError, setAngleBlockError] = useState<string | null>(null);
+
+  function startAngleEdit(angle: ProductAngle) {
+    if (!angle.id) return;
+    setEditingAngleId(angle.id);
+    setAngleBlockDraft(angle.block);
+    setAngleBlockError(null);
+  }
+  function cancelAngleEdit() {
+    setEditingAngleId(null);
+    setAngleBlockError(null);
+  }
+  async function saveAngleEdit() {
+    if (!editingAngleId) return;
+    const trimmed = angleBlockDraft.trim();
+    if (!trimmed) {
+      setAngleBlockError("Description can't be empty.");
+      return;
+    }
+    setAngleBlockSaving(true);
+    setAngleBlockError(null);
+    try {
+      await updateProductAngle(productId, editingAngleId, trimmed);
+      await refresh();
+      setEditingAngleId(null);
+    } catch (err) {
+      setAngleBlockError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAngleBlockSaving(false);
+    }
+  }
 
   async function refreshFeedback() {
     if (feedbackBusy) return;
@@ -1631,16 +1669,72 @@ export default function ProductDetailPage({ productId }: { productId: string }) 
                               />
                             )}
 
-                            {/* Description — the elaborated angle block */}
+                            {/* Description — the elaborated angle block, hand-editable */}
                             <CollapsibleSection
                               title="Description"
                               icon={FileText}
                               subtitle="The fully elaborated strategic angle — audience, pains, root cause, mechanism, framing."
                               defaultOpen
+                              // Pin open while its inline editor is active so a
+                              // stray header click can't collapse work-in-progress.
+                              forceOpen={editingAngleId === angle.id || undefined}
+                              headerRight={
+                                angle.id && editingAngleId !== angle.id ? (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      startAngleEdit(angle);
+                                    }}
+                                    title="Edit this angle's description"
+                                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[10px] font-mono text-white/55 border border-white/[0.08] hover:text-cyan-400 hover:border-cyan-500/40 transition-all"
+                                  >
+                                    <Pencil size={11} /> Edit
+                                  </button>
+                                ) : undefined
+                              }
                             >
-                              <article className="prose-report max-w-none">
-                                <Streamdown>{stripCustomerStatements(angle.block)}</Streamdown>
-                              </article>
+                              {editingAngleId === angle.id ? (
+                                <div className="space-y-3">
+                                  <textarea
+                                    value={angleBlockDraft}
+                                    onChange={(e) => setAngleBlockDraft(e.target.value)}
+                                    rows={Math.min(30, Math.max(10, angleBlockDraft.split("\n").length + 1))}
+                                    className="w-full rounded-lg border border-cyan-500/30 bg-black/30 px-3 py-2.5 text-sm text-white/85 leading-relaxed font-sans resize-y focus:outline-none focus:border-cyan-400/60"
+                                    placeholder="Edit the angle description (markdown)…"
+                                    autoFocus
+                                  />
+                                  <p className="text-[10px] font-mono text-white/35">
+                                    Raw markdown, saved verbatim. The read view hides any “Customer Statements” subsection.
+                                  </p>
+                                  {angleBlockError && (
+                                    <div className="text-[10px] font-mono text-rose-300 border border-rose-500/30 bg-rose-500/10 rounded-lg px-3 py-2 whitespace-pre-wrap">
+                                      {angleBlockError}
+                                    </div>
+                                  )}
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      onClick={saveAngleEdit}
+                                      disabled={angleBlockSaving}
+                                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-mono uppercase tracking-wider font-semibold transition-all disabled:opacity-40"
+                                      style={{ background: "linear-gradient(135deg, #10b981 0%, #059669 100%)", color: "#0D0F12" }}
+                                    >
+                                      {angleBlockSaving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
+                                      Save
+                                    </button>
+                                    <button
+                                      onClick={cancelAngleEdit}
+                                      disabled={angleBlockSaving}
+                                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-mono uppercase tracking-wider text-white/55 border border-white/[0.12] hover:text-white/80 hover:border-white/[0.25] transition-all disabled:opacity-40"
+                                    >
+                                      <X size={11} /> Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <article className="prose-report max-w-none">
+                                  <Streamdown>{stripCustomerStatements(angle.block)}</Streamdown>
+                                </article>
+                              )}
                             </CollapsibleSection>
 
                             {/* Lazily-generated, cached per-angle artifacts */}

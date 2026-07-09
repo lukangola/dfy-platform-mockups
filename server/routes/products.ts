@@ -811,6 +811,50 @@ productsRouter.put("/:id/angles/:angleId/artifact", async (req: Request, res: Re
 });
 
 /**
+ * PATCH /api/products/:id/angles/:angleId — operator MANUAL edit of ONE angle's
+ * DESCRIPTION (the elaborated `block` markdown). Read-modify-writes the single
+ * targeted angle in research.angles, leaving its cached artifacts and every
+ * sibling angle untouched. The `block` is stored verbatim (raw markdown,
+ * including any "Customer Statements" subsection the read view strips on
+ * display), so an edit can never silently drop content. Returns the full updated
+ * angles list so the client can re-render without a refetch.
+ */
+productsRouter.patch("/:id/angles/:angleId", async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { block?: string };
+    const block = typeof body.block === "string" ? body.block : "";
+    if (!block.trim()) return sendError(res, 400, "block is required");
+
+    const [row] = await db
+      .select()
+      .from(schema.products)
+      .where(eq(schema.products.id, req.params.id))
+      .limit(1);
+    if (!row) return sendError(res, 404, "Product not found");
+
+    const research = (row.research ?? {}) as Record<string, unknown>;
+    const angles = Array.isArray((research as { angles?: unknown }).angles)
+      ? ((research as { angles: StoredAngle[] }).angles)
+      : [];
+    const idx = angles.findIndex((a) => a.id === req.params.angleId);
+    if (idx === -1) return sendError(res, 404, "Angle not found");
+
+    const nextAngles = [...angles];
+    nextAngles[idx] = { ...angles[idx], block };
+
+    await db
+      .update(schema.products)
+      .set({ research: { ...research, angles: nextAngles } })
+      .where(eq(schema.products.id, row.id));
+
+    res.json({ angles: nextAngles });
+  } catch (err) {
+    console.error("[products] edit angle description failed:", err);
+    sendError(res, 500, err instanceof Error ? err.message : String(err));
+  }
+});
+
+/**
  * DELETE /api/products/:id/angles/:angleId — permanently remove ONE strategic
  * angle (and all its cached artifacts) from research.angles. Returns the
  * remaining angles so the client can re-render without a refetch. The operator

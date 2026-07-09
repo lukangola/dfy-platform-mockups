@@ -165,6 +165,19 @@ async function put<T>(path: string, body: unknown): Promise<T> {
   return payload as T;
 }
 
+async function patch<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  const payload = (await res.json().catch(() => ({}))) as T | ApiError;
+  if (!res.ok) {
+    throw new ApiCallError(res.status, payload as ApiError);
+  }
+  return payload as T;
+}
+
 export function listBrands(): Promise<{ brands: Brand[] }> {
   return get<{ brands: Brand[] }>("/api/brands");
 }
@@ -480,6 +493,25 @@ export function updateAngleArtifactContent(
   return put<{ ok: true }>(
     `/api/products/${productId}/angles/${encodeURIComponent(angleId)}/artifact`,
     { kind, content },
+  );
+}
+
+/**
+ * Operator MANUAL edit of one angle's DESCRIPTION (the elaborated `block`
+ * markdown). Overwrites research.angles[i].block with hand-typed text, verbatim;
+ * the angle's cached sub-artifacts (statements / messages / adCopy) and every
+ * sibling angle are left untouched. `block` is stored raw — the read view still
+ * hides any "Customer Statements" subsection on display. Returns the updated
+ * angles list so the caller can re-render without a refetch.
+ */
+export function updateProductAngle(
+  productId: string,
+  angleId: string,
+  block: string,
+): Promise<{ angles: ProductAngle[] }> {
+  return patch<{ angles: ProductAngle[] }>(
+    `/api/products/${productId}/angles/${encodeURIComponent(angleId)}`,
+    { block },
   );
 }
 
