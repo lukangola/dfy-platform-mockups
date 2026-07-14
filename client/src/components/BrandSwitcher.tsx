@@ -17,6 +17,8 @@ import CreateBrandDialog from "./CreateBrandDialog";
 export default function BrandSwitcher({ collapsed }: { collapsed: boolean }) {
   const { brands, activeBrand, activeBrandId, setActiveBrandId, loading, refreshBrand } = useBrand();
   const { role } = useAuth();
+  // Admins and managers can create workspaces; plain members cannot.
+  const canCreateWorkspace = role === "admin" || role === "manager";
   const [open, setOpen] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [logoBroken, setLogoBroken] = useState(false);
@@ -132,7 +134,7 @@ export default function BrandSwitcher({ collapsed }: { collapsed: boolean }) {
                   // every brand on their team, so an empty list for an admin
                   // is case (a); for a member, it's most likely case (b).
                   // Different copy makes the next action obvious for each.
-                  role === "admin" ? (
+                  canCreateWorkspace ? (
                     <div className="px-3 py-4 text-xs text-white/30 italic">No brands yet.</div>
                   ) : (
                     <div className="px-3 py-4 text-xs text-white/50 leading-relaxed">
@@ -189,7 +191,7 @@ export default function BrandSwitcher({ collapsed }: { collapsed: boolean }) {
                   })
                 )}
               </div>
-              {role === "admin" && (
+              {canCreateWorkspace && (
                 <div className="border-t border-white/[0.06]">
                   <button
                     onClick={() => {

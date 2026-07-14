@@ -17,8 +17,8 @@
 import { and, desc, eq, inArray, sql as sqlTag } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { generateText } from "../lib/anthropic.js";
-import { requireAdmin, requireAuth } from "../lib/auth.js";
-import { canSeeBrand, visibleBrandIds } from "../lib/brandAccess.js";
+import { requireAdmin, requireAuth, requireManager } from "../lib/auth.js";
+import { canSeeBrand, visibleBrandIds, grantBrandsToUser } from "../lib/brandAccess.js";
 import { ensureLogoIsPng } from "../lib/logoConvert.js";
 import { db, schema } from "../lib/db.js";
 import { parseBrandGuidelines } from "../lib/brandGuidelinesParse.js";
@@ -188,15 +188,16 @@ brandsRouter.patch("/:id/dfy", requireAdmin, async (req: Request, res: Response)
  * Creates the brand, creates its first product, returns both.
  * Brand research (brand_extract) and product research run async in parallel.
  *
- * Admin-only. Non-admin members must never be able to create workspaces —
- * a workspace they spawn would have no `brand_members` row for the admin
- * (admins implicitly see every brand on their team, so the row check is
- * skipped anyway, but the intent is to keep workspace creation a managed
- * action). Defense in depth: the BrandSwitcher hides the "Add new brand"
- * button when `role !== "admin"`, but the API must enforce this too so
- * a member can't bypass the UI by hitting the endpoint directly.
+ * Admins AND managers can create workspaces; plain members cannot. Members
+ * must never be able to spawn a workspace — creation is a managed action.
+ * Defense in depth: the BrandSwitcher hides the "Add new brand" button for
+ * members, but the API enforces it too (requireManager) so a member can't
+ * bypass the UI by hitting the endpoint directly. Because managers (unlike
+ * admins) do NOT implicitly see every brand on their team, a non-admin creator
+ * is granted an explicit `brand_members` row below so they can see the brand
+ * they just created.
  */
-brandsRouter.post("/", requireAdmin, async (req: Request, res: Response) => {
+brandsRouter.post("/", requireManager, async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as {
     brandUrl?: string;
     productUrl?: string;
@@ -239,7 +240,7 @@ brandsRouter.post("/", requireAdmin, async (req: Request, res: Response) => {
   const placeholderName = brandUrlParsed.hostname.replace(/^www\./, "");
 
   try {
-    const { user, team } = req.auth!;
+    const { user, team, role } = req.auth!;
     const [brand] = await db
       .insert(schema.brands)
       .values({
@@ -254,11 +255,14 @@ brandsRouter.post("/", requireAdmin, async (req: Request, res: Response) => {
       })
       .returning();
 
-    // No brand_members grant needed for the creator — the route is
-    // requireAdmin-gated, so the creator is always an admin and admins
-    // implicitly see every brand on their team via canSeeBrand's role
-    // short-circuit. Members get access only when the admin explicitly
-    // assigns them via PUT /api/team/members/:userId/brands.
+    // Admins implicitly see every brand on their team (canSeeBrand's role
+    // short-circuit), so they need no grant. A MANAGER creator does NOT get
+    // that short-circuit — without an explicit brand_members row they'd create
+    // a workspace they can't see. So grant non-admin creators access to their
+    // own new brand. (Members can't reach this route at all.)
+    if (role !== "admin") {
+      await grantBrandsToUser({ userId: user.id, brandIds: [brand.id], createdBy: user.id });
+    }
 
     // Derive product name: explicit > scrape > factSheet slice > fallback.
     let productName = body.productName?.trim() || "";
