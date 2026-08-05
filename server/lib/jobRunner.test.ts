@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyJobError, seedanceToKlingFallback } from "./jobRunner.js";
+import { classifyJobError, seedanceToKlingFallback, stripSeedanceImageMarkers } from "./jobRunner.js";
 
 describe("classifyJobError", () => {
   it("marks 5xx / gateway / timeout / 429 as transient", () => {
@@ -12,14 +12,13 @@ describe("classifyJobError", () => {
     expect(classifyJobError(422, "image_urls: The images or videos provided may contain likenesses of real people or other private information that cannot be processed.")).toBe("likeness");
     expect(classifyJobError(422, "prompt: The content could not be processed because it contained material flagged by a content checker.")).toBe("likeness");
   });
-  it("marks the DOWNSTREAM SYMPTOM of a content refusal as likeness (Puzzle Makeup, 16 Jul 2026)", () => {
-    // fal used to report a content-policy rejection only by its side effect:
-    // the refused images were dropped, so the prompt's @Image1 marker pointed
-    // at an empty list. 12 client videos died because this read as "hard" and
-    // the Kling fallback never fired. Verbatim message from job_items.error:
+  it("does NOT treat Kling's input_value_error as a likeness refusal", () => {
+    // "Invalid reference index N … Only 0 images provided." is KLING rejecting a
+    // prompt that still carries Seedance @ImageN markers — our own mapping bug.
+    // Misreading it as a content refusal would hide the real failure.
     expect(
       classifyJobError(422, "Unprocessable Entity — Invalid reference index 1 for image. Only 0 images provided."),
-    ).toBe("likeness");
+    ).toBe("hard");
   });
   it("marks fal's structured content-policy fields as likeness", () => {
     expect(classifyJobError(422, "content_policy_violation")).toBe("likeness");
@@ -46,7 +45,10 @@ describe("seedanceToKlingFallback", () => {
     });
     expect(out?.model).toBe("fal-ai/kling-video/v3/standard/image-to-video");
     expect(out?.input).toEqual({
-      prompt: "Slide the mailer open @Image1",
+      // @Image1 is rewritten: Kling parses the marker and 422s on it. This
+      // expectation previously asserted the marker passed through verbatim,
+      // which is precisely the bug that killed Puzzle Makeup's 12 clips.
+      prompt: "Slide the mailer open the image",
       image_url: "https://img/start.jpg",
       duration: "5",
       aspect_ratio: "9:16",
@@ -54,5 +56,35 @@ describe("seedanceToKlingFallback", () => {
   });
   it("returns null when there is no starting frame", () => {
     expect(seedanceToKlingFallback({ prompt: "x", image_urls: [] })).toBeNull();
+  });
+});
+
+describe("stripSeedanceImageMarkers", () => {
+  it("rewrites @ImageN markers into prose (Kling 422s on them)", () => {
+    const out = stripSeedanceImageMarkers(
+      "Animate @Image1. Preserve the product shown in @Image2 — label and cap. Hand count matches @Image1 exactly.",
+    );
+    expect(out).not.toMatch(/@Image/i);
+    expect(out).toBe("Animate the image. Preserve the product shown in the image — label and cap. Hand count matches the image exactly.");
+  });
+  it("tolerates spacing/casing variants", () => {
+    expect(stripSeedanceImageMarkers("@image 1 and @IMAGE2")).toBe("the image and the image");
+  });
+  it("leaves a marker-free prompt untouched", () => {
+    const p = "A calm pan across the counter.";
+    expect(stripSeedanceImageMarkers(p)).toBe(p);
+  });
+});
+
+describe("seedanceToKlingFallback prompt sanitisation", () => {
+  it("never sends @ImageN through to Kling", () => {
+    const fb = seedanceToKlingFallback({
+      prompt: "Animate @Image1. Match @Image2 exactly.",
+      image_urls: ["https://x/a.jpg", "https://x/b.jpg"],
+      duration: "5",
+    });
+    expect(fb).not.toBeNull();
+    expect(String(fb!.input.prompt)).not.toMatch(/@Image/i);
+    expect(fb!.input.image_url).toBe("https://x/a.jpg");
   });
 });

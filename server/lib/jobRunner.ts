@@ -38,38 +38,48 @@ export function classifyJobError(status: number | undefined, message: string): J
 
 /**
  * Signatures of a Seedance content-checker refusal, in every phrasing fal has
- * surfaced for it.
+ * surfaced for it — including the structured fields fal added later
+ * (`content_policy_violation` / `partner_validation_failed`), so a provider
+ * wording change can't silently disable the fallback.
  *
- * The last two matter because of a real incident (Puzzle Makeup, 10–16 July
- * 2026): 12 b-roll videos failed and the Kling fallback never fired. The
- * reference images were hand/fingertip shots, which ByteDance's validator
- * rejects as "likenesses of real people" — exactly the case this fallback
- * exists for. But fal reported it only by its DOWNSTREAM SYMPTOM:
- *
- *   "Invalid reference index 1 for image. Only 0 images provided."
- *
- * i.e. the rejected images were dropped from the payload, so the prompt's
- * `@Image1` marker then pointed at an empty list. That message matches none of
- * the likeness words, so the items were classified `hard` and simply died.
- * fal has since improved the message to name the real reason
- * ("...may contain likenesses of real people...", type
- * `content_policy_violation`, reason `partner_validation_failed`), but we match
- * BOTH phrasings so a provider-side wording change can never silently disable
- * the fallback again.
- *
- * Safe on false positives: if a prompt ever genuinely over-references (e.g.
- * `@Image3` with two images), routing to Kling yields a usable clip from the
- * first frame instead of a dead item — and the fallback is logged either way.
+ * Deliberately does NOT match "invalid reference index" / "only 0 images
+ * provided": that is an `input_value_error` from KLING rejecting a prompt that
+ * still carries Seedance's `@ImageN` markers — a bug in our own mapping, not a
+ * content refusal. Classifying it as `likeness` would route a genuine input
+ * error into the fallback and hide the very failure we need to see.
  */
 const SEEDANCE_LIKENESS_RE =
-  /likeness|real people|private information|content checker|flagged by a content|content[_ ]?policy|partner_validation_failed|invalid reference index|only 0 images provided/i;
+  /likeness|real people|private information|content checker|flagged by a content|content[_ ]?policy|partner_validation_failed/i;
+
+/**
+ * Rewrite Seedance's `@ImageN` reference markers into plain prose.
+ *
+ * Kling does NOT ignore these markers — it parses them, finds no image list
+ * (it takes a single `image_url`, not `image_urls`) and rejects the whole call:
+ *
+ *   422 input_value_error — "Invalid reference index 1 for image.
+ *                            Only 0 images provided."
+ *
+ * That is the error Puzzle Makeup actually saw on all 12 clips: Seedance
+ * refused their hand shots on content policy, the fallback fired correctly, and
+ * then KLING died on the un-rewritten prompt in ~2s. Because the fallback's
+ * error is what gets stored, the failure masqueraded as a Seedance problem.
+ * Every likeness fallback in the b-roll pipeline hit this, since those prompts
+ * always carry `@ImageN` markers.
+ */
+export function stripSeedanceImageMarkers(prompt: string): string {
+  return prompt
+    .replace(/@Image\s*\d+/gi, "the image")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
 
 /**
  * Map a Seedance reference-to-video input to Kling v3 image-to-video for the
  * likeness fallback. Kling takes ONE image_url (the starting frame — always
  * the first Seedance reference) and has no generate_audio/resolution knobs.
- * The @ImageN references in the prompt are Seedance syntax; Kling ignores
- * them harmlessly. Returns null when no starting frame exists.
+ * The prompt is rewritten to drop Seedance's `@ImageN` syntax, which Kling
+ * rejects (see above). Returns null when no starting frame exists.
  */
 export function seedanceToKlingFallback(
   falInput: Record<string, unknown>,
@@ -77,10 +87,11 @@ export function seedanceToKlingFallback(
   const urls = Array.isArray(falInput.image_urls) ? (falInput.image_urls as string[]) : [];
   const first = urls[0];
   if (!first) return null;
+  const prompt = typeof falInput.prompt === "string" ? stripSeedanceImageMarkers(falInput.prompt) : falInput.prompt;
   return {
     model: "fal-ai/kling-video/v3/standard/image-to-video",
     input: {
-      prompt: falInput.prompt,
+      prompt,
       image_url: first,
       duration: falInput.duration ?? "5",
       aspect_ratio: falInput.aspect_ratio ?? "9:16",
