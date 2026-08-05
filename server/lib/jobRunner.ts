@@ -30,14 +30,39 @@ export function classifyJobError(status: number | undefined, message: string): J
   if (/gateway|timeout|unavailable|econnreset|econnrefused|fetch failed|socket hang up/i.test(message)) {
     return "transient";
   }
-  if (
-    status === 422 &&
-    /likeness|real people|private information|content checker|flagged by a content/i.test(message)
-  ) {
+  if (status === 422 && SEEDANCE_LIKENESS_RE.test(message)) {
     return "likeness";
   }
   return "hard";
 }
+
+/**
+ * Signatures of a Seedance content-checker refusal, in every phrasing fal has
+ * surfaced for it.
+ *
+ * The last two matter because of a real incident (Puzzle Makeup, 10–16 July
+ * 2026): 12 b-roll videos failed and the Kling fallback never fired. The
+ * reference images were hand/fingertip shots, which ByteDance's validator
+ * rejects as "likenesses of real people" — exactly the case this fallback
+ * exists for. But fal reported it only by its DOWNSTREAM SYMPTOM:
+ *
+ *   "Invalid reference index 1 for image. Only 0 images provided."
+ *
+ * i.e. the rejected images were dropped from the payload, so the prompt's
+ * `@Image1` marker then pointed at an empty list. That message matches none of
+ * the likeness words, so the items were classified `hard` and simply died.
+ * fal has since improved the message to name the real reason
+ * ("...may contain likenesses of real people...", type
+ * `content_policy_violation`, reason `partner_validation_failed`), but we match
+ * BOTH phrasings so a provider-side wording change can never silently disable
+ * the fallback again.
+ *
+ * Safe on false positives: if a prompt ever genuinely over-references (e.g.
+ * `@Image3` with two images), routing to Kling yields a usable clip from the
+ * first frame instead of a dead item — and the fallback is logged either way.
+ */
+const SEEDANCE_LIKENESS_RE =
+  /likeness|real people|private information|content checker|flagged by a content|content[_ ]?policy|partner_validation_failed|invalid reference index|only 0 images provided/i;
 
 /**
  * Map a Seedance reference-to-video input to Kling v3 image-to-video for the

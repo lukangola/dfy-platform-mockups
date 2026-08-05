@@ -12,6 +12,19 @@ describe("classifyJobError", () => {
     expect(classifyJobError(422, "image_urls: The images or videos provided may contain likenesses of real people or other private information that cannot be processed.")).toBe("likeness");
     expect(classifyJobError(422, "prompt: The content could not be processed because it contained material flagged by a content checker.")).toBe("likeness");
   });
+  it("marks the DOWNSTREAM SYMPTOM of a content refusal as likeness (Puzzle Makeup, 16 Jul 2026)", () => {
+    // fal used to report a content-policy rejection only by its side effect:
+    // the refused images were dropped, so the prompt's @Image1 marker pointed
+    // at an empty list. 12 client videos died because this read as "hard" and
+    // the Kling fallback never fired. Verbatim message from job_items.error:
+    expect(
+      classifyJobError(422, "Unprocessable Entity — Invalid reference index 1 for image. Only 0 images provided."),
+    ).toBe("likeness");
+  });
+  it("marks fal's structured content-policy fields as likeness", () => {
+    expect(classifyJobError(422, "content_policy_violation")).toBe("likeness");
+    expect(classifyJobError(422, "partner_validation_failed")).toBe("likeness");
+  });
   it("marks other 4xx as hard", () => {
     expect(classifyJobError(422, "resolution: invalid value")).toBe("hard");
     expect(classifyJobError(400, "prompt required")).toBe("hard");
