@@ -67,36 +67,66 @@ const SEEDANCE_LIKENESS_RE =
  * Every likeness fallback in the b-roll pipeline hit this, since those prompts
  * always carry `@ImageN` markers.
  */
-export function stripSeedanceImageMarkers(prompt: string): string {
+export function stripSeedanceImageMarkers(prompt: string, hasElements = false): string {
   return prompt
-    .replace(/@Image\s*\d+/gi, "the image")
+    // @Image1 is Seedance's START FRAME. Kling passes that as start_image_url
+    // and has no marker for it, so it becomes plain prose.
+    .replace(/@Image\s*1\b/gi, "the starting frame")
+    // @Image2+ are Seedance's extra reference images (product packshots). Kling
+    // carries those in `elements` and addresses them as @Element1 — so when we
+    // attach elements, keep the reference; when we don't, degrade to prose
+    // (an unresolvable @Element1 would 422 exactly like @Image1 did).
+    .replace(/@Image\s*\d+/gi, hasElements ? "@Element1" : "the product")
     .replace(/[ \t]{2,}/g, " ")
     .trim();
 }
 
 /**
- * Map a Seedance reference-to-video input to Kling v3 image-to-video for the
- * likeness fallback. Kling takes ONE image_url (the starting frame — always
- * the first Seedance reference) and has no generate_audio/resolution knobs.
- * The prompt is rewritten to drop Seedance's `@ImageN` syntax, which Kling
- * rejects (see above). Returns null when no starting frame exists.
+ * Map a Seedance reference-to-video input onto Kling v3 image-to-video for the
+ * likeness fallback, preserving BOTH kinds of reference Seedance carries:
+ *
+ *   Seedance                          Kling v3
+ *   ─────────────────────────────     ───────────────────────────────────────
+ *   image_urls[0]      (@Image1)  →   start_image_url          (the frame)
+ *   image_urls[1..]    (@Image2+) →   elements[0].reference_image_urls
+ *                                     + frontal_image_url      (@Element1)
+ *
+ * Kling is NOT a single-image model — `elements` is exactly how Character
+ * B-roll and Single Scene already anchor product fidelity in production (see
+ * prompts/character_broll_video_prompts.md, which addresses the bundle as
+ * `@Element1`). An earlier version of this mapping dropped image_urls[1..]
+ * entirely, so fallback clips lost their product anchor and had nothing but the
+ * start frame holding the label/proportions steady across the shot.
+ *
+ * All extra references become ONE element (a multi-angle bundle of the same
+ * object) because that matches how the product refs are collected upstream and
+ * how the `@Element1` convention is written. Returns null with no start frame.
  */
 export function seedanceToKlingFallback(
   falInput: Record<string, unknown>,
 ): { model: string; input: Record<string, unknown> } | null {
   const urls = Array.isArray(falInput.image_urls) ? (falInput.image_urls as string[]) : [];
-  const first = urls[0];
-  if (!first) return null;
-  const prompt = typeof falInput.prompt === "string" ? stripSeedanceImageMarkers(falInput.prompt) : falInput.prompt;
-  return {
-    model: "fal-ai/kling-video/v3/standard/image-to-video",
-    input: {
-      prompt,
-      image_url: first,
-      duration: falInput.duration ?? "5",
-      aspect_ratio: falInput.aspect_ratio ?? "9:16",
-    },
+  const [start, ...refs] = urls;
+  if (!start) return null;
+  const hasElements = refs.length > 0;
+  const prompt =
+    typeof falInput.prompt === "string"
+      ? stripSeedanceImageMarkers(falInput.prompt, hasElements)
+      : falInput.prompt;
+
+  const input: Record<string, unknown> = {
+    prompt,
+    start_image_url: start,
+    duration: falInput.duration ?? "5",
+    aspect_ratio: falInput.aspect_ratio ?? "9:16",
+    // We never use Kling's audio track, and disabling it drops the standard
+    // tier from $0.126/s to $0.084/s (~33%) — same rationale as the other apps.
+    generate_audio: false,
   };
+  if (hasElements) {
+    input.elements = [{ reference_image_urls: refs, frontal_image_url: refs[0] }];
+  }
+  return { model: "fal-ai/kling-video/v3/standard/image-to-video", input };
 }
 
 // ── Registry ────────────────────────────────────────────────────────────────

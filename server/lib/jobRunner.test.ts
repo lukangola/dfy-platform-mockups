@@ -34,10 +34,10 @@ describe("classifyJobError", () => {
 });
 
 describe("seedanceToKlingFallback", () => {
-  it("maps seedance reference-to-video input to kling image-to-video", () => {
+  it("maps seedance refs onto kling start_image_url + elements/@Element1", () => {
     const out = seedanceToKlingFallback({
-      prompt: "Slide the mailer open @Image1",
-      image_urls: ["https://img/start.jpg", "https://img/ref.jpg"],
+      prompt: "Slide the mailer open @Image1. Preserve the product in @Image2 exactly.",
+      image_urls: ["https://img/start.jpg", "https://img/ref.jpg", "https://img/ref2.jpg"],
       duration: "5",
       aspect_ratio: "9:16",
       resolution: "720p",
@@ -45,14 +45,36 @@ describe("seedanceToKlingFallback", () => {
     });
     expect(out?.model).toBe("fal-ai/kling-video/v3/standard/image-to-video");
     expect(out?.input).toEqual({
-      // @Image1 is rewritten: Kling parses the marker and 422s on it. This
-      // expectation previously asserted the marker passed through verbatim,
-      // which is precisely the bug that killed Puzzle Makeup's 12 clips.
-      prompt: "Slide the mailer open the image",
-      image_url: "https://img/start.jpg",
+      // @Image1 -> prose (kling has no start-frame marker);
+      // @Image2 -> @Element1, which the elements bundle resolves.
+      prompt: "Slide the mailer open the starting frame. Preserve the product in @Element1 exactly.",
+      start_image_url: "https://img/start.jpg",
       duration: "5",
       aspect_ratio: "9:16",
+      generate_audio: false,
+      elements: [{
+        reference_image_urls: ["https://img/ref.jpg", "https://img/ref2.jpg"],
+        frontal_image_url: "https://img/ref.jpg",
+      }],
     });
+  });
+  it("carries EVERY extra reference through — losing them costs product fidelity", () => {
+    const out = seedanceToKlingFallback({
+      prompt: "Animate @Image1 matching @Image2.",
+      image_urls: ["https://img/a.jpg", "https://img/b.jpg", "https://img/c.jpg", "https://img/d.jpg"],
+    });
+    const els = (out!.input.elements as Array<{ reference_image_urls: string[] }>)[0];
+    expect(els.reference_image_urls).toHaveLength(3);
+  });
+  it("emits NO @Element1 when there is nothing to bind it to", () => {
+    // A dangling @Element1 would 422 exactly like the @Image1 bug did.
+    const out = seedanceToKlingFallback({
+      prompt: "Animate @Image1. Match @Image2 exactly.",
+      image_urls: ["https://img/only.jpg"],
+    });
+    expect(String(out!.input.prompt)).not.toMatch(/@Element/i);
+    expect(String(out!.input.prompt)).not.toMatch(/@Image/i);
+    expect(out!.input.elements).toBeUndefined();
   });
   it("returns null when there is no starting frame", () => {
     expect(seedanceToKlingFallback({ prompt: "x", image_urls: [] })).toBeNull();
@@ -60,19 +82,26 @@ describe("seedanceToKlingFallback", () => {
 });
 
 describe("stripSeedanceImageMarkers", () => {
-  it("rewrites @ImageN markers into prose (Kling 422s on them)", () => {
+  it("maps @Image1 to prose and @Image2+ to @Element1 when elements are attached", () => {
     const out = stripSeedanceImageMarkers(
       "Animate @Image1. Preserve the product shown in @Image2 — label and cap. Hand count matches @Image1 exactly.",
+      true,
     );
     expect(out).not.toMatch(/@Image/i);
-    expect(out).toBe("Animate the image. Preserve the product shown in the image — label and cap. Hand count matches the image exactly.");
+    expect(out).toBe("Animate the starting frame. Preserve the product shown in @Element1 — label and cap. Hand count matches the starting frame exactly.");
   });
-  it("tolerates spacing/casing variants", () => {
-    expect(stripSeedanceImageMarkers("@image 1 and @IMAGE2")).toBe("the image and the image");
+  it("degrades @Image2+ to prose when there are no elements", () => {
+    const out = stripSeedanceImageMarkers("Animate @Image1 matching @Image2.", false);
+    expect(out).toBe("Animate the starting frame matching the product.");
+    expect(out).not.toMatch(/@/);
+  });
+  it("tolerates spacing/casing variants and does not mangle @Image10", () => {
+    expect(stripSeedanceImageMarkers("@image 1 and @IMAGE2", true)).toBe("the starting frame and @Element1");
+    expect(stripSeedanceImageMarkers("@Image10", true)).toBe("@Element1");
   });
   it("leaves a marker-free prompt untouched", () => {
     const p = "A calm pan across the counter.";
-    expect(stripSeedanceImageMarkers(p)).toBe(p);
+    expect(stripSeedanceImageMarkers(p, true)).toBe(p);
   });
 });
 
@@ -85,6 +114,6 @@ describe("seedanceToKlingFallback prompt sanitisation", () => {
     });
     expect(fb).not.toBeNull();
     expect(String(fb!.input.prompt)).not.toMatch(/@Image/i);
-    expect(fb!.input.image_url).toBe("https://x/a.jpg");
+    expect(fb!.input.start_image_url).toBe("https://x/a.jpg");
   });
 });

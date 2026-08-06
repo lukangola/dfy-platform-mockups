@@ -62,7 +62,10 @@ describe("runVideoItem", () => {
       .mockResolvedValueOnce({ urls: ["https://v/ok.mp4"], raw: {}, model: KLING, durationMs: 5 });
 
     const result = await runVideoItem({
-      item: makeItem({ prompt: "x", image_urls: ["https://start.jpg"] }),
+      item: makeItem({
+        prompt: "Animate @Image1 preserving @Image2.",
+        image_urls: ["https://start.jpg", "https://product.jpg"],
+      }),
       payload: {},
     });
 
@@ -72,7 +75,15 @@ describe("runVideoItem", () => {
     expect(mockGenerateVideo).toHaveBeenCalledTimes(2);
     const secondCall = mockGenerateVideo.mock.calls[1][0];
     expect(secondCall.model).toBe(KLING);
-    expect((secondCall.input as Record<string, unknown>).image_url).toBe("https://start.jpg");
+    const klingInput = secondCall.input as Record<string, unknown>;
+    // Start frame → start_image_url; product refs survive as an @Element1 bundle
+    // (dropping them is what cost the fallback its product fidelity).
+    expect(klingInput.start_image_url).toBe("https://start.jpg");
+    expect(klingInput.elements).toEqual([
+      { reference_image_urls: ["https://product.jpg"], frontal_image_url: "https://product.jpg" },
+    ]);
+    expect(String(klingInput.prompt)).not.toMatch(/@Image/i);
+    expect(String(klingInput.prompt)).toContain("@Element1");
   });
 
   it("does NOT fall back on transient errors — rethrows so the runner retries", async () => {
