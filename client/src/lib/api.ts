@@ -1903,12 +1903,27 @@ export function deployListicle(id: string): Promise<{
 const AD_CONSOLE = "/api/ad-console";
 
 /**
+ * Covers we re-hosted ourselves (fal.storage) are permanent AND served with
+ * `access-control-allow-origin: *`, so they render directly in an <img>.
+ * Mirrors `isDurableCoverUrl` in server/lib/adConsoleCovers.ts.
+ */
+const DURABLE_IMG_RE = /fal\.media|fal\.storage/i;
+
+/**
  * Route an organic thumbnail through our same-origin image proxy. Instagram's
  * CDN serves covers with CORP `same-origin`, so a direct <img> renders black;
  * the proxy re-serves the bytes from our origin. Pass-through for empty URLs.
+ *
+ * Durable (already re-hosted) covers SKIP the proxy. They must: the proxy is
+ * host-allowlisted to the social CDNs as an SSRF guard, so a fal.media URL gets
+ * a flat 400 — which is what silently blanked the whole Trending Organic feed
+ * once ingest started re-hosting covers (the vast majority of rows are now
+ * fal-hosted). Serving them straight from fal is also strictly better: no proxy
+ * round-trip, no egress through our box, and fal sets a long immutable cache.
  */
 export function adConsoleImg(url: string | null | undefined): string | undefined {
   if (!url) return undefined;
+  if (DURABLE_IMG_RE.test(url)) return url;
   return `${AD_CONSOLE}/img?url=${encodeURIComponent(url)}`;
 }
 
