@@ -56,6 +56,26 @@ function quoteFamily(family: string): string {
 }
 
 /**
+ * The weight range every uploaded face is declared across.
+ *
+ * A brand gives us at most ONE file per style (regular + optional italic), but
+ * the landers ask for real weights — the listicle template sets `font-weight:
+ * 700` on H1/H2 and 500-600 elsewhere. Declaring the file as `font-weight:400`
+ * means every heading misses the declared weight, so the browser SYNTHESISES a
+ * bold by mechanically thickening the strokes. Measured on Puzzle® Makeup's
+ * Meno Banner Light, that inflates ink coverage ~25% and turns a fine editorial
+ * serif into a smeared approximation — the opposite of why a client sends their
+ * licensed files.
+ *
+ * Claiming the full range instead makes every requested weight match this face
+ * exactly, so the type always renders exactly as the foundry drew it. Brands
+ * wanting genuine weight contrast must supply the additional weight files (and
+ * this model would need a per-weight slot); until then, true-to-the-file beats
+ * a fake bold.
+ */
+const FACE_WEIGHT_RANGE = "100 900";
+
+/**
  * Build the `@font-face` CSS block for a brand's uploaded font files. Returns
  * the empty string when there are no files, so callers can inject
  * unconditionally. Each face with a `regularUrl` (and optional `italicUrl`)
@@ -68,13 +88,13 @@ export function buildFontFaceCss(faces: BrandFontFace[] | null | undefined): str
     if (!f || !f.family) continue;
     if (f.regularUrl) {
       rules.push(
-        `@font-face{font-family:${quoteFamily(f.family)};font-style:normal;font-weight:400;font-display:swap;` +
+        `@font-face{font-family:${quoteFamily(f.family)};font-style:normal;font-weight:${FACE_WEIGHT_RANGE};font-display:swap;` +
           `src:url("${f.regularUrl}") format("${fontFormatFromUrl(f.regularUrl)}");}`,
       );
     }
     if (f.italicUrl) {
       rules.push(
-        `@font-face{font-family:${quoteFamily(f.family)};font-style:italic;font-weight:400;font-display:swap;` +
+        `@font-face{font-family:${quoteFamily(f.family)};font-style:italic;font-weight:${FACE_WEIGHT_RANGE};font-display:swap;` +
           `src:url("${f.italicUrl}") format("${fontFormatFromUrl(f.italicUrl)}");}`,
       );
     }

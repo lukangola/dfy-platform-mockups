@@ -51,6 +51,16 @@ describe("buildFontFaceCss", () => {
     expect(css).toContain('font-family:"Sofia Pro"');
     expect(css).not.toContain("font-style:italic");
   });
+  it("claims the full weight range so headings never get a synthesised bold", () => {
+    // The lander template asks for font-weight:700 on H1/H2. A face pinned to
+    // 400 would miss, and the browser would fake the bold by thickening
+    // strokes (~25% more ink on Meno Banner Light). Claiming 100-900 makes the
+    // real file match at every requested weight.
+    const css = buildFontFaceCss([MENO, SOFIA]);
+    expect(css).toContain("font-weight:100 900");
+    expect(css).not.toContain("font-weight:400");
+    expect(css.match(/font-weight:100 900/g)).toHaveLength(3); // meno normal+italic, sofia normal
+  });
   it("skips entries missing a family or any URL", () => {
     const css = buildFontFaceCss([
       { role: "accent", family: "", regularUrl: "https://x/y.woff2", fallback: "cursive" },
