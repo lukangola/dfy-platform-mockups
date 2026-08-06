@@ -14,16 +14,19 @@
  * so each executor writes its own generations row here — cost/accounting
  * stays complete without HTTP self-calls.
  *
- * Likeness policy (spec): Seedance 2.0 refuses reference images containing
- * realistic human faces (422 "likenesses of real people" / content-checker
- * flags). For job types whose primary video model is Seedance (standard
- * b-roll) that is not a user error — the executor retries ONCE on Kling v3
- * with the same starting frame (opts.seedanceKlingFallback: true);
- * output.model records what actually rendered. Job types that render on
- * Kling natively (character b-roll, single scene) set the flag false: there
- * is no alternate provider to fall back to, so a likeness-classified error
- * just fails the item. The runner's classifyJobError never retries likeness
- * errors itself, so this fallback is the only second chance.
+ * VIDEO MODEL (all apps, since 2026-08-05): Kling v3 standard. Standard b-roll
+ * was the last holdout on Seedance 2.0; it moved because Seedance refuses
+ * hand- and face-led reference images on content policy (422 "likenesses of
+ * real people" / content-checker), which is most of what a UGC-style ad b-roll
+ * IS, while Kling renders them and matches Seedance's multi-reference support
+ * through `elements`/@Element1. One model everywhere — no per-brand routing.
+ *
+ * `opts.klingPrimary` adapts a stored Seedance-shaped payload (image_urls +
+ * @ImageN) onto Kling at execution time, so jobs queued before the switch run
+ * on Kling too. `opts.seedanceKlingFallback` is the old likeness escape hatch;
+ * it is now false everywhere (nothing renders on Seedance, so there is no
+ * alternate provider) and is kept only as the rollback path — flipping
+ * klingPrimary off restores Seedance-primary + Kling-on-refusal.
  */
 import { db, schema } from "../db.js";
 import { generateImage, generateVideo } from "../fal.js";
@@ -94,19 +97,39 @@ export function makeImageExecutor(action: string): JobExecutor {
 
 export function makeVideoExecutor(
   action: string,
-  opts: { seedanceKlingFallback: boolean },
+  opts: { seedanceKlingFallback: boolean; klingPrimary?: boolean },
 ): JobExecutor {
   return async ({ item }) => {
     const input = (item.input ?? {}) as MediaItemInput;
     if (!input.falInput) throw new Error("item.input.falInput missing");
-    const primaryModel = input.model ?? "bytedance/seedance-2.0/fast/reference-to-video";
+    let primaryModel = input.model ?? "bytedance/seedance-2.0/fast/reference-to-video";
+    let falInput = input.falInput;
+
+    // KLING-PRIMARY (b-roll, since 2026-08-05). The b-roll payload carries its
+    // reference set in Seedance's shape — `image_urls` cited as @ImageN — which
+    // is also what every previously-stored job holds. Adapting it here (rather
+    // than at the call site) keeps ONE copy of the mapping and means queued and
+    // resumed jobs from before the switch run on Kling too, instead of silently
+    // taking the old Seedance path.
+    //
+    // Seedance is not used for video anywhere now: it refuses hand- and
+    // face-led shots on content policy, and Kling matches it on multi-reference
+    // via `elements`. Rollback = drop klingPrimary from the registration below.
+    if (opts.klingPrimary && Array.isArray((falInput as Record<string, unknown>).image_urls)) {
+      const mapped = seedanceToKlingFallback(falInput);
+      if (mapped) {
+        primaryModel = mapped.model;
+        falInput = mapped.input;
+      }
+    }
+
     try {
-      const result = await generateVideo({ model: primaryModel, input: input.falInput });
+      const result = await generateVideo({ model: primaryModel, input: falInput });
       const url = result.urls[0];
       const generationId = await logGeneration({
         action,
         kind: "video",
-        inputs: { jobItemId: item.id, input: input.falInput },
+        inputs: { jobItemId: item.id, input: falInput },
         output: { urls: result.urls },
         model: result.model,
         durationMs: result.durationMs,
@@ -144,7 +167,11 @@ export function makeVideoExecutor(
 
 // Exported for unit tests (registrations below stay the side-effect entrypoint).
 export const runImageItem = makeImageExecutor("broll_image");
-export const runVideoItem = makeVideoExecutor("broll_video", { seedanceKlingFallback: true });
+// b-roll renders on Kling directly now, so there is no alternate provider left
+// to fall back to — a Kling content refusal would otherwise re-issue the very
+// same call and pay for a second refusal. Same reasoning the other two video
+// apps already use. Re-enable together with klingPrimary:false to roll back.
+export const runVideoItem = makeVideoExecutor("broll_video", { seedanceKlingFallback: false, klingPrimary: true });
 
 // Accounting actions match what each app's client page passes to
 // /api/generate today (grep generateImage(/generateVideo( in the page files).

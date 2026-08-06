@@ -56,10 +56,8 @@ beforeEach(() => {
 });
 
 describe("runVideoItem", () => {
-  it("falls back to kling on a seedance likeness refusal and records fallbackFrom + generationId", async () => {
-    mockGenerateVideo
-      .mockRejectedValueOnce(likenessError())
-      .mockResolvedValueOnce({ urls: ["https://v/ok.mp4"], raw: {}, model: KLING, durationMs: 5 });
+  it("renders on KLING directly — seedance is never called", async () => {
+    mockGenerateVideo.mockResolvedValueOnce({ urls: ["https://v/ok.mp4"], raw: {}, model: KLING, durationMs: 5 });
 
     const result = await runVideoItem({
       item: makeItem({
@@ -70,14 +68,15 @@ describe("runVideoItem", () => {
     });
 
     expect(result.url).toBe("https://v/ok.mp4");
-    expect(result.fallbackFrom).toBe(SEEDANCE);
     expect(result.generationId).toBe("gen-1");
-    expect(mockGenerateVideo).toHaveBeenCalledTimes(2);
-    const secondCall = mockGenerateVideo.mock.calls[1][0];
-    expect(secondCall.model).toBe(KLING);
-    const klingInput = secondCall.input as Record<string, unknown>;
-    // Start frame → start_image_url; product refs survive as an @Element1 bundle
-    // (dropping them is what cost the fallback its product fidelity).
+    // ONE call, straight to Kling — no Seedance attempt, no refusal tax.
+    expect(mockGenerateVideo).toHaveBeenCalledTimes(1);
+    const call = mockGenerateVideo.mock.calls[0][0];
+    expect(call.model).toBe(KLING);
+    expect(call.model).not.toBe(SEEDANCE);
+    const klingInput = call.input as Record<string, unknown>;
+    // The stored payload is still Seedance-shaped (image_urls/@ImageN); the
+    // executor adapts it so pre-switch jobs run on Kling too.
     expect(klingInput.start_image_url).toBe("https://start.jpg");
     expect(klingInput.elements).toEqual([
       { reference_image_urls: ["https://product.jpg"], frontal_image_url: "https://product.jpg" },
@@ -86,7 +85,22 @@ describe("runVideoItem", () => {
     expect(String(klingInput.prompt)).toContain("@Element1");
   });
 
-  it("does NOT fall back on transient errors — rethrows so the runner retries", async () => {
+  it("does not re-issue a second call on a content refusal (no provider left to try)", async () => {
+    // Kling IS the primary now; retrying the identical call would just buy a
+    // second refusal at full price.
+    const err = likenessError();
+    mockGenerateVideo.mockRejectedValueOnce(err);
+
+    await expect(
+      runVideoItem({
+        item: makeItem({ prompt: "Animate @Image1.", image_urls: ["https://start.jpg"] }),
+        payload: {},
+      }),
+    ).rejects.toBe(err);
+    expect(mockGenerateVideo).toHaveBeenCalledTimes(1);
+  });
+
+  it("rethrows transient errors so the runner retries them", async () => {
     mockGenerateVideo.mockRejectedValueOnce(
       Object.assign(new Error("Gateway Timeout - Downstream service unavailable"), { status: 502 }),
     );
@@ -97,14 +111,11 @@ describe("runVideoItem", () => {
     expect(mockGenerateVideo).toHaveBeenCalledTimes(1);
   });
 
-  it("rethrows the original likeness error when there is no starting frame for kling", async () => {
-    const err = likenessError();
-    mockGenerateVideo.mockRejectedValueOnce(err);
-
-    await expect(
-      runVideoItem({ item: makeItem({ prompt: "x", image_urls: [] }), payload: {} }),
-    ).rejects.toBe(err);
-    expect(mockGenerateVideo).toHaveBeenCalledTimes(1);
+  it("leaves a payload with no image_urls on its declared model", async () => {
+    // Nothing to map → primary stays whatever the item declared.
+    mockGenerateVideo.mockResolvedValueOnce({ urls: ["https://v/ok.mp4"], raw: {}, model: SEEDANCE, durationMs: 5 });
+    await runVideoItem({ item: makeItem({ prompt: "x" }), payload: {} });
+    expect(mockGenerateVideo.mock.calls[0][0].model).toBe(SEEDANCE);
   });
 });
 

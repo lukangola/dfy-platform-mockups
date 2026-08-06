@@ -541,11 +541,15 @@ export default function BrollAppPage() {
     return {
       shotId: shot.id,
       kind: "video",
-      // Fast tier is the PRODUCTION choice (decided 2026-07-09): ~2-3× faster,
-      // ~30-50% cheaper, same 9 reference images and 4-15s duration as the
-      // regular tier. If quality issues appear (softer motion, label/text
-      // drift on packaging, color/lighting deviation from the starting
-      // frame), the rollback is: model: "bytedance/seedance-2.0/reference-to-video"
+      // NOTE: b-roll videos actually RENDER ON KLING v3 (since 2026-08-05).
+      // Seedance refuses hand- and face-led reference images on content policy
+      // — most of what an ad b-roll is — so every video app is on Kling now.
+      // This field still declares the SEEDANCE DIALECT because `falInput` below
+      // is Seedance-shaped (image_urls cited as @ImageN); the job executor
+      // adapts it to Kling's start_image_url + elements/@Element1 in ONE place
+      // (server/lib/jobExecutors/media.ts, opts.klingPrimary), which also means
+      // jobs queued before the switch run on Kling too. Rollback to Seedance =
+      // drop klingPrimary there; this payload needs no change.
       model: "bytedance/seedance-2.0/fast/reference-to-video",
       falInput: {
         prompt,
