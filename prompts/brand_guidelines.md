@@ -43,11 +43,26 @@ The user will pass you a single input variable: `{{url}}` — the brand's primar
 
   **Font selection priority — work this list IN ORDER, stop at the first hit:**
 
-  1. **A Google Fonts family the brand actively loads on its own site.** Look for `<link href="https://fonts.googleapis.com/css2?family=NAME...">` in the page HTML. Each `family=NAME` is a confirmed Google Fonts dependency the brand has chosen to use. **Prefer these above all else** — they are the brand's real Google-Fonts-compatible families. If you find multiple (e.g. Alcami loads `Libre Baskerville`, `Albert Sans`, `Outfit`, `Cabin`), pick the **most editorial / display-feeling one** for Primary Font and the **most utilitarian / body-feeling one** for Secondary Font. Do not annotate — these are exact matches, not substitutions.
+  0. **THE DETECTED FONTS BLOCK BELOW — authoritative, use it first.** Before this prompt ran, the platform fetched the site's HTML, its inline `<style>` blocks and its stylesheets *server-side* and extracted the font families directly from the CSS. `web_fetch` cannot show you any of that — it strips `<style>` and linked stylesheets — so this block is the ONLY reliable view of the site's real typography, and it beats your own visual impression every time.
+
+     Read it as follows:
+     - Entries with **theme roles** (`heading`, `body`, `button`, …) come from the theme's own CSS custom properties. These are the brand's real type roles: map `heading`/`display`/`title` → **Primary Font**, and `body`/`base`/`text` → **Secondary Font**.
+     - **A single family covering every role is normal and correct.** Many brands run a one-typeface system — if only one family is listed, use it for BOTH Primary and Secondary. Do NOT invent a second family for variety.
+     - `available on Google Fonts (usable by name)` → treat exactly like a step-1 hit. Name it, do NOT annotate it as a substitution.
+     - `NOT on Google Fonts (licensed — needs uploaded files)` → name the family verbatim and annotate `_(licensed font — the brand must upload the real font files; surfaces without them fall back to the web-safe stack)_`.
+     - `CSS slug — real family name is probably "X"` → write the proper name `X`, not the slug.
+     - Prefer entries with more evidence types and higher occurrence counts. Ignore obvious third-party widget fonts (review-widget star glyphs, carousel icon fonts) — they appear on the page but are not brand typography.
+     - Only fall through to the steps below if the block is empty or says nothing could be extracted.
+
+     **Detected fonts (extracted from the live CSS — authoritative):**
+
+     {{detected_fonts}}
+
+  1. **A Google Fonts family the brand actively loads on its own site.** Look for `<link href="https://fonts.googleapis.com/css2?family=NAME...">` in the page HTML. Each `family=NAME` is a confirmed Google Fonts dependency the brand has chosen to use. If you find multiple (e.g. Alcami loads `Libre Baskerville`, `Albert Sans`, `Outfit`, `Cabin`), pick the **most editorial / display-feeling one** for Primary Font and the **most utilitarian / body-feeling one** for Secondary Font. Do not annotate — these are exact matches, not substitutions.
 
   2. **A paid / Adobe / custom-hosted font name you can clearly identify** (Apercu, Domaine Display, GT Walsheim, Söhne, etc.). Write the exact family name verbatim. Annotate the line with `_(commercial font — render renderer will load via paid CDN if licensed, otherwise fall back to substitute)_`.
 
-  3. **Last resort — closest Google Fonts substitute.** Only when steps 1+2 both fail. Pick from this list, matching the visual feel you observed:
+  3. **Last resort — closest Google Fonts substitute.** Only when steps 0, 1 and 2 ALL fail — meaning the detected-fonts block is empty AND you found no font link. This is a genuine last resort: a substitution silently mis-brands every downstream ad, lander and asset, so do not reach for it while step 0 has anything usable in it. Pick from this list, matching the visual feel you observed:
      - For **high-contrast display serifs** (Didone family — Domaine Display, Bodoni, Caslon Display): `Playfair Display`, `Bodoni Moda`, `DM Serif Display`
      - For **low-contrast humanist serifs** (Garamond family — Cormorant, EB Garamond, Sabon): `Cormorant Garamond`, `EB Garamond`, `Lora`
      - For **modern transitional / utility serifs** (Caslon, Crimson, Fraunces feel): `Fraunces`, `Libre Caslon Text`, `Libre Baskerville`

@@ -21,6 +21,7 @@ import { requireAdmin, requireAuth, requireManager } from "../lib/auth.js";
 import { canSeeBrand, visibleBrandIds, grantBrandsToUser } from "../lib/brandAccess.js";
 import { ensureLogoIsPng } from "../lib/logoConvert.js";
 import { db, schema } from "../lib/db.js";
+import { detectSiteFonts, formatDetectedFontsForPrompt } from "../lib/brandFontDetect.js";
 import { parseBrandGuidelines } from "../lib/brandGuidelinesParse.js";
 import { loadPrompt, PromptNotConfiguredError } from "../lib/prompts.js";
 import { fetchUrlMeta } from "../lib/urlMeta.js";
@@ -549,7 +550,34 @@ export async function runBrandResearch(brandId: string, brandUrl: string): Promi
       .set({ researchStatus: "researching", researchError: null })
       .where(eq(schema.brands.id, brandId));
 
-    const prompt = loadPrompt(BRAND_RESEARCH_ACTION, { url: brandUrl });
+    // Detect the site's real typefaces OURSELVES before prompting.
+    //
+    // The prompt asks the model to inspect raw CSS for @font-face rules and
+    // --font-* custom properties, but it only ever sees the site through
+    // web_fetch, which strips <style> blocks and linked stylesheets. That made
+    // the instruction unsatisfiable, so brands whose fonts aren't declared via
+    // a Google Fonts <link> silently fell through to "closest substitute" —
+    // Leven Rose (self-hosted DM Sans) was recorded as Cormorant Garamond +
+    // Inter, and every generated surface inherited the wrong type.
+    //
+    // Best-effort by design: on failure we pass an empty block and the prompt
+    // falls back to its previous model-driven behaviour rather than failing the
+    // whole research run over an enrichment step.
+    let detectedFonts = "";
+    try {
+      const detection = await detectSiteFonts(brandUrl);
+      detectedFonts = formatDetectedFontsForPrompt(detection);
+      console.log(
+        `[brands] font detection for ${brandUrl}: ` +
+        (detection.fonts.length
+          ? detection.fonts.map((f) => `${f.family}${f.selfHosted ? " (self-hosted)" : ""}`).join(", ")
+          : "none"),
+      );
+    } catch (err) {
+      console.error(`[brands] font detection failed for ${brandUrl}:`, err);
+    }
+
+    const prompt = loadPrompt(BRAND_RESEARCH_ACTION, { url: brandUrl, detected_fonts: detectedFonts });
     const result = await generateText({
       systemPrompt: prompt.rendered,
       userMessage: `Brand website: ${brandUrl}`,
