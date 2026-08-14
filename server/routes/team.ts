@@ -26,6 +26,7 @@ import { type Request, type Response, Router } from "express";
 import { db, schema } from "../lib/db.js";
 import { generateInviteToken, requireAdmin, requireAuth } from "../lib/auth.js";
 import { grantBrandsToUser, revokeBrandsFromUser } from "../lib/brandAccess.js";
+import { normalizeInviteBrandIds } from "../lib/inviteBrands.js";
 import type { Role } from "../db/schema.js";
 
 export const teamRouter: Router = Router();
@@ -62,6 +63,7 @@ function shapeInvite(row: schema.Invite) {
     id: row.id,
     email: row.email,
     role: row.role as Role,
+    brandIds: (row.brandIds as string[] | null) ?? null,
     token: row.token,
     invitedByUserId: row.invitedByUserId,
     expiresAt: row.expiresAt,
@@ -116,7 +118,7 @@ teamRouter.get("/", requireAuth, async (req: Request, res: Response) => {
 // ── POST /api/team/invites ─────────────────────────────────────────
 teamRouter.post("/invites", requireAdmin, async (req: Request, res: Response) => {
   try {
-    const body = (req.body ?? {}) as { email?: string; role?: string };
+    const body = (req.body ?? {}) as { email?: string; role?: string; brandIds?: unknown };
     const email = (body.email ?? "").trim().toLowerCase();
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
       return sendError(res, 400, "A valid email is required");
@@ -157,6 +159,15 @@ teamRouter.post("/invites", requireAdmin, async (req: Request, res: Response) =>
     if (existingInvite && !existingInvite.acceptedAt)
       return sendError(res, 409, "An invite for that email is already pending. Revoke it first to re-invite.");
 
+    // Pre-assigned workspaces: validate against THIS team's brands. Foreign
+    // ids reject the whole request (clear error beats a silent drop).
+    const teamBrands = await db
+      .select({ id: schema.brands.id })
+      .from(schema.brands)
+      .where(eq(schema.brands.teamId, team.id));
+    const normalized = normalizeInviteBrandIds(body.brandIds, role, new Set(teamBrands.map((b) => b.id)));
+    if (!normalized.ok) return sendError(res, 400, normalized.error);
+
     const token = generateInviteToken();
     const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
 
@@ -166,6 +177,7 @@ teamRouter.post("/invites", requireAdmin, async (req: Request, res: Response) =>
         teamId: team.id,
         email,
         role,
+        brandIds: normalized.brandIds,
         token,
         invitedByUserId: user.id,
         expiresAt,
