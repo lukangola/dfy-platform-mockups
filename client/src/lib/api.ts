@@ -1065,6 +1065,8 @@ export type InviteRow = {
   id: string;
   email: string;
   role: TeamRole;
+  /** Workspaces granted automatically when this invite is accepted. Null = none. */
+  brandIds: string[] | null;
   token: string;
   invitedByUserId: string;
   expiresAt: string;
@@ -1084,7 +1086,11 @@ export function getTeam(): Promise<TeamSnapshot> {
   return get<TeamSnapshot>("/api/team");
 }
 
-export function createTeamInvite(args: { email: string; role: TeamRole }): Promise<{ invite: InviteRow }> {
+export function createTeamInvite(args: {
+  email: string;
+  role: TeamRole;
+  brandIds?: string[];
+}): Promise<{ invite: InviteRow }> {
   return post<{ invite: InviteRow }>("/api/team/invites", args);
 }
 
