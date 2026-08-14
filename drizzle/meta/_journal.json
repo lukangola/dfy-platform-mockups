@@ -211,6 +211,13 @@
       "when": 1783617937994,
       "tag": "0029_wide_nomad",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1786725801372,
+      "tag": "0030_striped_blue_marvel",
+      "breakpoints": true
     }
   ]
 }

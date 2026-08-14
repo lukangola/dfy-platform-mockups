@@ -393,6 +393,15 @@ export const invites = pgTable("invites", {
   teamId: uuid("team_id").notNull(),
   email: text("email").notNull(),
   role: text("role").notNull().default("member"),
+  /**
+   * Pre-assigned workspaces: brand ids granted to the invitee automatically
+   * at registration. Shape: string[] (brand UUIDs), validated against the
+   * team's brands at create time and re-filtered at accept time (a brand can
+   * be deleted during the invite's lifetime). NULL = no pre-assignment —
+   * also the state of every invite created before this column existed.
+   * Always NULL for admin invites (admins see every brand already).
+   */
+  brandIds: jsonb("brand_ids"),
   token: text("token").notNull().unique(),
   invitedByUserId: uuid("invited_by_user_id").notNull(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),

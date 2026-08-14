@@ -1,0 +1,1 @@
+ALTER TABLE "invites" ADD COLUMN "brand_ids" jsonb;
