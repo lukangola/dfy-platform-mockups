@@ -27,6 +27,7 @@
 import { and, eq, gt, isNull } from "drizzle-orm";
 import { type Request, type Response, Router } from "express";
 import { db, schema } from "../lib/db.js";
+import type { Role } from "../db/schema.js";
 import {
   clearSessionCookie,
   createSession,
@@ -39,6 +40,8 @@ import {
   setSessionCookie,
   verifyPassword,
 } from "../lib/auth.js";
+import { grantBrandsToUser } from "../lib/brandAccess.js";
+import { filterGrantableBrandIds } from "../lib/inviteBrands.js";
 
 export const authRouter: Router = Router();
 
@@ -161,7 +164,8 @@ authRouter.post("/register", async (req: Request, res: Response) => {
     const passwordHash = await hashPassword(passwordCheck.value);
 
     let teamId: string;
-    let role: "admin" | "member";
+    let role: Role;
+    let acceptedInvite: schema.Invite | null = null;
 
     if (body.inviteToken) {
       // INVITE PATH — validate, consume, attach to inviter's team.
@@ -176,7 +180,10 @@ authRouter.post("/register", async (req: Request, res: Response) => {
       if (invite.email.toLowerCase() !== email)
         return sendError(res, 400, "This invite was sent to a different email address");
       teamId = invite.teamId;
-      role = (invite.role as "admin" | "member") ?? "member";
+      // Runtime value passes through untouched — "manager" invites always
+      // worked; the old `as "admin" | "member"` annotation just lied about it.
+      role = (invite.role as Role) ?? "member";
+      acceptedInvite = invite;
     } else {
       // BOOTSTRAP PATH — only allowed when no users exist yet.
       const bootstrap = await isBootstrapMoment();
@@ -197,6 +204,34 @@ authRouter.post("/register", async (req: Request, res: Response) => {
       .values({ email, passwordHash, name })
       .returning();
     await db.insert(schema.teamMembers).values({ teamId, userId: user.id, role });
+
+    // Pre-assigned workspaces: grant what the admin picked at invite time.
+    // Best-effort by design — the account is the primary artifact, so a
+    // grant failure logs and continues (the admin can still grant manually,
+    // which is exactly the pre-feature flow). Ids are re-filtered against
+    // the team's CURRENT brands: a workspace deleted during the invite's
+    // ~13-day lifetime is silently skipped per the spec.
+    if (acceptedInvite && role !== "admin") {
+      try {
+        const teamBrands = await db
+          .select({ id: schema.brands.id })
+          .from(schema.brands)
+          .where(eq(schema.brands.teamId, teamId));
+        const grantable = filterGrantableBrandIds(
+          acceptedInvite.brandIds,
+          new Set(teamBrands.map((b) => b.id)),
+        );
+        if (grantable.length > 0) {
+          await grantBrandsToUser({
+            userId: user.id,
+            brandIds: grantable,
+            createdBy: acceptedInvite.invitedByUserId,
+          });
+        }
+      } catch (err) {
+        console.error("[auth] invite pre-assigned grants failed (registration continues):", err);
+      }
+    }
 
     if (body.inviteToken) {
       await db
