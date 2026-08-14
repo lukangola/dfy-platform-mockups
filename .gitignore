@@ -107,3 +107,6 @@ temp/
 
 # Webdev artifacts (checkpoint zips, migrations, etc.)
 .webdev/
+
+# Claude worktrees (session isolation)
+.claude/worktrees/
