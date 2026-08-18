@@ -1,3 +1,5 @@
+import { measureImage } from "./imageDims.js";
+
 export type ImageCandidate = {
   url: string;
   width: number | null;
@@ -41,10 +43,27 @@ function decodeEntities(s: string): string {
     .replace(/&nbsp;/g, " ");
 }
 
+/**
+ * URLs parsed out of HTML attributes carry HTML entities — Shopify emits
+ * `?v=123&amp;width=3840` in srcset/src. Left encoded, the query parameter
+ * becomes the literal `amp;width`, so the CDN silently ignores the requested
+ * render size and serves the original file instead. Decoding here (the single
+ * choke point every parsed URL passes through) keeps `width=` effective.
+ */
+function decodeHtmlEntities(input: string): string {
+  return input
+    .replace(/&amp;/gi, "&")
+    .replace(/&#0*38;/g, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0*39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+}
+
 function absolutize(maybeUrl: string | null, base: string): string | null {
   if (!maybeUrl) return null;
   try {
-    return new URL(maybeUrl, base).toString();
+    return new URL(decodeHtmlEntities(maybeUrl.trim()), base).toString();
   } catch {
     return null;
   }
@@ -277,12 +296,25 @@ export async function fetchUrlMeta(url: string, timeoutMs = 8000): Promise<UrlMe
       .sort((a, b) => b.score - a.score)
       .slice(0, 10);
 
-    const topImage = ranked[0]?.url ?? null;
+    // VERIFY REAL PIXELS before anything becomes the product hero.
+    //
+    // srcset advertises a width DESCRIPTOR, not the file's true size. Shopify
+    // lists every variant at `3840w` even when the underlying file is a
+    // thumbnail and the CDN will not upscale it. Primal Science Shop's hero
+    // was recorded as 3840x5203 and actually served 124x168 — small enough
+    // that Kling rejected every video call for that product outright.
+    //
+    // So: measure the top candidates for real, correct their stored dimensions,
+    // and drop the ones too small to use as a model reference. Bounded to
+    // VERIFY_TOP_N fetches (this runs once per product creation, not per
+    // render) and measurements are cached per-URL.
+    const verified = await verifyTopCandidates(ranked);
+    const topImage = verified.find((c) => !c.tooSmall)?.url ?? null;
 
     return {
       title: ogTitle ?? titleTag,
       image: topImage,
-      imageCandidates: ranked,
+      imageCandidates: verified.filter((c) => !c.tooSmall).map(({ tooSmall: _drop, ...c }) => c),
       siteName: ogSiteName,
       description: ogDesc ?? metaDesc,
     };
@@ -293,6 +325,41 @@ export async function fetchUrlMeta(url: string, timeoutMs = 8000): Promise<UrlMe
   }
 }
 
+/** How many top-ranked candidates get their real dimensions measured. */
+const VERIFY_TOP_N = 6;
+/**
+ * Minimum usable edge. Kling refuses references under 300x300; we keep the same
+ * floor here so a product can never be created with a hero the video models
+ * will reject.
+ */
+const MIN_USABLE_PX = 300;
+
+/**
+ * Measure the top candidates and replace the advertised width/height with the
+ * truth. Candidates below MIN_USABLE_PX are flagged (caller drops them).
+ * Unmeasurable URLs are left as-is and NOT flagged — a slow CDN must not cost
+ * us a good image. Candidates past VERIFY_TOP_N keep their advertised numbers;
+ * they are gallery filler, never the auto-pick.
+ */
+async function verifyTopCandidates(
+  ranked: ImageCandidate[],
+): Promise<Array<ImageCandidate & { tooSmall?: boolean }>> {
+  const head = ranked.slice(0, VERIFY_TOP_N);
+  const tail = ranked.slice(VERIFY_TOP_N);
+  const measured = await Promise.all(
+    head.map(async (c) => {
+      const dims = await measureImage(c.url);
+      if (!dims) return { ...c };
+      const tooSmall = Math.min(dims.width, dims.height) < MIN_USABLE_PX;
+      return { ...c, width: dims.width, height: dims.height, tooSmall };
+    }),
+  );
+  return [...measured, ...tail];
+}
+
 function empty(): UrlMeta {
   return { title: null, image: null, imageCandidates: [], siteName: null, description: null };
 }
+
+/** Pure helpers exposed for unit tests (no network). */
+export const __testables = { decodeHtmlEntities, absolutize };
