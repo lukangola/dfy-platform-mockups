@@ -32,6 +32,7 @@ import {
   setMemberBrands,
   createPasswordReset,
   setBrandDfyClient,
+  listBrands,
   type Brand,
   type MemberBrandAccess,
   type TeamSnapshot,
@@ -73,6 +74,9 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Team brands — used for the invite-form workspace picker and to resolve
+  // pre-assigned brandIds on pending invites into display names.
+  const [brands, setBrands] = useState<Brand[]>([]);
 
   async function refresh() {
     setLoading(true);
@@ -87,6 +91,9 @@ export default function SettingsPage() {
   }
 
   useEffect(() => { void refresh(); }, []);
+  useEffect(() => {
+    listBrands().then(({ brands }) => setBrands(brands)).catch(() => setBrands([]));
+  }, []);
 
   return (
     <div className="min-h-screen flex" style={{ background: "#0A0B0E", color: "#E2E8F0" }}>
@@ -199,6 +206,7 @@ export default function SettingsPage() {
                 </div>
                 {team.role === "admin" && (
                   <InviteForm
+                    brands={brands}
                     onCreated={() => void refresh()}
                     onError={setActionError}
                   />
@@ -212,13 +220,24 @@ export default function SettingsPage() {
                     Pending invites ({team.invites.length})
                   </div>
                   <div className="space-y-2">
-                    {team.invites.map((invite) => (
+                    {(() => {
+                      const brandNameById = new Map(brands.map((b) => [b.id, b.name]));
+                      return team.invites.map((invite) => (
                       <div key={invite.id} className="flex items-center gap-3 p-3 rounded border border-white/[0.06] bg-white/[0.02]">
                         <Mail size={13} className="text-amber-400 shrink-0" />
                         <div className="flex-1 min-w-0">
                           <div className="text-sm text-white/85 truncate">{invite.email}</div>
                           <div className="text-[10px] font-mono text-white/40 mt-0.5">
                             invited as <span className="text-white/60">{invite.role}</span> · expires {formatDate(invite.expiresAt)}
+                            {invite.brandIds && invite.brandIds.length > 0 && (() => {
+                              const names = invite.brandIds
+                                .map((id) => brandNameById.get(id))
+                                .filter((n): n is string => Boolean(n));
+                              if (names.length === 0) return null;
+                              const shown = names.slice(0, 2).join(", ");
+                              const more = names.length > 2 ? ` +${names.length - 2} more` : "";
+                              return <> · grants <span className="text-white/60">{shown}{more}</span></>;
+                            })()}
                           </div>
                         </div>
                         <CopyInviteButton token={invite.token} />
@@ -237,7 +256,8 @@ export default function SettingsPage() {
                           <Trash2 size={12} />
                         </button>
                       </div>
-                    ))}
+                      ));
+                    })()}
                   </div>
                 </div>
               )}
@@ -764,9 +784,10 @@ function ClientsTab() {
   );
 }
 
-function InviteForm({ onCreated, onError }: { onCreated: () => void; onError: (msg: string) => void }) {
+function InviteForm({ brands, onCreated, onError }: { brands: Brand[]; onCreated: () => void; onError: (msg: string) => void }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<TeamRole>("member");
+  const [selectedBrandIds, setSelectedBrandIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [createdLink, setCreatedLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -776,10 +797,15 @@ function InviteForm({ onCreated, onError }: { onCreated: () => void; onError: (m
     if (!email.trim()) return;
     setSubmitting(true);
     try {
-      const { invite } = await createTeamInvite({ email: email.trim().toLowerCase(), role });
+      const { invite } = await createTeamInvite({
+        email: email.trim().toLowerCase(),
+        role,
+        brandIds: role === "admin" ? undefined : selectedBrandIds,
+      });
       const link = buildInviteUrl(invite.token);
       setCreatedLink(link);
       setEmail("");
+      setSelectedBrandIds([]);
       onCreated();
       // Auto-copy so the admin can paste straight into Slack/email/etc.
       try {
@@ -799,40 +825,75 @@ function InviteForm({ onCreated, onError }: { onCreated: () => void; onError: (m
 
   return (
     <div>
-      <form onSubmit={onSubmit} className="flex items-end gap-2">
-        <div className="flex-1">
-          <label className="block text-[10px] font-mono text-white/40 uppercase tracking-widest mb-1">Invite by email</label>
-          <div className="flex items-center gap-2 rounded border border-white/[0.08] bg-white/[0.03] px-3 focus-within:border-cyan-500/40 transition-colors">
-            <Mail size={12} className="text-white/40" />
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="teammate@example.com"
-              className="flex-1 bg-transparent py-2 text-sm text-white/85 placeholder:text-white/25 outline-none"
-            />
+      <form onSubmit={onSubmit}>
+        <div className="flex items-end gap-2">
+          <div className="flex-1">
+            <label className="block text-[10px] font-mono text-white/40 uppercase tracking-widest mb-1">Invite by email</label>
+            <div className="flex items-center gap-2 rounded border border-white/[0.08] bg-white/[0.03] px-3 focus-within:border-cyan-500/40 transition-colors">
+              <Mail size={12} className="text-white/40" />
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="teammate@example.com"
+                className="flex-1 bg-transparent py-2 text-sm text-white/85 placeholder:text-white/25 outline-none"
+              />
+            </div>
           </div>
-        </div>
-        <div>
-          <label className="block text-[10px] font-mono text-white/40 uppercase tracking-widest mb-1">Role</label>
-          <select
-            value={role}
-            onChange={(e) => setRole(e.target.value as TeamRole)}
-            className="bg-white/[0.03] border border-white/[0.08] rounded px-2 py-2 text-xs text-white/85 focus:border-cyan-500/40 focus:outline-none"
+          <div>
+            <label className="block text-[10px] font-mono text-white/40 uppercase tracking-widest mb-1">Role</label>
+            <select
+              value={role}
+              onChange={(e) => {
+                setRole(e.target.value as TeamRole);
+                if (e.target.value === "admin") setSelectedBrandIds([]);
+              }}
+              className="bg-white/[0.03] border border-white/[0.08] rounded px-2 py-2 text-xs text-white/85 focus:border-cyan-500/40 focus:outline-none"
+            >
+              <option value="member">member</option>
+              <option value="manager">manager</option>
+              <option value="admin">admin</option>
+            </select>
+          </div>
+          <button
+            type="submit"
+            disabled={!email.trim() || submitting}
+            className="px-4 py-2 rounded text-[11px] font-mono uppercase tracking-wider bg-cyan-500/15 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/25 transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-1.5"
           >
-            <option value="member">member</option>
-            <option value="manager">manager</option>
-            <option value="admin">admin</option>
-          </select>
+            {submitting ? <Loader2 size={11} className="animate-spin" /> : <UserPlus size={11} />}
+            Send invite
+          </button>
         </div>
-        <button
-          type="submit"
-          disabled={!email.trim() || submitting}
-          className="px-4 py-2 rounded text-[11px] font-mono uppercase tracking-wider bg-cyan-500/15 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/25 transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-1.5"
-        >
-          {submitting ? <Loader2 size={11} className="animate-spin" /> : <UserPlus size={11} />}
-          Send invite
-        </button>
+        {role !== "admin" && brands.length > 0 && (
+          <div className="mt-3">
+            <label className="block text-[10px] font-mono text-white/40 uppercase tracking-widest mb-1.5">
+              Workspaces (granted on accept)
+            </label>
+            <div className="flex flex-wrap gap-1.5">
+              {brands.map((b) => {
+                const checked = selectedBrandIds.includes(b.id);
+                return (
+                  <button
+                    key={b.id}
+                    type="button"
+                    onClick={() =>
+                      setSelectedBrandIds((prev) =>
+                        checked ? prev.filter((id) => id !== b.id) : [...prev, b.id],
+                      )
+                    }
+                    className={`px-2.5 py-1.5 rounded border text-[11px] transition-all ${
+                      checked
+                        ? "border-cyan-500/50 bg-cyan-500/15 text-cyan-200"
+                        : "border-white/[0.08] bg-white/[0.03] text-white/50 hover:text-white/75"
+                    }`}
+                  >
+                    {b.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </form>
       {createdLink && (
         <div className="mt-3 p-3 rounded border border-emerald-500/30 bg-emerald-500/[0.07]">
