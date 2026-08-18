@@ -32,7 +32,6 @@ import {
   setMemberBrands,
   createPasswordReset,
   setBrandDfyClient,
-  listBrands,
   type Brand,
   type MemberBrandAccess,
   type TeamSnapshot,
@@ -48,6 +47,18 @@ function formatDate(value: string | null | undefined) {
   }
 }
 
+// Formats a pending invite's pre-assigned brandIds into a display string,
+// e.g. "Acme, Beta +2 more". Unresolvable ids (deleted brands) drop out
+// silently; returns null when there's nothing to show.
+function formatGrantedBrands(brandIds: string[] | null, byId: Map<string, string>): string | null {
+  if (!brandIds || brandIds.length === 0) return null;
+  const names = brandIds.map((id) => byId.get(id)).filter((n): n is string => Boolean(n));
+  if (names.length === 0) return null;
+  const shown = names.slice(0, 2).join(", ");
+  const more = names.length > 2 ? ` +${names.length - 2} more` : "";
+  return `${shown}${more}`;
+}
+
 function buildInviteUrl(token: string) {
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   return `${origin}/accept-invite?token=${token}`;
@@ -60,6 +71,8 @@ function buildResetUrl(token: string) {
 
 export default function SettingsPage() {
   const { user, role, logout } = useAuth();
+  const { brands: brandsFromContext } = useBrand();
+  const brands = brandsFromContext ?? [];
   // Settings sub-tabs. "clients" is admin-only (flag DFY brands); members and
   // managers only ever see "team".
   const [tab, setTab] = useState<"team" | "clients">("team");
@@ -74,9 +87,9 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  // Team brands — used for the invite-form workspace picker and to resolve
-  // pre-assigned brandIds on pending invites into display names.
-  const [brands, setBrands] = useState<Brand[]>([]);
+  // brandNameById resolves pre-assigned brandIds on pending invites into
+  // display names (same brands array powers the invite-form picker below).
+  const brandNameById = new Map(brands.map((b) => [b.id, b.name]));
 
   async function refresh() {
     setLoading(true);
@@ -91,9 +104,6 @@ export default function SettingsPage() {
   }
 
   useEffect(() => { void refresh(); }, []);
-  useEffect(() => {
-    listBrands().then(({ brands }) => setBrands(brands)).catch(() => setBrands([]));
-  }, []);
 
   return (
     <div className="min-h-screen flex" style={{ background: "#0A0B0E", color: "#E2E8F0" }}>
@@ -220,24 +230,16 @@ export default function SettingsPage() {
                     Pending invites ({team.invites.length})
                   </div>
                   <div className="space-y-2">
-                    {(() => {
-                      const brandNameById = new Map(brands.map((b) => [b.id, b.name]));
-                      return team.invites.map((invite) => (
+                    {team.invites.map((invite) => {
+                      const grants = formatGrantedBrands(invite.brandIds, brandNameById);
+                      return (
                       <div key={invite.id} className="flex items-center gap-3 p-3 rounded border border-white/[0.06] bg-white/[0.02]">
                         <Mail size={13} className="text-amber-400 shrink-0" />
                         <div className="flex-1 min-w-0">
                           <div className="text-sm text-white/85 truncate">{invite.email}</div>
                           <div className="text-[10px] font-mono text-white/40 mt-0.5">
                             invited as <span className="text-white/60">{invite.role}</span> · expires {formatDate(invite.expiresAt)}
-                            {invite.brandIds && invite.brandIds.length > 0 && (() => {
-                              const names = invite.brandIds
-                                .map((id) => brandNameById.get(id))
-                                .filter((n): n is string => Boolean(n));
-                              if (names.length === 0) return null;
-                              const shown = names.slice(0, 2).join(", ");
-                              const more = names.length > 2 ? ` +${names.length - 2} more` : "";
-                              return <> · grants <span className="text-white/60">{shown}{more}</span></>;
-                            })()}
+                            {grants && <> · grants <span className="text-white/60">{grants}</span></>}
                           </div>
                         </div>
                         <CopyInviteButton token={invite.token} />
@@ -256,8 +258,8 @@ export default function SettingsPage() {
                           <Trash2 size={12} />
                         </button>
                       </div>
-                      ));
-                    })()}
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -876,6 +878,7 @@ function InviteForm({ brands, onCreated, onError }: { brands: Brand[]; onCreated
                   <button
                     key={b.id}
                     type="button"
+                    aria-pressed={checked}
                     onClick={() =>
                       setSelectedBrandIds((prev) =>
                         checked ? prev.filter((id) => id !== b.id) : [...prev, b.id],
@@ -883,7 +886,7 @@ function InviteForm({ brands, onCreated, onError }: { brands: Brand[]; onCreated
                     }
                     className={`px-2.5 py-1.5 rounded border text-[11px] transition-all ${
                       checked
-                        ? "border-cyan-500/50 bg-cyan-500/15 text-cyan-200"
+                        ? "border-cyan-500/50 bg-cyan-500/15 text-cyan-300"
                         : "border-white/[0.08] bg-white/[0.03] text-white/50 hover:text-white/75"
                     }`}
                   >
