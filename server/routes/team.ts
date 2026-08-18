@@ -63,7 +63,11 @@ function shapeInvite(row: schema.Invite) {
     id: row.id,
     email: row.email,
     role: row.role as Role,
-    brandIds: (row.brandIds as string[] | null) ?? null,
+    // jsonb is untrusted at read time: only ever emit a clean string[] (or
+    // null) so a malformed row can never crash the client's Team tab.
+    brandIds: Array.isArray(row.brandIds)
+      ? (row.brandIds as unknown[]).filter((id): id is string => typeof id === "string")
+      : null,
     token: row.token,
     invitedByUserId: row.invitedByUserId,
     expiresAt: row.expiresAt,

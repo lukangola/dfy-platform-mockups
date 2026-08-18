@@ -71,7 +71,7 @@ function buildResetUrl(token: string) {
 
 export default function SettingsPage() {
   const { user, role, logout } = useAuth();
-  const { brands: brandsFromContext } = useBrand();
+  const { brands: brandsFromContext, loading: brandsLoading } = useBrand();
   const brands = brandsFromContext ?? [];
   // Settings sub-tabs. "clients" is admin-only (flag DFY brands); members and
   // managers only ever see "team".
@@ -217,6 +217,7 @@ export default function SettingsPage() {
                 {team.role === "admin" && (
                   <InviteForm
                     brands={brands}
+                    brandsLoading={brandsLoading}
                     onCreated={() => void refresh()}
                     onError={setActionError}
                   />
@@ -786,7 +787,17 @@ function ClientsTab() {
   );
 }
 
-function InviteForm({ brands, onCreated, onError }: { brands: Brand[]; onCreated: () => void; onError: (msg: string) => void }) {
+function InviteForm({
+  brands,
+  brandsLoading,
+  onCreated,
+  onError,
+}: {
+  brands: Brand[];
+  brandsLoading: boolean;
+  onCreated: () => void;
+  onError: (msg: string) => void;
+}) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<TeamRole>("member");
   const [selectedBrandIds, setSelectedBrandIds] = useState<string[]>([]);
@@ -866,11 +877,20 @@ function InviteForm({ brands, onCreated, onError }: { brands: Brand[]; onCreated
             Send invite
           </button>
         </div>
-        {role !== "admin" && brands.length > 0 && (
+        {role !== "admin" && (
           <div className="mt-3">
             <label className="block text-[10px] font-mono text-white/40 uppercase tracking-widest mb-1.5">
               Workspaces (granted on accept)
             </label>
+            {/* Never hide the section silently: an admin who submits while
+                brands are still loading (or after a failed load) would
+                otherwise assume the feature doesn't exist and send an invite
+                with no pre-assignment. */}
+            {brandsLoading && brands.length === 0 ? (
+              <div className="text-[11px] text-white/30 font-mono">Loading workspaces…</div>
+            ) : brands.length === 0 ? (
+              <div className="text-[11px] text-white/30 font-mono">No workspaces yet — create one first to pre-assign it.</div>
+            ) : (
             <div className="flex flex-wrap gap-1.5">
               {brands.map((b) => {
                 const checked = selectedBrandIds.includes(b.id);
@@ -895,6 +915,7 @@ function InviteForm({ brands, onCreated, onError }: { brands: Brand[]; onCreated
                 );
               })}
             </div>
+            )}
           </div>
         )}
       </form>
