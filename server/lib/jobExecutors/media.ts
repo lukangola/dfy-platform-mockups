@@ -32,11 +32,13 @@ import { db, schema } from "../db.js";
 import { generateImage, generateVideo } from "../fal.js";
 import { formatError } from "../formatError.js";
 import {
+  applyUsableReferences,
   classifyJobError,
   registerJobType,
   seedanceToKlingFallback,
   type JobExecutor,
 } from "../jobRunner.js";
+import { usableReferences } from "../imageDims.js";
 
 type MediaItemInput = { model?: string; falInput?: Record<string, unknown> };
 
@@ -120,6 +122,26 @@ export function makeVideoExecutor(
       if (mapped) {
         primaryModel = mapped.model;
         falInput = mapped.input;
+      }
+    }
+
+    // Drop reference images Kling would reject for being under 300x300. One
+    // bad source asset (e.g. a scraped 124x168 thumbnail) otherwise hard-fails
+    // the whole clip even when the product's generated reference sheet is
+    // sitting right beside it in the same bundle. Fidelity degrades; the user
+    // still gets a video. Measurements are cached per-URL, so a batch pays for
+    // its shared product refs once.
+    const bundleRefs =
+      ((falInput.elements as Array<Record<string, unknown>> | undefined)?.[0]
+        ?.reference_image_urls as string[] | undefined) ?? [];
+    if (bundleRefs.length > 0) {
+      const usable = await usableReferences(bundleRefs);
+      if (usable.size < bundleRefs.length) {
+        const dropped = bundleRefs.filter((u) => !usable.has(u));
+        console.warn(
+          `[jobs] item ${item.id}: dropping ${dropped.length} undersized reference(s) — ${dropped.join(", ")}`,
+        );
+        falInput = applyUsableReferences(falInput, usable);
       }
     }
 

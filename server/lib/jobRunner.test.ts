@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyJobError, seedanceToKlingFallback, stripSeedanceImageMarkers } from "./jobRunner.js";
+import { applyUsableReferences, classifyJobError, seedanceToKlingFallback, stripSeedanceImageMarkers } from "./jobRunner.js";
 
 describe("classifyJobError", () => {
   it("marks 5xx / gateway / timeout / 429 as transient", () => {
@@ -115,5 +115,44 @@ describe("seedanceToKlingFallback prompt sanitisation", () => {
     expect(fb).not.toBeNull();
     expect(String(fb!.input.prompt)).not.toMatch(/@Image/i);
     expect(fb!.input.start_image_url).toBe("https://x/a.jpg");
+  });
+});
+
+describe("applyUsableReferences", () => {
+  const BIG = "https://x/sheet.jpg";      // 1536x2752 generated reference sheet
+  const TINY = "https://x/thumb.png";     // 124x168 scraped thumbnail
+  const base = () => ({
+    prompt: "Animate the starting frame. Preserve @Element1 exactly.",
+    start_image_url: "https://x/frame.jpg",
+    elements: [{ reference_image_urls: [TINY, BIG], frontal_image_url: TINY }],
+  });
+
+  it("drops the undersized ref and re-points frontal at a survivor", () => {
+    // Primal Science: frontal was the 124x168 thumb, which is the field Kling
+    // named in the 422. The generated sheet in the same bundle was fine.
+    const out = applyUsableReferences(base(), new Set([BIG]));
+    const el = (out.elements as Array<Record<string, unknown>>)[0];
+    expect(el.reference_image_urls).toEqual([BIG]);
+    expect(el.frontal_image_url).toBe(BIG);
+    expect(String(out.prompt)).toContain("@Element1"); // bundle survives → marker stays
+  });
+
+  it("keeps frontal untouched when it is itself usable", () => {
+    const out = applyUsableReferences(base(), new Set([TINY, BIG]));
+    expect(out).toEqual(base()); // nothing dropped → identical payload
+  });
+
+  it("removes the bundle AND the @Element1 marker when nothing survives", () => {
+    // A marker with no bundle behind it is the dangling-reference 422 all over
+    // again — worse than the undersized image it replaced.
+    const out = applyUsableReferences(base(), new Set());
+    expect(out.elements).toBeUndefined();
+    expect(String(out.prompt)).not.toMatch(/@Element/i);
+    expect(String(out.prompt)).toContain("the product");
+  });
+
+  it("is a no-op for payloads with no elements bundle", () => {
+    const input = { prompt: "x", start_image_url: "https://x/f.jpg" };
+    expect(applyUsableReferences(input, new Set())).toBe(input);
   });
 });

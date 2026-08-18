@@ -82,6 +82,52 @@ export function stripSeedanceImageMarkers(prompt: string, hasElements = false): 
 }
 
 /**
+ * Rebuild a Kling payload's `elements` bundle keeping only references the
+ * caller deemed usable (see server/lib/imageDims.ts — Kling hard-fails the
+ * whole clip on any reference under 300x300).
+ *
+ * Two things must stay in sync or the call 422s for a DIFFERENT reason:
+ *   - `frontal_image_url` must itself be a surviving reference, not a dropped
+ *     one (it is the field Kling names first when it complains);
+ *   - if NOTHING survives, the bundle is removed AND `@Element1` is stripped
+ *     from the prompt — a marker with no bundle behind it is exactly the
+ *     dangling-reference 422 that cost Puzzle Makeup 12 clips.
+ *
+ * Pure by design: the async measuring lives in the caller, so this logic is
+ * unit-testable without network.
+ */
+export function applyUsableReferences(
+  input: Record<string, unknown>,
+  usable: Set<string>,
+): Record<string, unknown> {
+  const elements = input.elements as Array<Record<string, unknown>> | undefined;
+  if (!Array.isArray(elements) || elements.length === 0) return input;
+  const refs = (elements[0]?.reference_image_urls as string[] | undefined) ?? [];
+  const kept = refs.filter((u) => usable.has(u));
+  if (kept.length === refs.length) return input; // nothing dropped
+
+  const next = { ...input };
+  if (kept.length === 0) {
+    delete next.elements;
+    if (typeof next.prompt === "string") {
+      next.prompt = next.prompt.replace(/@Element\s*\d+/gi, "the product").replace(/[ \t]{2,}/g, " ").trim();
+    }
+    return next;
+  }
+  const frontal = elements[0]?.frontal_image_url as string | undefined;
+  next.elements = [
+    {
+      ...elements[0],
+      reference_image_urls: kept,
+      // Re-point the hero at a survivor when the original was dropped.
+      frontal_image_url: frontal && kept.includes(frontal) ? frontal : kept[0],
+    },
+    ...elements.slice(1),
+  ];
+  return next;
+}
+
+/**
  * Map a Seedance reference-to-video input onto Kling v3 image-to-video for the
  * likeness fallback, preserving BOTH kinds of reference Seedance carries:
  *
