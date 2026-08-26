@@ -20,7 +20,7 @@
 - Create: `server/lib/inviteBrands.ts`
 - Test: `server/lib/inviteBrands.test.ts`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 // server/lib/inviteBrands.test.ts
@@ -72,12 +72,12 @@ describe("filterGrantableBrandIds", () => {
 });
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npx vitest run --root . server/lib/inviteBrands.test.ts`
 Expected: FAIL — `Cannot find module './inviteBrands.js'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```ts
 // server/lib/inviteBrands.ts
@@ -143,12 +143,12 @@ export function filterGrantableBrandIds(
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run --root . server/lib/inviteBrands.test.ts`
 Expected: PASS (7 tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/lib/inviteBrands.ts server/lib/inviteBrands.test.ts
@@ -163,7 +163,7 @@ git commit -m "feat(team): pure validation/filter logic for invite pre-assigned 
 - Modify: `server/db/schema.ts` (invites table, ~line 390)
 - Generated: `drizzle/0030_*.sql` (via drizzle-kit)
 
-- [ ] **Step 1: Add the column to the schema**
+- [x] **Step 1: Add the column to the schema**
 
 In `server/db/schema.ts`, change the `invites` table definition — add `brandIds` after `role`:
 
@@ -192,7 +192,7 @@ export const invites = pgTable("invites", {
 
 (`jsonb` is already imported at the top of schema.ts.)
 
-- [ ] **Step 2: Generate the migration**
+- [x] **Step 2: Generate the migration**
 
 Run: `pnpm db:generate`
 Expected: a new `drizzle/0030_<name>.sql` containing exactly:
@@ -201,7 +201,7 @@ ALTER TABLE "invites" ADD COLUMN "brand_ids" jsonb;
 ```
 Inspect the file — if drizzle-kit generated anything beyond this single ALTER, stop and reconcile (it means schema.ts had drifted; do NOT ship unrelated DDL).
 
-- [ ] **Step 3: Apply to the dev database**
+- [x] **Step 3: Apply to the dev database**
 
 Run: `pnpm db:migrate`
 Expected: "Migrations complete." Then verify:
@@ -216,7 +216,7 @@ Expected: `[ { column_name: 'brand_ids', data_type: 'jsonb' } ]`
 
 Production applies this automatically: `runMigrationsOnBoot()` in `server/index.ts` runs pending migrations at deploy.
 
-- [ ] **Step 4: Typecheck and commit**
+- [x] **Step 4: Typecheck and commit**
 
 Run: `npx tsc --noEmit`
 Expected: clean.
@@ -233,7 +233,7 @@ git commit -m "feat(team): invites.brand_ids jsonb column for pre-assigned works
 **Files:**
 - Modify: `server/routes/team.ts` — `shapeInvite` (~line 60) and `POST /invites` (~line 117)
 
-- [ ] **Step 1: Extend shapeInvite**
+- [x] **Step 1: Extend shapeInvite**
 
 ```ts
 function shapeInvite(row: schema.Invite) {
@@ -251,7 +251,7 @@ function shapeInvite(row: schema.Invite) {
 }
 ```
 
-- [ ] **Step 2: Import the new lib at the top of team.ts**
+- [x] **Step 2: Import the new lib at the top of team.ts**
 
 Alongside the existing brandAccess import:
 
@@ -259,7 +259,7 @@ Alongside the existing brandAccess import:
 import { normalizeInviteBrandIds } from "../lib/inviteBrands.js";
 ```
 
-- [ ] **Step 3: Wire validation into POST /invites**
+- [x] **Step 3: Wire validation into POST /invites**
 
 In the handler, extend the body type and, after the `existingInvite` check and before `generateInviteToken()`, add the validation block. The `.values({...})` insert gains `brandIds`:
 
@@ -294,12 +294,12 @@ In the handler, extend the body type and, after the `existingInvite` check and b
       .returning();
 ```
 
-- [ ] **Step 4: Typecheck**
+- [x] **Step 4: Typecheck**
 
 Run: `npx tsc --noEmit`
 Expected: clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/routes/team.ts
@@ -313,7 +313,7 @@ git commit -m "feat(team): invites accept, validate and store pre-assigned brand
 **Files:**
 - Modify: `server/routes/auth.ts` — invite branch of `POST /register` (~lines 167-207)
 
-- [ ] **Step 1: Add imports at the top of auth.ts**
+- [x] **Step 1: Add imports at the top of auth.ts**
 
 ```ts
 import { grantBrandsToUser } from "../lib/brandAccess.js";
@@ -323,7 +323,7 @@ import type { Role } from "../lib/auth.js";
 
 (Check each against auth.ts's existing imports first — `Role` may already be imported; don't duplicate.)
 
-- [ ] **Step 2: Fix the role narrowing and keep the invite row**
+- [x] **Step 2: Fix the role narrowing and keep the invite row**
 
 The invite branch currently narrows with a type-only cast. Replace:
 
@@ -341,7 +341,7 @@ with:
 
 Also change the surrounding declaration `let role: "admin" | "member";` to `let role: Role;` (the bootstrap branch assigns `"admin"`, which still satisfies `Role`).
 
-- [ ] **Step 3: Apply grants after membership insert**
+- [x] **Step 3: Apply grants after membership insert**
 
 The handler already re-reads the invite only via `body.inviteToken` at the acceptedAt update. Hoist the invite: the invite branch already has the `invite` row in scope — capture it in a variable visible after the insert (declare `let acceptedInvite: typeof invite | null = null;` next to `let teamId` and set `acceptedInvite = invite;` inside the branch). Then, immediately after `await db.insert(schema.teamMembers).values(...)`:
 
@@ -377,12 +377,12 @@ The handler already re-reads the invite only via `body.inviteToken` at the accep
 
 (`eq` and `schema` are already imported in auth.ts; verify `schema.brands` usage compiles.)
 
-- [ ] **Step 4: Typecheck + full test suite**
+- [x] **Step 4: Typecheck + full test suite**
 
 Run: `npx tsc --noEmit && npx vitest run --root .`
 Expected: clean, all tests pass (102 = 95 existing + 7 new).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/routes/auth.ts
@@ -396,7 +396,7 @@ git commit -m "feat(auth): apply invite pre-assigned workspace grants at registr
 **Files:**
 - Modify: `client/src/lib/api.ts` — `InviteRow` (~line 1064), `createTeamInvite` (~line 1087)
 
-- [ ] **Step 1: Extend the type and the call**
+- [x] **Step 1: Extend the type and the call**
 
 ```ts
 export type InviteRow = {
@@ -423,7 +423,7 @@ export function createTeamInvite(args: {
 }
 ```
 
-- [ ] **Step 2: Typecheck + commit**
+- [x] **Step 2: Typecheck + commit**
 
 Run: `npx tsc --noEmit`
 Expected: clean.
@@ -440,7 +440,7 @@ git commit -m "feat(team): client API types for invite brandIds"
 **Files:**
 - Modify: `client/src/pages/workspace/SettingsPage.tsx` — `InviteForm` (~line 767), pending-invites list (~line 215), `TeamSection` invite usage (~line 201)
 
-- [ ] **Step 1: Give InviteForm the team's brands**
+- [x] **Step 1: Give InviteForm the team's brands**
 
 `TeamSection` renders `<InviteForm onCreated={...} onError={...} />`. Fetch brands once where TeamSection loads its data (it already has a load effect for the team snapshot) using the existing `listBrands` API (admins receive every team brand):
 
@@ -457,7 +457,7 @@ useEffect(() => {
 
 Pass down: `<InviteForm brands={brands} onCreated={...} onError={...} />`.
 
-- [ ] **Step 2: Workspace checkboxes in InviteForm**
+- [x] **Step 2: Workspace checkboxes in InviteForm**
 
 Extend the signature and state:
 
@@ -518,7 +518,7 @@ Below the existing email+role row (inside the `<form>`, after the flex row), ren
 
 And keep the selection consistent with the role: in the role `<select>`'s onChange, after `setRole(...)`, add `if (e.target.value === "admin") setSelectedBrandIds([]);`.
 
-- [ ] **Step 3: Show pre-assigned workspaces on pending invites**
+- [x] **Step 3: Show pre-assigned workspaces on pending invites**
 
 `TeamSection` has `brands` from Step 1 — build a lookup and extend the pending-invite row's meta line (line ~221, the "invited as … · expires …" div):
 
@@ -540,12 +540,12 @@ const brandNameById = new Map(brands.map((b) => [b.id, b.name]));
 
 (Deleted brands drop out via the name lookup — per spec they render nothing.)
 
-- [ ] **Step 4: Typecheck**
+- [x] **Step 4: Typecheck**
 
 Run: `npx tsc --noEmit`
 Expected: clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add client/src/pages/workspace/SettingsPage.tsx
@@ -558,12 +558,12 @@ git commit -m "feat(team): workspace picker in invite form + grants shown on pen
 
 **Files:** none (verification only)
 
-- [ ] **Step 1: Full gates**
+- [x] **Step 1: Full gates**
 
 Run: `npx tsc --noEmit && npx vitest run --root .`
 Expected: clean typecheck; all tests pass.
 
-- [ ] **Step 2: API-level end-to-end against the dev server**
+- [x] **Step 2: API-level end-to-end against the dev server**
 
 Start the dev server (`pnpm dev`, or the existing preview config). Then, logged in as the dev admin (reuse a browser session or curl with the session cookie):
 
@@ -581,11 +581,11 @@ console.log('grants:', r.rows); await c.end(); })()"
 Expected: exactly the brand id from step 1.
 5. Clean up the test user + grants + invite row from the dev DB.
 
-- [ ] **Step 3: Visual check**
+- [x] **Step 3: Visual check**
 
 In the browser preview on Settings: workspace chips appear for member/manager, disappear (and clear) when switching to admin; pending invite row shows "grants <name>".
 
-- [ ] **Step 4: Final commit (if any fixups) — then hold for push**
+- [x] **Step 4: Final commit (if any fixups) — then hold for push**
 
 Do NOT push to main yet — deployment goes through the user's normal flow (push deploys production via Railway). Report completion and ask.
 
