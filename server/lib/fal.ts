@@ -206,28 +206,67 @@ export async function transcribeAudio(args: {
 }
 
 /**
+ * Raised when a video generation exceeds its wall-clock cap. `status` 504 so
+ * `classifyJobError` files it as transient (>= 500) and re-runs the item,
+ * and the message carries "timeout" so the text classifier agrees.
+ */
+export class FalTimeoutError extends Error {
+  readonly status = 504;
+  constructor(model: string, timeoutMs: number) {
+    super(`fal.ai (${model}) timeout after ${Math.round(timeoutMs / 1000)}s`);
+    this.name = "FalTimeoutError";
+  }
+}
+
+/**
  * Generate video via fal.ai. Model defaults to veo3 fast; override per-action as needed.
+ *
+ * Bounded by `timeoutMs` (default `env.FAL_VIDEO_TIMEOUT_MS`). fal's own
+ * `timeout` option is documented as not enforced, and on 2026-11-02 a B-roll
+ * item sat 82 minutes on a provider 500 before fal answered at all — the job
+ * looked frozen to the user the whole time. On timeout we stop waiting, ask
+ * fal to cancel the queued request (best effort — it may already be
+ * rendering) and throw a transient error so the job runner retries.
  */
 export async function generateVideo(args: {
   model?: string;
   input: Record<string, unknown>;
+  timeoutMs?: number;
 }): Promise<MediaGenResult> {
   ensureConfigured();
   const model = args.model ?? "fal-ai/veo3/fast";
+  const timeoutMs = args.timeoutMs ?? env.FAL_VIDEO_TIMEOUT_MS;
   const started = Date.now();
+  let requestId: string | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const subscription = fal.subscribe(model, {
+    input: args.input,
+    logs: false,
+    pollInterval: 500,
+    onEnqueue: (id) => {
+      requestId = id;
+    },
+  });
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new FalTimeoutError(model, timeoutMs)), timeoutMs);
+  });
 
   try {
-    const result = await fal.subscribe(model, {
-      input: args.input,
-      logs: false,
-      pollInterval: 500,
-    });
+    const result = await Promise.race([subscription, deadline]);
 
     const data = result.data as { video?: { url: string }; videos?: Array<{ url: string }> };
     const urls = data.video ? [data.video.url] : data.videos?.map((v) => v.url) ?? [];
 
     return { urls, raw: result.data, model, durationMs: Date.now() - started };
   } catch (err) {
+    if (err instanceof FalTimeoutError) {
+      // The losing subscribe keeps polling until fal settles it; swallow its
+      // eventual rejection so it can't surface as an unhandled rejection.
+      subscription.catch(() => {});
+      if (requestId) void fal.queue.cancel(model, { requestId }).catch(() => {});
+      throw err;
+    }
     // Same plain-object-rejection problem as generateImage — wrap the
     // SDK error so downstream callers always see a real Error with a
     // useful message instead of the literal "[object Object]" that
@@ -237,5 +276,7 @@ export async function generateVideo(args: {
     const wrapped = new Error(`fal.ai (${model}) failed: ${formatError(err)}`);
     if (e?.status !== undefined) (wrapped as Error & { status?: number }).status = e.status;
     throw wrapped;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }

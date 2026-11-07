@@ -7,6 +7,8 @@ describe("classifyJobError", () => {
     expect(classifyJobError(undefined, "Gateway Timeout - Downstream service unavailable")).toBe("transient");
     expect(classifyJobError(429, "Too Many Requests")).toBe("transient");
     expect(classifyJobError(undefined, "fetch failed")).toBe("transient");
+    // generateVideo's wall-clock cap (FalTimeoutError): 504 + "timeout" → re-run the item.
+    expect(classifyJobError(504, "fal.ai (fal-ai/kling-video/v3/standard/image-to-video) timeout after 900s")).toBe("transient");
   });
   it("marks Seedance likeness/content-checker 422s as likeness", () => {
     expect(classifyJobError(422, "image_urls: The images or videos provided may contain likenesses of real people or other private information that cannot be processed.")).toBe("likeness");

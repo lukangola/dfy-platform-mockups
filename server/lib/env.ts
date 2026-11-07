@@ -56,6 +56,11 @@ for (const key of required) {
 export const env = {
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "",
   FAL_KEY: process.env.FAL_KEY ?? "",
+  // Wall-clock cap (ms) on one fal video generation, queue wait included.
+  // fal's client-side `timeout` option is documented as not enforced, so
+  // without our own cap a request stuck in fal's queue blocks a job item
+  // indefinitely. Default 15 min; override per deployment if Kling slows down.
+  FAL_VIDEO_TIMEOUT_MS: Number(process.env.FAL_VIDEO_TIMEOUT_MS) || 15 * 60 * 1000,
   // Apify API token — powers real Reddit harvesting for resonance mining.
   // When unset, the resonance miner falls back to the web_search path.
   APIFY_TOKEN: process.env.APIFY_TOKEN ?? "",
