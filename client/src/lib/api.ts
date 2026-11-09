@@ -2534,19 +2534,80 @@ export function getAdPipelineCardJobStatus(cardId: string): Promise<{ job: AdPip
 
 import type { Dataset as PerformanceDataset } from "@shared/performance/engine";
 
+export type PerformanceRegion = "NLBE" | "UK" | "USA" | "OTH";
+export type PerformanceAccountMap = { id: string; region: PerformanceRegion };
+
 export type PerformanceConfig = {
   brandId: string;
   name: string;
   dataSource: "mock" | "live";
-  shopDomain: string | null;
-  regionMapping: Record<string, "NLBE" | "UK" | "USA" | "OTH">;
   grossMargin: number;
   remarketingShare: number;
+  ncDefinition: "first_ever" | "window_days";
+  ncWindowDays: number;
+  revenueField: "total" | "subtotal";
+  regionMapping: Record<string, PerformanceRegion>;
+  syncEveryMinutes: number;
+  shopify: { shopDomain: string | null; tokenSet: boolean };
+  meta: { tokenSet: boolean; accounts: PerformanceAccountMap[] };
+  google: {
+    developerTokenSet: boolean; clientId: string | null; clientSecretSet: boolean; refreshTokenSet: boolean;
+    loginCustomerId: string | null; accounts: PerformanceAccountMap[];
+  };
   platformsConfigured: { META: boolean; GOOG: boolean; TT: boolean };
+  shopifyConfigured: boolean;
 };
 
-export function getPerformanceConfig(brandId: string): Promise<{ config: PerformanceConfig }> {
+export type PerformanceSyncState = {
+  source: "shopify" | "meta" | "google";
+  status: "idle" | "running" | "ok" | "error";
+  lastStartedAt: string | null;
+  lastSyncedAt: string | null;
+  rowsTotal: number;
+  error: string | null;
+};
+
+/** Secret fields: non-empty string = replace, "" / undefined = keep, null = clear. */
+export type PerformanceConfigPatch = Partial<{
+  dataSource: "mock" | "live";
+  grossMargin: number; remarketingShare: number;
+  ncDefinition: "first_ever" | "window_days"; ncWindowDays: number; revenueField: "total" | "subtotal";
+  syncEveryMinutes: number;
+  shopifyShopDomain: string | null; shopifyToken: string | null;
+  metaToken: string | null; metaAccounts: PerformanceAccountMap[];
+  googleDeveloperToken: string | null; googleClientId: string | null; googleClientSecret: string | null;
+  googleRefreshToken: string | null; googleLoginCustomerId: string | null; googleAccounts: PerformanceAccountMap[];
+}>;
+
+export type PerformanceConfigResponse = { config: PerformanceConfig; sync: PerformanceSyncState[]; running: boolean; secretsKeySet: boolean };
+
+export function getPerformanceConfig(brandId: string): Promise<PerformanceConfigResponse> {
   return get(`/api/performance/config?brandId=${encodeURIComponent(brandId)}`);
+}
+
+export async function savePerformanceConfig(brandId: string, patch: PerformanceConfigPatch): Promise<{ config: PerformanceConfig }> {
+  const res = await fetch(`/api/performance/config?brandId=${encodeURIComponent(brandId)}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
+  });
+  const payload = (await res.json().catch(() => ({}))) as { config: PerformanceConfig } | ApiError;
+  if (!res.ok) throw new Error((payload as ApiError).error ?? `Request failed: ${res.status}`);
+  return payload as { config: PerformanceConfig };
+}
+
+export type PerformanceTestResult =
+  | { ok: true; shop?: string; currency?: string | null; accounts?: Array<{ id: string; name: string; timezone: string; currency: string }> }
+  | { ok: false; error: string };
+
+export function testPerformanceSource(brandId: string, source: "shopify" | "meta" | "google"): Promise<{ result: PerformanceTestResult }> {
+  return post(`/api/performance/test?brandId=${encodeURIComponent(brandId)}&source=${source}`, {});
+}
+
+export function startPerformanceSync(brandId: string, full = false): Promise<{ started: boolean; running: boolean }> {
+  return post(`/api/performance/sync?brandId=${encodeURIComponent(brandId)}${full ? "&full=1" : ""}`, {});
+}
+
+export function getPerformanceStatus(brandId: string): Promise<{ sync: PerformanceSyncState[]; running: boolean }> {
+  return get(`/api/performance/status?brandId=${encodeURIComponent(brandId)}`);
 }
 
 export function getPerformanceHours(

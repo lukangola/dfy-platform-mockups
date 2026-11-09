@@ -892,3 +892,120 @@ export type Job = typeof jobs.$inferSelect;
 export type JobItem = typeof jobItems.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;
 export type NewJobItem = typeof jobItems.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Performance dashboard (docs/performance-dashboard.md)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Per-brand ("client") configuration for the Performance dashboard: which data
+ * source feeds it, the economics that turn revenue + spend into CM/NCPA/ROAS,
+ * and the credentials for Shopify / Meta / Google Ads. Secrets are stored
+ * AES-256-GCM encrypted with CONNECTIONS_KEY (see server/lib/performance/secrets.ts)
+ * and never returned to the client — only "set / not set".
+ * One row per brand; a brand without a row runs on defaults (mock).
+ */
+export const performanceClientConfigs = pgTable("performance_client_configs", {
+  brandId: uuid("brand_id").primaryKey(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+  /** mock | live */
+  dataSource: text("data_source").notNull().default("mock"),
+  grossMargin: numeric("gross_margin", { precision: 6, scale: 4 }).notNull().default("0.52"),
+  remarketingShare: numeric("remarketing_share", { precision: 6, scale: 4 }).notNull().default("0.12"),
+  /** first_ever | window_days — how an order counts as new-customer */
+  ncDefinition: text("nc_definition").notNull().default("first_ever"),
+  ncWindowDays: integer("nc_window_days").notNull().default(365),
+  /** total | subtotal — which Shopify price is "revenue" */
+  revenueField: text("revenue_field").notNull().default("total"),
+  /** ISO-2 country → region key; null = default (NL/BE→NLBE, GB→UK, US→USA, else OTH) */
+  regionMapping: jsonb("region_mapping"),
+  syncEveryMinutes: integer("sync_every_minutes").notNull().default(10),
+  shopifyShopDomain: text("shopify_shop_domain"),
+  shopifyTokenEnc: text("shopify_token_enc"),
+  metaTokenEnc: text("meta_token_enc"),
+  /** [{ id: "act_123", region: "NLBE" }] */
+  metaAccounts: jsonb("meta_accounts").notNull().default(sql`'[]'::jsonb`),
+  googleDeveloperTokenEnc: text("google_developer_token_enc"),
+  googleClientId: text("google_client_id"),
+  googleClientSecretEnc: text("google_client_secret_enc"),
+  googleRefreshTokenEnc: text("google_refresh_token_enc"),
+  /** MCC id (digits only) when accounts are reached through a manager account */
+  googleLoginCustomerId: text("google_login_customer_id"),
+  /** [{ id: "1234567890", region: "UK" }] */
+  googleAccounts: jsonb("google_accounts").notNull().default(sql`'[]'::jsonb`),
+});
+export type PerformanceClientConfigRow = typeof performanceClientConfigs.$inferSelect;
+
+/** One row per Shopify order (sales side). Aggregated into hourly buckets by LiveSource. */
+export const performanceOrders = pgTable(
+  "performance_orders",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    shopifyOrderId: text("shopify_order_id").notNull(),
+    /** order time (Shopify created_at) */
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }),
+    /** customer id, else email — the key NC/RC is computed over */
+    customerKey: text("customer_key"),
+    customerCreatedAt: timestamp("customer_created_at", { withTimezone: true }),
+    country: text("country"),
+    region: text("region").notNull(),
+    totalPrice: numeric("total_price", { precision: 12, scale: 2 }).notNull(),
+    subtotalPrice: numeric("subtotal_price", { precision: 12, scale: 2 }),
+    currency: text("currency"),
+    financialStatus: text("financial_status"),
+    cancelled: boolean("cancelled").notNull().default(false),
+    test: boolean("test").notNull().default(false),
+    /** recomputed after every sync from nc_definition */
+    isNewCustomer: boolean("is_new_customer").notNull().default(true),
+  },
+  (t) => [
+    uniqueIndex("performance_orders_brand_order_uq").on(t.brandId, t.shopifyOrderId),
+    index("performance_orders_brand_created_idx").on(t.brandId, t.createdAt),
+    index("performance_orders_brand_customer_idx").on(t.brandId, t.customerKey),
+  ],
+);
+
+/** Hourly ad spend per platform account (spend side). */
+export const performanceSpendHours = pgTable(
+  "performance_spend_hours",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    /** META | GOOG | TT */
+    platform: text("platform").notNull(),
+    accountId: text("account_id").notNull(),
+    /** bucket start, aligned to the hour (UTC instant) */
+    hour: timestamp("hour", { withTimezone: true }).notNull(),
+    region: text("region").notNull(),
+    spend: numeric("spend", { precision: 12, scale: 4 }).notNull(),
+    impressions: integer("impressions"),
+    clicks: integer("clicks"),
+  },
+  (t) => [
+    uniqueIndex("performance_spend_brand_platform_account_hour_uq").on(t.brandId, t.platform, t.accountId, t.hour),
+    index("performance_spend_brand_hour_idx").on(t.brandId, t.hour),
+  ],
+);
+
+/** Freshness + cursor per (brand, source). Drives the status panel and incremental syncs. */
+export const performanceSyncState = pgTable(
+  "performance_sync_state",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    /** shopify | meta | google */
+    source: text("source").notNull(),
+    /** idle | running | ok | error */
+    status: text("status").notNull().default("idle"),
+    lastStartedAt: timestamp("last_started_at", { withTimezone: true }),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    /** source-specific incremental cursor (Shopify: last updated_at ISO) */
+    cursor: text("cursor"),
+    rowsTotal: integer("rows_total").notNull().default(0),
+    error: text("error"),
+  },
+  (t) => [uniqueIndex("performance_sync_state_brand_source_uq").on(t.brandId, t.source)],
+);

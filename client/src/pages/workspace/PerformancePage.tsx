@@ -21,11 +21,12 @@
  * re-checks both so a hand-typed URL can't bypass the hidden nav.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Calendar, Loader2, RefreshCw, ShieldAlert, Lock, AlertTriangle } from "lucide-react";
+import { BarChart3, Calendar, Loader2, RefreshCw, ShieldAlert, Lock, AlertTriangle, Plug, ChevronDown, ChevronUp } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useBrand } from "@/contexts/BrandContext";
 import { PERFORMANCE_ENABLED } from "@/lib/featureFlags";
-import { getPerformanceConfig, getPerformanceHours, type PerformanceConfig } from "@/lib/api";
+import { getPerformanceConfig, getPerformanceHours, getPerformanceStatus, type PerformanceConfig, type PerformanceSyncState } from "@/lib/api";
+import PerformanceSourcesPanel, { relTime } from "@/components/PerformanceSourcesPanel";
 import {
   REGIONS, PLATFORMS, RANGE_LABELS, HOUR, DAY,
   agg, metrics, range, series, platSeries, platformStats,
@@ -238,6 +239,10 @@ export default function PerformancePage() {
   const [compare, setCompare] = useState<CompareMode>("prev");
 
   const [config, setConfig] = useState<PerformanceConfig | null>(null);
+  const [sync, setSync] = useState<PerformanceSyncState[]>([]);
+  const [running, setRunning] = useState(false);
+  const [secretsKeySet, setSecretsKeySet] = useState(true);
+  const [showSources, setShowSources] = useState(false);
   const [data, setData] = useState<Dataset | null>(null);
   const [source, setSource] = useState<"mock" | "live" | null>(null);
   const [loading, setLoading] = useState(false);
@@ -257,6 +262,9 @@ export default function PerformancePage() {
         getPerformanceHours(activeBrandId, from, to),
       ]);
       setConfig(cfg.config);
+      setSync(cfg.sync);
+      setRunning(cfg.running);
+      setSecretsKeySet(cfg.secretsKeySet);
       setData(hours.dataset);
       setSource(hours.source);
     } catch (err) {
@@ -267,6 +275,21 @@ export default function PerformancePage() {
   }, [activeBrandId, canUse]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // While a sync runs, poll its status every 3s; when it finishes, reload the numbers.
+  useEffect(() => {
+    if (!running || !activeBrandId) return;
+    let cancelled = false;
+    const t = setInterval(async () => {
+      try {
+        const st = await getPerformanceStatus(activeBrandId);
+        if (cancelled) return;
+        setSync(st.sync);
+        if (!st.running) { setRunning(false); void load(); }
+      } catch { /* keep polling */ }
+    }, 3000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [running, activeBrandId, load]);
 
   const econ: Economics | null = config ? { grossMargin: config.grossMargin, remarketingShare: config.remarketingShare } : null;
 
@@ -318,13 +341,30 @@ export default function PerformancePage() {
             {regLabel ? `Market: ${regLabel}` : "Blended (all markets)"}
             {view && <> · {num(view.cur.salesRows)} sales rows · {num(view.cur.adRows)} ad rows · as of {nowD.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</>}
           </p>
+          {source === "live" && (
+            <p className="text-[10px] text-white/30 font-mono mt-1">
+              {(["shopify", "meta", "google"] as const).map((k, i) => {
+                const st = sync.find((x) => x.source === k);
+                const name = k === "shopify" ? "Shopify" : k === "meta" ? "Meta" : "Google";
+                const txt = !st || st.status === "idle" ? "not connected" : st.status === "running" ? "syncing…" : st.status === "error" ? "error" : `synced ${relTime(st.lastSyncedAt)}`;
+                const tone = st?.status === "error" ? "text-rose-400" : st?.status === "ok" ? "text-emerald-400/80" : "text-white/30";
+                return <span key={k}>{i > 0 && " · "}{name} <span className={tone}>{txt}</span></span>;
+              })}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider ${
-            source === "live" ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-300" : "border-amber-400/30 bg-amber-400/10 text-amber-300"
-          }`}>
+          <button
+            type="button"
+            onClick={() => setShowSources((v) => !v)}
+            title="Connect data sources"
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider transition-colors ${
+              source === "live" ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-300 hover:bg-emerald-400/20" : "border-amber-400/30 bg-amber-400/10 text-amber-300 hover:bg-amber-400/20"
+            }`}
+          >
+            {running ? <Loader2 size={10} className="animate-spin" /> : <Plug size={10} />}
             {source === "live" ? "Live data" : "Mock data"}
-          </span>
+          </button>
           <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-[#0D0F12] px-2.5 py-1.5 text-[11px] font-mono text-white/70">
             <Calendar size={12} className="text-white/40" /> {dateChip}
           </span>
@@ -340,6 +380,13 @@ export default function PerformancePage() {
           className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-[#0D0F12] px-2.5 py-1.5 text-[11px] font-mono text-white/70 hover:text-white hover:border-white/[0.16] disabled:opacity-50 transition-colors"
         >
           {loading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Refresh
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowSources((v) => !v)}
+          className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-mono transition-colors ${showSources ? "border-cyan-400/30 bg-cyan-400/15 text-cyan-200" : "border-white/[0.08] bg-[#0D0F12] text-white/70 hover:text-white hover:border-white/[0.16]"}`}
+        >
+          <Plug size={12} /> Data sources {showSources ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
         </button>
         <div className="inline-flex items-center gap-1 rounded-lg border border-white/[0.07] bg-[#0D0F12] p-1">
           {RANGE_KEYS.map((k) => (
@@ -362,6 +409,18 @@ export default function PerformancePage() {
           </select>
         </label>
       </div>
+
+      {showSources && config && activeBrandId && (
+        <PerformanceSourcesPanel
+          brandId={activeBrandId}
+          config={config}
+          sync={sync}
+          running={running}
+          secretsKeySet={secretsKeySet}
+          onSaved={(c) => { setConfig(c); void load(); }}
+          onSyncStarted={() => setRunning(true)}
+        />
+      )}
 
       {error && (
         <div className="flex items-center gap-2 rounded-lg border border-rose-400/20 bg-rose-500/10 px-3 py-2 text-xs font-mono text-rose-300">
