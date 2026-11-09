@@ -31,6 +31,7 @@ import ClientConsolePage from "./pages/workspace/ClientConsolePage";
 import AdConsolePage from "./pages/workspace/AdConsolePage";
 import AdPipelineKanbanAppPage from "./pages/workspace/AdPipelineKanbanAppPage";
 import SettingsPage from "./pages/workspace/SettingsPage";
+import PerformancePage from "./pages/workspace/PerformancePage";
 import { AcceptInvitePage, LoginPage, RegisterPage, ResetPasswordPage } from "./pages/AuthPages";
 import ClientSharePage from "./pages/ClientSharePage";
 
@@ -104,6 +105,12 @@ function Router() {
           brand's DFY flag, so a hand-typed URL can't bypass the hidden nav. */}
       <Route path="/workspace/console">
         <RequireAuth><WorkspaceLayout><ClientConsolePage /></WorkspaceLayout></RequireAuth>
+      </Route>
+
+      {/* Performance — ecom KPI dashboard for the active brand (feature-flagged,
+          managers + admins). The page re-checks both the flag and the role. */}
+      <Route path="/workspace/performance">
+        <RequireAuth><WorkspaceLayout><PerformancePage /></WorkspaceLayout></RequireAuth>
       </Route>
 
       {/* Ad Creative Console — competitor/trend research command center for the

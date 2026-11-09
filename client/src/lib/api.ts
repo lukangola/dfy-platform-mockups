@@ -2529,3 +2529,29 @@ export type AdPipelineJob = { cardId: string; status: "pending" | "running" | "c
 export function getAdPipelineCardJobStatus(cardId: string): Promise<{ job: AdPipelineJob | null }> {
   return get<{ job: AdPipelineJob | null }>(`${AD_PIPELINE}/cards/${cardId}/job-status`);
 }
+
+// ── Performance dashboard (feature-flagged; server/routes/performance.ts) ─────
+
+import type { Dataset as PerformanceDataset } from "@shared/performance/engine";
+
+export type PerformanceConfig = {
+  brandId: string;
+  name: string;
+  dataSource: "mock" | "live";
+  shopDomain: string | null;
+  regionMapping: Record<string, "NLBE" | "UK" | "USA" | "OTH">;
+  grossMargin: number;
+  remarketingShare: number;
+  platformsConfigured: { META: boolean; GOOG: boolean; TT: boolean };
+};
+
+export function getPerformanceConfig(brandId: string): Promise<{ config: PerformanceConfig }> {
+  return get(`/api/performance/config?brandId=${encodeURIComponent(brandId)}`);
+}
+
+export function getPerformanceHours(
+  brandId: string, fromMs: number, toMs: number,
+): Promise<{ dataset: PerformanceDataset; source: "mock" | "live" }> {
+  const q = new URLSearchParams({ brandId, from: String(Math.floor(fromMs)), to: String(Math.floor(toMs)) });
+  return get(`/api/performance/hours?${q.toString()}`);
+}

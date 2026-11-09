@@ -10,12 +10,13 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Package, Palette, LayoutGrid, ChevronLeft, ChevronRight,
   Settings, HelpCircle, FolderOpen, Zap, LogOut, Crown, Shield, Headset, Radar,
-  LayoutDashboard,
+  LayoutDashboard, BarChart3,
 } from "lucide-react";
 import BrandSwitcher from "./BrandSwitcher";
 import { useAuth } from "@/contexts/AuthContext";
 import { useBrand } from "@/contexts/BrandContext";
 import { useJobsPulse } from "@/hooks/useJobsPulse";
+import { PERFORMANCE_ENABLED } from "@/lib/featureFlags";
 
 interface WorkspaceLayoutProps {
   children: React.ReactNode;
@@ -61,6 +62,16 @@ const AD_PIPELINE_ITEM = {
   description: "Ad production kanban",
 };
 
+// Performance: ecom KPI dashboard (revenue, CM, ROAS, NCPA by region/platform).
+// Managers/admins, any brand. Feature-flagged — dev only until Phase C.
+const PERFORMANCE_ITEM = {
+  id: "performance",
+  label: "Performance",
+  icon: BarChart3,
+  path: "/workspace/performance",
+  description: "Ecom KPI dashboard",
+};
+
 export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
   const [location] = useLocation();
   const [collapsed, setCollapsed] = useState(false);
@@ -79,6 +90,7 @@ export default function WorkspaceLayout({ children }: WorkspaceLayoutProps) {
   // Client Console sits right after Products.
   const navItems = [
     NAV_ITEMS[0], // Dashboard
+    ...(showAdTools && PERFORMANCE_ENABLED ? [PERFORMANCE_ITEM] : []),
     ...(showAdTools ? [AD_CONSOLE_ITEM, AD_PIPELINE_ITEM] : []),
     NAV_ITEMS[1], // Products
     ...(showClientConsole ? [CLIENT_CONSOLE_ITEM] : []),

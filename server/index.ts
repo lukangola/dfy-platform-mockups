@@ -30,6 +30,7 @@ import { uploadsRouter } from "./routes/uploads.js";
 import { adConsoleRouter } from "./routes/adConsole.js";
 import { adPipelineRouter } from "./routes/adPipeline.js";
 import { jobsRouter } from "./routes/jobs.js";
+import { performanceRouter } from "./routes/performance.js";
 import { sweepOrphanedJobs } from "./lib/jobRunner.js";
 import "./lib/jobExecutors/media.js"; // side-effect: registers broll/character/single-scene/message-testing media job types
 import "./lib/jobExecutors/staticAds.js"; // side-effect: registers static_ads_recreate
@@ -142,6 +143,8 @@ async function startServer() {
   // Ad Pipeline Kanban — Idea → In Production → Ready; managers + admins, gated inside the router.
   app.use("/api/ad-pipeline", adPipelineRouter);
   app.use("/api/jobs", jobsRouter);
+  // Performance dashboard — feature-flagged (routes/performance.ts answers 404 in prod unless FEATURE_PERFORMANCE=1)
+  app.use("/api/performance", performanceRouter);
 
   // Dev: API-only on API_PORT. Vite serves the UI and proxies /api/* here.
   // Prod: same process also serves built assets.
