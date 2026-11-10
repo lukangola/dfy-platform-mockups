@@ -6,9 +6,14 @@
  * button (credential check, no data written) and the panel shows sync
  * freshness per source. Switching "Data source" to Live swaps the dashboard
  * from the mock generator to the synced tables.
+ *
+ * Every connection is read-only: Shopify read_* scopes (the Test button lists
+ * the scopes the token really has and flags write_* ones), Meta ads_read only,
+ * Google Ads read queries only. No economics inputs — margin comes from Shopify
+ * unit costs.
  */
 import { useEffect, useState } from "react";
-import { CheckCircle2, AlertTriangle, Loader2, Plug, RefreshCw, Save, ShieldCheck } from "lucide-react";
+import { CheckCircle2, AlertTriangle, ChevronDown, ChevronRight, Loader2, Plug, RefreshCw, Save, ShieldCheck } from "lucide-react";
 import {
   savePerformanceConfig, startPerformanceSync, testPerformanceSource,
   type PerformanceAccountMap, type PerformanceConfig, type PerformanceConfigPatch, type PerformanceSyncState, type PerformanceTestResult,
@@ -67,8 +72,6 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
 }) {
   const [form, setForm] = useState(() => ({
     dataSource: config.dataSource,
-    grossMargin: String(Math.round(config.grossMargin * 10000) / 100),
-    remarketingShare: String(Math.round(config.remarketingShare * 10000) / 100),
     ncDefinition: config.ncDefinition, ncWindowDays: String(config.ncWindowDays), revenueField: config.revenueField,
     syncEveryMinutes: String(config.syncEveryMinutes),
     shopifyShopDomain: config.shopify.shopDomain ?? "", shopifyToken: "",
@@ -84,13 +87,13 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
   const [tests, setTests] = useState<Record<string, PerformanceTestResult>>({});
+  const [advanced, setAdvanced] = useState(false);
 
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const by = (s: PerformanceSyncState["source"]) => sync.find((x) => x.source === s);
 
   const patch = (): PerformanceConfigPatch => ({
     dataSource: form.dataSource,
-    grossMargin: Number(form.grossMargin) / 100, remarketingShare: Number(form.remarketingShare) / 100,
     ncDefinition: form.ncDefinition, ncWindowDays: Number(form.ncWindowDays), revenueField: form.revenueField,
     syncEveryMinutes: Number(form.syncEveryMinutes),
     shopifyShopDomain: form.shopifyShopDomain, shopifyToken: form.shopifyToken,
@@ -138,6 +141,13 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
       <div className="mt-1.5 text-[10px] font-mono text-emerald-400">
         ✓ connected{r.shop ? ` · ${r.shop}${r.currency ? ` (${r.currency})` : ""}` : ""}
         {r.accounts?.map((a) => <div key={a.id} className="text-white/50">{a.name} · {a.id} · {a.timezone}{a.currency ? ` · ${a.currency}` : ""}</div>)}
+        {r.scopes && r.scopes.length > 0 && <div className="text-white/50 break-words">scopes: {r.scopes.join(", ")}</div>}
+        {r.missingScopes && r.missingScopes.length > 0 && (
+          <div className="text-amber-300">missing {r.missingScopes.join(", ")} — {r.missingScopes.some((x) => x === "read_products" || x === "read_inventory") ? "cost of goods can't be loaded, margin would show 100%" : "orders / customers can't be read"}. Add the scope on the custom app, reinstall, paste the new token.</div>
+        )}
+        {r.writeScopes && r.writeScopes.length > 0 && (
+          <div className="text-amber-300">this token can also write ({r.writeScopes.join(", ")}). The dashboard never writes, but a read-only token is safer — remove the write_* scopes on the custom app.</div>
+        )}
       </div>
     );
   };
@@ -147,7 +157,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <div className="text-[11px] font-mono uppercase tracking-wide text-cyan-300/70 inline-flex items-center gap-2"><Plug size={12} /> Connect data sources</div>
-          <p className="text-[11px] text-white/40 font-mono mt-1">Paste the credentials once. They are encrypted at rest and never shown again. Then switch Data source to Live and press Sync now.</p>
+          <p className="text-[11px] text-white/40 font-mono mt-1">Paste the credentials once. They are encrypted at rest and never shown again. All three connections are read-only — the dashboard only pulls numbers, it can't change anything in the shop or the ad accounts. Then switch Data source to Live and press Save &amp; sync now.</p>
           {!secretsKeySet && <p className="text-[11px] text-amber-300 font-mono mt-1">CONNECTIONS_KEY is missing in .env.local — credentials can't be saved until it is set (see docs/performance-dashboard.md).</p>}
         </div>
         <div className="flex items-center gap-2">
@@ -168,8 +178,8 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
         <section className="rounded-lg border border-white/[0.07] p-4 space-y-3">
           <div className="flex items-center justify-between"><div className="text-[11px] font-semibold text-white/85">Shopify · sales</div><StatusPill st={by("shopify")} /></div>
           <div><label htmlFor="shopDomain" className={label}>Shop domain</label><input id="shopDomain" className={input} value={form.shopifyShopDomain} onChange={set("shopifyShopDomain")} placeholder="brand.myshopify.com" /></div>
-          <SecretField id="shopToken" name="Admin API access token" set={config.shopify.tokenSet} value={form.shopifyToken} onChange={(v) => setForm((f) => ({ ...f, shopifyToken: v }))} placeholder="shpat_…" />
-          <p className="text-[10px] text-white/30 font-mono">Shopify admin → Settings → Apps → Develop apps → custom app with <span className="text-white/50">read_orders</span> + <span className="text-white/50">read_customers</span>. Backfills from 1 Jan last year, then polls.</p>
+          <SecretField id="shopToken" name="Admin API access token (read-only)" set={config.shopify.tokenSet} value={form.shopifyToken} onChange={(v) => setForm((f) => ({ ...f, shopifyToken: v }))} placeholder="shpat_…" />
+          <p className="text-[10px] text-white/30 font-mono">Shopify admin → Settings → Apps and sales channels → Develop apps → create app → Admin API scopes, tick only <span className="text-white/50">read_orders, read_customers, read_products, read_inventory</span> (no write_*) → install → copy the token. Orders give revenue + new/returning customers; products + inventory give the unit costs for margin. Backfills from 1 Jan last year once, then polls only orders that changed.</p>
           <button type="button" className={btnGhost} onClick={() => void test("shopify")} disabled={testing !== null}>{testing === "shopify" ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} Test connection</button>
           <TestLine source="shopify" />
         </section>
@@ -177,9 +187,9 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
         {/* Meta */}
         <section className="rounded-lg border border-white/[0.07] p-4 space-y-3">
           <div className="flex items-center justify-between"><div className="text-[11px] font-semibold text-white/85">Meta · ad spend</div><StatusPill st={by("meta")} /></div>
-          <SecretField id="metaToken" name="Access token (ads_read)" set={config.meta.tokenSet} value={form.metaToken} onChange={(v) => setForm((f) => ({ ...f, metaToken: v }))} placeholder="EAAB…" />
+          <SecretField id="metaToken" name="System-user token (ads_read only)" set={config.meta.tokenSet} value={form.metaToken} onChange={(v) => setForm((f) => ({ ...f, metaToken: v }))} placeholder="EAAB…" />
           <div><label htmlFor="metaAccounts" className={label}>Ad accounts → region</label><input id="metaAccounts" className={input} value={form.metaAccounts} onChange={set("metaAccounts")} placeholder="act_123:NLBE, act_456:UK" /></div>
-          <p className="text-[10px] text-white/30 font-mono">Business settings → System user → token with ads_read. Regions: NLBE, UK, USA, OTH. Hourly spend per account.</p>
+          <p className="text-[10px] text-white/30 font-mono">Meta Business settings → Users → System users → Generate token: tick only <span className="text-white/50">ads_read</span>, assign the ad accounts, no expiry. Read-only — spend per hour per account, nothing else. Regions: NLBE, UK, USA, OTH. Incremental runs re-pull only the last 3 days.</p>
           <button type="button" className={btnGhost} onClick={() => void test("meta")} disabled={testing !== null}>{testing === "meta" ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} Test connection</button>
           <TestLine source="meta" />
         </section>
@@ -193,36 +203,40 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
           <SecretField id="gRefresh" name="Refresh token" set={config.google.refreshTokenSet} value={form.googleRefreshToken} onChange={(v) => setForm((f) => ({ ...f, googleRefreshToken: v }))} />
           <div><label htmlFor="gMcc" className={label}>Login customer id (MCC, optional)</label><input id="gMcc" className={input} value={form.googleLoginCustomerId} onChange={set("googleLoginCustomerId")} placeholder="1234567890" /></div>
           <div><label htmlFor="gAccounts" className={label}>Customer ids → region</label><input id="gAccounts" className={input} value={form.googleAccounts} onChange={set("googleAccounts")} placeholder="1234567890:NLBE, 2345678901:UK" /></div>
+          <p className="text-[10px] text-white/30 font-mono">Google Ads has one API scope for everything; the dashboard only runs read reports (cost per hour). Incremental runs re-pull only the last 3 days.</p>
           <button type="button" className={btnGhost} onClick={() => void test("google")} disabled={testing !== null}>{testing === "google" ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} Test connection</button>
           <TestLine source="google" />
         </section>
       </div>
 
-      {/* Economics + definitions */}
+      {/* Definitions — defaults are right for almost every shop; margin is not an input (it comes from Shopify unit costs) */}
       <section className="rounded-lg border border-white/[0.07] p-4">
-        <div className="text-[11px] font-semibold text-white/85 mb-3">Economics &amp; definitions</div>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-          <div><label htmlFor="gm" className={label}>Gross margin %</label><input id="gm" className={input} value={form.grossMargin} onChange={set("grossMargin")} /></div>
-          <div><label htmlFor="rs" className={label}>Remarketing share of spend %</label><input id="rs" className={input} value={form.remarketingShare} onChange={set("remarketingShare")} /></div>
-          <div><label htmlFor="ncd" className={label}>New customer =</label>
-            <select id="ncd" className={input} value={form.ncDefinition} onChange={set("ncDefinition")}>
-              <option value="first_ever">first-ever order</option>
-              <option value="window_days">first order in N days</option>
-            </select></div>
-          <div><label htmlFor="ncw" className={label}>N days</label><input id="ncw" className={input} value={form.ncWindowDays} onChange={set("ncWindowDays")} disabled={form.ncDefinition !== "window_days"} /></div>
-          <div><label htmlFor="rf" className={label}>Revenue =</label>
-            <select id="rf" className={input} value={form.revenueField} onChange={set("revenueField")}>
-              <option value="total">order total (incl. tax, shipping)</option>
-              <option value="subtotal">subtotal (products after discounts)</option>
-            </select></div>
-          <div><label htmlFor="sem" className={label}>Sync every (min)</label><input id="sem" className={input} value={form.syncEveryMinutes} onChange={set("syncEveryMinutes")} /></div>
-        </div>
+        <button type="button" className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-white/70 hover:text-white" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced}>
+          {advanced ? <ChevronDown size={12} /> : <ChevronRight size={12} />} Advanced settings
+          <span className="text-[10px] font-mono font-normal text-white/30 ml-2">new customer = {form.ncDefinition === "window_days" ? `first order in ${form.ncWindowDays} days` : "first-ever order"} · revenue = {form.revenueField === "subtotal" ? "subtotal" : "order total"} · sync every {form.syncEveryMinutes || "10"} min</span>
+        </button>
+        {advanced && (
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 mt-3">
+            <div><label htmlFor="ncd" className={label}>New customer =</label>
+              <select id="ncd" className={input} value={form.ncDefinition} onChange={set("ncDefinition")}>
+                <option value="first_ever">first-ever order (Shopify)</option>
+                <option value="window_days">first order in N days</option>
+              </select></div>
+            <div><label htmlFor="ncw" className={label}>N days</label><input id="ncw" className={input} value={form.ncWindowDays} onChange={set("ncWindowDays")} disabled={form.ncDefinition !== "window_days"} /></div>
+            <div><label htmlFor="rf" className={label}>Revenue =</label>
+              <select id="rf" className={input} value={form.revenueField} onChange={set("revenueField")}>
+                <option value="total">order total (incl. tax, shipping)</option>
+                <option value="subtotal">subtotal (products after discounts)</option>
+              </select></div>
+            <div><label htmlFor="sem" className={label}>Sync every (min)</label><input id="sem" className={input} value={form.syncEveryMinutes} onChange={set("syncEveryMinutes")} /></div>
+          </div>
+        )}
       </section>
 
       <div className="flex items-center gap-2 flex-wrap">
         <button type="button" className={btnPrimary} onClick={() => void syncNow(false)} disabled={running || saving}>{running ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} {running ? "Syncing…" : "Save & sync now"}</button>
         <button type="button" className={btnGhost} onClick={() => { if (confirm("Delete all synced rows for this brand and backfill again from 1 Jan last year?")) void syncNow(true); }} disabled={running || saving}>Full re-sync</button>
-        <span className="text-[10px] font-mono text-white/30">Sync runs in the background and repeats every {form.syncEveryMinutes || "10"} min while the source is Live.</span>
+        <span className="text-[10px] font-mono text-white/30">Sync runs in the background every {form.syncEveryMinutes || "10"} min while the source is Live — only changed orders and the last 3 days of spend, never the whole history. Refresh on the dashboard just re-reads the database.</span>
       </div>
     </div>
   );

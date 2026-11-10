@@ -5,7 +5,8 @@
  * Secrets (Shopify token, Meta token, Google secrets) are AES-GCM encrypted at
  * rest and only ever leave the server as "set / not set". The UI panel on the
  * Performance page writes this row; nothing lives in .env except defaults and
- * the encryption key.
+ * the encryption key. No economics inputs live here: margin is derived from
+ * Shopify unit costs (see shopify.ts).
  */
 import { eq, sql } from "drizzle-orm";
 import { db, schema } from "../db.js";
@@ -21,8 +22,6 @@ export interface PerformanceClientConfig {
   brandId: string;
   name: string;
   dataSource: DataSourceKind;
-  grossMargin: number;
-  remarketingShare: number;
   ncDefinition: NcDefinition;
   ncWindowDays: number;
   revenueField: RevenueField;
@@ -40,11 +39,6 @@ export interface PerformanceClientConfig {
 export const DEFAULT_REGION_MAPPING: Record<string, RegionKey> = { NL: "NLBE", BE: "NLBE", GB: "UK", US: "USA" };
 const REGION_KEYS: RegionKey[] = ["NLBE", "UK", "USA", "OTH"];
 
-function numberEnv(name: string, fallback: number): number {
-  const n = Number(process.env[name]);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
 /** Stable small integer from a brand id — different brands, different mock series. */
 function seedFromId(id: string): number {
   if (id === "00000000-0000-0000-0000-000000000001") return 42; // bootstrap brand = reference mock
@@ -57,8 +51,6 @@ function defaults(brandId: string, name: string): PerformanceClientConfig {
   return {
     brandId, name,
     dataSource: process.env.PERFORMANCE_DATA_SOURCE === "live" ? "live" : "mock",
-    grossMargin: numberEnv("PERFORMANCE_GROSS_MARGIN", 0.52),
-    remarketingShare: numberEnv("PERFORMANCE_REMARKETING_SHARE", 0.12),
     ncDefinition: "first_ever", ncWindowDays: 365, revenueField: "total",
     regionMapping: { ...DEFAULT_REGION_MAPPING },
     syncEveryMinutes: 10,
@@ -92,7 +84,6 @@ export async function getClientConfig(brandId: string, brandName: string): Promi
   return {
     ...base,
     dataSource: row.dataSource === "live" ? "live" : "mock",
-    grossMargin: Number(row.grossMargin), remarketingShare: Number(row.remarketingShare),
     ncDefinition: row.ncDefinition === "window_days" ? "window_days" : "first_ever",
     ncWindowDays: row.ncWindowDays, revenueField: row.revenueField === "subtotal" ? "subtotal" : "total",
     regionMapping: parseMapping(row.regionMapping) ?? base.regionMapping,
@@ -119,7 +110,6 @@ export async function liveBrandIds(): Promise<string[]> {
  */
 export interface ConfigPatch {
   dataSource?: DataSourceKind;
-  grossMargin?: number; remarketingShare?: number;
   ncDefinition?: NcDefinition; ncWindowDays?: number; revenueField?: RevenueField;
   regionMapping?: Record<string, string> | null;
   syncEveryMinutes?: number;
@@ -142,8 +132,6 @@ function clamp(n: unknown, lo: number, hi: number, fallback: number): number {
 export async function saveClientConfig(brandId: string, patch: ConfigPatch): Promise<void> {
   const set: Partial<typeof schema.performanceClientConfigs.$inferInsert> = { updatedAt: new Date() };
   if (patch.dataSource) set.dataSource = patch.dataSource === "live" ? "live" : "mock";
-  if (patch.grossMargin != null) set.grossMargin = clamp(patch.grossMargin, 0, 1, 0.52).toFixed(4);
-  if (patch.remarketingShare != null) set.remarketingShare = clamp(patch.remarketingShare, 0, 1, 0.12).toFixed(4);
   if (patch.ncDefinition) set.ncDefinition = patch.ncDefinition === "window_days" ? "window_days" : "first_ever";
   if (patch.ncWindowDays != null) set.ncWindowDays = Math.round(clamp(patch.ncWindowDays, 1, 3650, 365));
   if (patch.revenueField) set.revenueField = patch.revenueField === "subtotal" ? "subtotal" : "total";
@@ -170,7 +158,6 @@ export async function saveClientConfig(brandId: string, patch: ConfigPatch): Pro
 export function publicConfig(c: PerformanceClientConfig) {
   return {
     brandId: c.brandId, name: c.name, dataSource: c.dataSource,
-    grossMargin: c.grossMargin, remarketingShare: c.remarketingShare,
     ncDefinition: c.ncDefinition, ncWindowDays: c.ncWindowDays, revenueField: c.revenueField,
     regionMapping: c.regionMapping, syncEveryMinutes: c.syncEveryMinutes,
     shopify: { shopDomain: c.shopify.shopDomain, tokenSet: Boolean(c.shopify.token) },

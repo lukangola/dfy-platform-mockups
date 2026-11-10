@@ -2541,8 +2541,6 @@ export type PerformanceConfig = {
   brandId: string;
   name: string;
   dataSource: "mock" | "live";
-  grossMargin: number;
-  remarketingShare: number;
   ncDefinition: "first_ever" | "window_days";
   ncWindowDays: number;
   revenueField: "total" | "subtotal";
@@ -2570,7 +2568,6 @@ export type PerformanceSyncState = {
 /** Secret fields: non-empty string = replace, "" / undefined = keep, null = clear. */
 export type PerformanceConfigPatch = Partial<{
   dataSource: "mock" | "live";
-  grossMargin: number; remarketingShare: number;
   ncDefinition: "first_ever" | "window_days"; ncWindowDays: number; revenueField: "total" | "subtotal";
   syncEveryMinutes: number;
   shopifyShopDomain: string | null; shopifyToken: string | null;
@@ -2595,7 +2592,12 @@ export async function savePerformanceConfig(brandId: string, patch: PerformanceC
 }
 
 export type PerformanceTestResult =
-  | { ok: true; shop?: string; currency?: string | null; accounts?: Array<{ id: string; name: string; timezone: string; currency: string }> }
+  | {
+      ok: true; shop?: string; currency?: string | null;
+      /** Shopify: granted scopes, the read scopes the dashboard still needs, and any write scopes the token carries */
+      scopes?: string[]; missingScopes?: string[]; writeScopes?: string[];
+      accounts?: Array<{ id: string; name: string; timezone: string; currency: string }>;
+    }
   | { ok: false; error: string };
 
 export function testPerformanceSource(brandId: string, source: "shopify" | "meta" | "google"): Promise<{ result: PerformanceTestResult }> {

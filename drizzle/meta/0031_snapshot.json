@@ -1,5 +1,5 @@
 {
-  "id": "60c49d5d-113d-4647-923f-eaa69b74b734",
+  "id": "699bce01-bbac-4602-8ce6-190f3199d388",
   "prevId": "d215bbfa-78ed-4363-9348-39b306d5fb05",
   "version": "7",
   "dialect": "postgresql",
@@ -2297,20 +2297,6 @@
           "notNull": true,
           "default": "'mock'"
         },
-        "gross_margin": {
-          "name": "gross_margin",
-          "type": "numeric(6, 4)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'0.52'"
-        },
-        "remarketing_share": {
-          "name": "remarketing_share",
-          "type": "numeric(6, 4)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'0.12'"
-        },
         "nc_definition": {
           "name": "nc_definition",
           "type": "text",
@@ -2519,6 +2505,19 @@
           "primaryKey": false,
           "notNull": true,
           "default": true
+        },
+        "cogs": {
+          "name": "cogs",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cogs_complete": {
+          "name": "cogs_complete",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         }
       },
       "indexes": {
@@ -2790,6 +2789,85 @@
             },
             {
               "expression": "source",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.performance_variant_costs": {
+      "name": "performance_variant_costs",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "brand_id": {
+          "name": "brand_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "variant_id": {
+          "name": "variant_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "inventory_item_id": {
+          "name": "inventory_item_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "unit_cost": {
+          "name": "unit_cost",
+          "type": "numeric(12, 4)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "currency": {
+          "name": "currency",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fetched_at": {
+          "name": "fetched_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "performance_variant_costs_brand_variant_uq": {
+          "name": "performance_variant_costs_brand_variant_uq",
+          "columns": [
+            {
+              "expression": "brand_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "variant_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

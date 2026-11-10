@@ -911,8 +911,6 @@ export const performanceClientConfigs = pgTable("performance_client_configs", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
   /** mock | live */
   dataSource: text("data_source").notNull().default("mock"),
-  grossMargin: numeric("gross_margin", { precision: 6, scale: 4 }).notNull().default("0.52"),
-  remarketingShare: numeric("remarketing_share", { precision: 6, scale: 4 }).notNull().default("0.12"),
   /** first_ever | window_days — how an order counts as new-customer */
   ncDefinition: text("nc_definition").notNull().default("first_ever"),
   ncWindowDays: integer("nc_window_days").notNull().default(365),
@@ -960,12 +958,32 @@ export const performanceOrders = pgTable(
     test: boolean("test").notNull().default(false),
     /** recomputed after every sync from nc_definition */
     isNewCustomer: boolean("is_new_customer").notNull().default(true),
+    /** Σ quantity × Shopify unit cost over line items with a known cost (null = none known) */
+    cogs: numeric("cogs", { precision: 12, scale: 2 }),
+    /** every line item had a unit cost → the order's margin is trustworthy */
+    cogsComplete: boolean("cogs_complete").notNull().default(false),
   },
   (t) => [
     uniqueIndex("performance_orders_brand_order_uq").on(t.brandId, t.shopifyOrderId),
     index("performance_orders_brand_created_idx").on(t.brandId, t.createdAt),
     index("performance_orders_brand_customer_idx").on(t.brandId, t.customerKey),
   ],
+);
+
+/** Shopify unit cost per product variant (InventoryItem.unitCost), cached so costs are fetched once, not per order. */
+export const performanceVariantCosts = pgTable(
+  "performance_variant_costs",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    variantId: text("variant_id").notNull(),
+    inventoryItemId: text("inventory_item_id"),
+    /** null = the variant exists but has no cost in Shopify (or was deleted) */
+    unitCost: numeric("unit_cost", { precision: 12, scale: 4 }),
+    currency: text("currency"),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().default(sql`now()`),
+  },
+  (t) => [uniqueIndex("performance_variant_costs_brand_variant_uq").on(t.brandId, t.variantId)],
 );
 
 /** Hourly ad spend per platform account (spend side). */

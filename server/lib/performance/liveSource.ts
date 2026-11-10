@@ -1,6 +1,6 @@
 /**
  * LiveSource — hourly buckets from the synced tables.
- *   sales: performance_orders  (Shopify)   → c[REGION] = [ncOrders, ncRev, rcOrders, rcRev]
+ *   sales: performance_orders  (Shopify)   → c[REGION] = [ncOrders, ncRev, rcOrders, rcRev, cogs]
  *   spend: performance_spend_hours (Meta/Google/TikTok) → s[PLATFORM] = [spend per region]
  * Same shape as the mock, so agg/metrics/series and the UI are untouched.
  */
@@ -16,7 +16,7 @@ const PLATFORM_SET = new Set<string>(PLATFORMS.map((p) => p.key));
 function emptyBucket(t: number): HourBucket {
   return {
     t,
-    c: { NLBE: [0, 0, 0, 0], UK: [0, 0, 0, 0], USA: [0, 0, 0, 0], OTH: [0, 0, 0, 0] },
+    c: { NLBE: [0, 0, 0, 0, 0], UK: [0, 0, 0, 0, 0], USA: [0, 0, 0, 0, 0], OTH: [0, 0, 0, 0, 0] },
     s: { META: [0, 0, 0, 0], GOOG: [0, 0, 0, 0], TT: [0, 0, 0, 0] },
   };
 }
@@ -35,8 +35,9 @@ export class LiveSource implements DataSource {
     const from = new Date(startMs), to = new Date(endHourMs + HOUR);
     const revenueCol = this.config.revenueField === "subtotal" ? sql`COALESCE(subtotal_price, total_price)` : sql`total_price`;
 
-    const sales = await db.execute<{ h: string; region: string; nc: boolean; n: string; rev: string }>(sql`
-      SELECT date_trunc('hour', created_at) AS h, region, is_new_customer AS nc, COUNT(*)::text AS n, SUM(${revenueCol})::text AS rev
+    const sales = await db.execute<{ h: string; region: string; nc: boolean; n: string; rev: string; cogs: string }>(sql`
+      SELECT date_trunc('hour', created_at) AS h, region, is_new_customer AS nc, COUNT(*)::text AS n, SUM(${revenueCol})::text AS rev,
+             SUM(COALESCE(cogs, 0))::text AS cogs
       FROM performance_orders
       WHERE brand_id = ${this.config.brandId} AND created_at >= ${from.toISOString()}::timestamptz AND created_at < ${to.toISOString()}::timestamptz
         AND cancelled = FALSE AND test = FALSE
@@ -48,7 +49,18 @@ export class LiveSource implements DataSource {
       const cell = hours[i].c[r.region as RegionKey];
       const orders = Number(r.n), rev = Math.round(Number(r.rev) * 100) / 100;
       if (r.nc) { cell[0] += orders; cell[1] += rev; } else { cell[2] += orders; cell[3] += rev; }
+      cell[4] += Math.round(Number(r.cogs) * 100) / 100;
     }
+
+    // Share of revenue whose orders carry a complete cost of goods (every line item had a Shopify unit cost).
+    const cov = await db.execute<{ total: string | null; covered: string | null }>(sql`
+      SELECT SUM(${revenueCol})::text AS total, SUM(${revenueCol}) FILTER (WHERE cogs_complete)::text AS covered
+      FROM performance_orders
+      WHERE brand_id = ${this.config.brandId} AND created_at >= ${from.toISOString()}::timestamptz AND created_at < ${to.toISOString()}::timestamptz
+        AND cancelled = FALSE AND test = FALSE
+    `);
+    const total = Number(cov.rows[0]?.total ?? 0);
+    const costCoverage = total > 0 ? Number(cov.rows[0]?.covered ?? 0) / total : null;
 
     const spend = await db.execute<{ hour: string; platform: string; region: string; spend: string }>(sql`
       SELECT hour, platform, region, SUM(spend)::text AS spend
@@ -63,6 +75,6 @@ export class LiveSource implements DataSource {
       hours[i].s[r.platform as PlatformKey][ri] += Math.round(Number(r.spend) * 100) / 100;
     }
 
-    return { hours, startMs, now, nowHourMs: Math.floor(now / HOUR) * HOUR };
+    return { hours, startMs, now, nowHourMs: Math.floor(now / HOUR) * HOUR, costCoverage };
   }
 }

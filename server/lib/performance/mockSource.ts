@@ -23,6 +23,8 @@ const REV_SHARE = [0.48, 0.197, 0.075, 0.248];
 const NC_OF_REV = [0.637, 0.687, 0.884, 0.837];
 const NC_AOV = [69, 73, 70, 72];
 const RC_AOV = [61, 57, 70, 15];
+/** cost of goods as a share of revenue → ~52% gross margin, like the reference mock */
+const COGS_RATE = [0.48, 0.47, 0.5, 0.49];
 const SPEND_SHARE = [0.402, 0.19, 0.104, 0.297];
 const PLAT_SPLIT = [
   [0.914, 0.041, 0.045],
@@ -56,7 +58,7 @@ export function buildMockData(seed: number, nowMs: number): Dataset {
     const frac = i === nHours - 1 ? lastHourFrac : 1;
     const scale = growth * dayW * hw * frac;
 
-    const c = {} as Record<RegionKey, [number, number, number, number]>;
+    const c = {} as Record<RegionKey, [number, number, number, number, number]>;
     for (let r = 0; r < 4; r++) {
       const regRev = BASE_DAY_REV * REV_SHARE[r] * scale;
       const ncRevT = regRev * NC_OF_REV[r];
@@ -65,7 +67,8 @@ export function buildMockData(seed: number, nowMs: number): Dataset {
       const rcO = Math.max(0, Math.round((rcRevT / RC_AOV[r]) * (0.75 + 0.5 * rng())));
       const ncR = ncO * NC_AOV[r] * (0.92 + 0.16 * rng());
       const rcR = rcO * RC_AOV[r] * (0.92 + 0.16 * rng());
-      c[REGIONS[r].key] = [ncO, Math.round(ncR * 100) / 100, rcO, Math.round(rcR * 100) / 100];
+      const cogs = (ncR + rcR) * COGS_RATE[r] * (0.97 + 0.06 * rng());
+      c[REGIONS[r].key] = [ncO, Math.round(ncR * 100) / 100, rcO, Math.round(rcR * 100) / 100, Math.round(cogs * 100) / 100];
     }
 
     const s = {} as Record<PlatformKey, [number, number, number, number]>;

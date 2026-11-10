@@ -8,13 +8,14 @@
  * THE CONTRACT: every data source — mock today, Shopify + Meta/Google/TikTok
  * later — produces hourly buckets of exactly this shape:
  *
- *   { t, c: { REGION: [ncOrders, ncRev, rcOrders, rcRev] }, s: { PLATFORM: [spendPerRegion x4] } }
+ *   { t, c: { REGION: [ncOrders, ncRev, rcOrders, rcRev, cogs] }, s: { PLATFORM: [spendPerRegion x4] } }
  *
  * Everything downstream (agg → metrics → range/series → UI) keeps working once
  * real data fills it. Do not fork agg/metrics per source.
  *
- * Economics (gross margin %, remarketing share of spend) are PARAMETERS, not
- * constants — they come from the per-client config (see server/lib/performance/config.ts).
+ * There are no manual economics inputs: cost of goods (cogs) comes from the data
+ * source (Shopify unit costs for live, a calibrated share for mock), so gross
+ * margin is derived, never typed in. All ad spend counts as acquisition spend.
  */
 
 export type RegionKey = "NLBE" | "UK" | "USA" | "OTH";
@@ -36,8 +37,8 @@ export const PLATFORMS: readonly PlatformDef[] = [
   { key: "TT", label: "TikTok", sym: "♪" },
 ];
 
-/** [ncOrders, ncRevenue, rcOrders, rcRevenue] */
-export type RegionCell = [number, number, number, number];
+/** [ncOrders, ncRevenue, rcOrders, rcRevenue, cogs] — cogs = cost of goods sold for all orders in the bucket */
+export type RegionCell = [number, number, number, number, number];
 /** spend per region, indexed like REGIONS */
 export type PlatformSpend = [number, number, number, number];
 
@@ -56,14 +57,11 @@ export interface Dataset {
   now: number;
   /** start of the hour that contains `now` (the last, partial bucket) */
   nowHourMs: number;
-}
-
-/** Per-client economics that drive the derived metrics. */
-export interface Economics {
-  /** contribution margin rate before ad spend, e.g. 0.52 */
-  grossMargin: number;
-  /** share of total spend counted as remarketing (RC side), e.g. 0.12 */
-  remarketingShare: number;
+  /**
+   * Live only: share of revenue in the window whose orders had a unit cost for every
+   * line item in Shopify (1 = complete). Below ~0.95 the margin numbers understate COGS.
+   */
+  costCoverage?: number | null;
 }
 
 export const HOUR = 3_600_000;
@@ -72,13 +70,13 @@ export const DAY = 86_400_000;
 /* ---------- aggregation ---------- */
 
 export interface Sums {
-  ncO: number; rcO: number; ncR: number; rcR: number; spend: number;
+  ncO: number; rcO: number; ncR: number; rcR: number; cogs: number; spend: number;
   plat: Record<PlatformKey, number>;
   salesRows: number; adRows: number;
 }
 
 function zeroSums(): Sums {
-  return { ncO: 0, rcO: 0, ncR: 0, rcR: 0, spend: 0, plat: { META: 0, GOOG: 0, TT: 0 }, salesRows: 0, adRows: 0 };
+  return { ncO: 0, rcO: 0, ncR: 0, rcR: 0, cogs: 0, spend: 0, plat: { META: 0, GOOG: 0, TT: 0 }, salesRows: 0, adRows: 0 };
 }
 
 function idxOf(D: Dataset, t: number): number {
@@ -97,7 +95,7 @@ export function agg(D: Dataset, t0: number, t1: number, region: RegionKey | null
       const k = REGIONS[r].key;
       if (region && k !== region) continue;
       const o = h.c[k];
-      out.ncO += o[0]; out.ncR += o[1]; out.rcO += o[2]; out.rcR += o[3];
+      out.ncO += o[0]; out.ncR += o[1]; out.rcO += o[2]; out.rcR += o[3]; out.cogs += o[4] ?? 0;
       if (o[0] + o[2] > 0) out.salesRows += o[0] + o[2];
       for (const p of PLATFORMS) {
         const sp = h.s[p.key][r];
@@ -125,7 +123,9 @@ export interface Metrics {
   rcOrders: number;
   ncAov: number | null;
   rcAov: number | null;
-  rcpa: number | null;
+  /** (revenue − cogs) ÷ revenue, from the data source */
+  grossMargin: number | null;
+  cogs: number;
   plat: Record<PlatformKey, number>;
   salesRows: number;
   adRows: number;
@@ -135,19 +135,20 @@ export interface Metrics {
 export type MetricKey = Exclude<keyof Metrics, "plat">;
 
 /**
- * Definitions (mock-era, to be confirmed per client):
- *   CM     = margin × revenue − spend
- *   NC CM  = margin × NC revenue − prospecting spend  (prospecting = 1 − remarketingShare)
- *   RC CM  = margin × RC revenue − remarketing spend
- *   NCPA   = total spend ÷ NC orders;  RCPA = remarketing spend ÷ RC orders
- *   NC ROAS = NC revenue ÷ total spend
+ * Definitions:
+ *   gross profit = revenue − cogs;  margin M = gross profit ÷ revenue
+ *   CM     = gross profit − ad spend
+ *   NC CM  = M × NC revenue − ad spend   (all spend is acquisition spend)
+ *   RC CM  = M × RC revenue              (so NC CM + RC CM = CM)
+ *   NCPA   = ad spend ÷ NC orders;  NC ROAS = NC revenue ÷ ad spend
  */
-export function metrics(s: Sums, econ: Economics): Metrics {
-  const { grossMargin: M, remarketingShare: R } = econ;
+export function metrics(s: Sums): Metrics {
   const rev = s.ncR + s.rcR;
-  const cm = M * rev - s.spend;
-  const ncCm = M * s.ncR - (1 - R) * s.spend;
-  const rcCm = M * s.rcR - R * s.spend;
+  const gp = rev - s.cogs;
+  const M = rev > 0 ? gp / rev : null;
+  const cm = gp - s.spend;
+  const ncCm = (M ?? 0) * s.ncR - s.spend;
+  const rcCm = (M ?? 0) * s.rcR;
   return {
     revenue: rev,
     cm,
@@ -160,7 +161,8 @@ export function metrics(s: Sums, econ: Economics): Metrics {
     ncOrders: s.ncO, rcOrders: s.rcO,
     ncAov: s.ncO > 0 ? s.ncR / s.ncO : null,
     rcAov: s.rcO > 0 ? s.rcR / s.rcO : null,
-    rcpa: s.rcO > 0 ? (R * s.spend) / s.rcO : null,
+    grossMargin: M,
+    cogs: s.cogs,
     plat: s.plat, salesRows: s.salesRows, adRows: s.adRows,
   };
 }
@@ -215,13 +217,13 @@ const MAX_POINTS = 400;
 /** One point per bucket (hour or day); the metric is computed per bucket. */
 export function series(
   D: Dataset, t0: number, t1: number, grain: Grain, region: RegionKey | null,
-  econ: Economics, pick: (m: Metrics) => number | null,
+  pick: (m: Metrics) => number | null,
 ): number[] {
   const step = grain === "hour" ? HOUR : DAY;
   const pts: number[] = [];
   for (let t = t0; t < t1; t += step) {
     const e = Math.min(t + step, t1);
-    const v = pick(metrics(agg(D, t, e, region), econ));
+    const v = pick(metrics(agg(D, t, e, region)));
     pts.push(v == null || !Number.isFinite(v) ? 0 : v);
     if (pts.length > MAX_POINTS) break;
   }

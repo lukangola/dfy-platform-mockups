@@ -31,7 +31,7 @@ import {
   REGIONS, PLATFORMS, RANGE_LABELS, HOUR, DAY,
   agg, metrics, range, series, platSeries, platformStats,
   eur, num, ratio, pct, delta, fmtDelta,
-  type Dataset, type Economics, type Grain, type Metrics, type MetricKey, type RangeKey, type RegionKey,
+  type Dataset, type Grain, type Metrics, type MetricKey, type RangeKey, type RegionKey,
 } from "@shared/performance/engine";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -59,7 +59,7 @@ const CARDS: MetricDef[] = [
   { k: "rcOrders", label: "RC orders", fmt: num, up: true },
   { k: "ncAov", label: "NC AOV", fmt: eur2, up: true },
   { k: "rcAov", label: "RC AOV", fmt: eur2, up: true },
-  { k: "rcpa", label: "RCPA", fmt: eur2, up: false },
+  { k: "grossMargin", label: "Gross margin %", fmt: pct, up: true },
 ];
 
 const REGION_COLS: MetricDef[] = [
@@ -291,26 +291,24 @@ export default function PerformancePage() {
     return () => { cancelled = true; clearInterval(t); };
   }, [running, activeBrandId, load]);
 
-  const econ: Economics | null = config ? { grossMargin: config.grossMargin, remarketingShare: config.remarketingShare } : null;
-
   const view = useMemo(() => {
-    if (!data || !econ) return null;
+    if (!data) return null;
     const r = range(data.now, rangeKey);
     const reg: RegionKey | null = country || null;
-    const cur = withPlatformCols(metrics(agg(data, r.cur[0], r.cur[1], reg), econ));
-    const prev = withPlatformCols(metrics(agg(data, r.prev[0], r.prev[1], reg), econ));
-    const cardSeries = CARDS.map((c) => series(data, r.cur[0], r.cur[1], r.grain, reg, econ, (m) => m[c.k as MetricKey] as number | null));
+    const cur = withPlatformCols(metrics(agg(data, r.cur[0], r.cur[1], reg)));
+    const prev = withPlatformCols(metrics(agg(data, r.prev[0], r.prev[1], reg)));
+    const cardSeries = CARDS.map((c) => series(data, r.cur[0], r.cur[1], r.grain, reg, (m) => m[c.k as MetricKey] as number | null));
     const rows = [...REGIONS.map((rg) => ({ key: rg.key as RegionKey | null, label: rg.label, flag: rg.flag })), { key: null, label: "Total", flag: "" }]
       .map((row) => {
         const cs = agg(data, r.cur[0], r.cur[1], row.key);
         const ps = agg(data, r.prev[0], r.prev[1], row.key);
-        return { ...row, cur: withPlatformCols(metrics(cs, econ)), prev: withPlatformCols(metrics(ps, econ)) };
+        return { ...row, cur: withPlatformCols(metrics(cs)), prev: withPlatformCols(metrics(ps)) };
       });
     const pStats = platformStats(cur);
     const pPrev = platformStats(prev);
     const pSeries = PLATFORMS.map((p) => platSeries(data, r.cur[0], r.cur[1], r.grain, p.key));
     return { r, cur, prev, cardSeries, rows, pStats, pPrev, pSeries };
-  }, [data, econ, rangeKey, country]);
+  }, [data, rangeKey, country]);
 
   // ── gates ──────────────────────────────────────────────────────────────────
   if (!PERFORMANCE_ENABLED) {
@@ -350,6 +348,11 @@ export default function PerformancePage() {
                 const tone = st?.status === "error" ? "text-rose-400" : st?.status === "ok" ? "text-emerald-400/80" : "text-white/30";
                 return <span key={k}>{i > 0 && " · "}{name} <span className={tone}>{txt}</span></span>;
               })}
+            </p>
+          )}
+          {source === "live" && data?.costCoverage != null && data.costCoverage < 0.95 && (
+            <p className="text-[10px] text-amber-300 font-mono mt-1 inline-flex items-center gap-1">
+              <AlertTriangle size={10} /> Shopify has no "Cost per item" for {Math.round((1 - data.costCoverage) * 100)}% of this window's revenue — margin and CM are overstated until those products get a cost.
             </p>
           )}
         </div>
@@ -521,7 +524,7 @@ export default function PerformancePage() {
           </section>
 
           <p className="text-[10px] font-mono text-white/25">
-            CM = {Math.round((econ?.grossMargin ?? 0) * 100)}% gross margin × revenue − ad spend · prospecting/remarketing split {Math.round((1 - (econ?.remarketingShare ?? 0)) * 100)}/{Math.round((econ?.remarketingShare ?? 0) * 100)} · currency EUR · dates en-GB
+            Gross margin = (revenue − cost of goods from Shopify) ÷ revenue{view?.cur.grossMargin != null ? ` = ${pct(view.cur.grossMargin)}` : ""} · CM = gross profit − ad spend · NC CM = margin × NC revenue − ad spend · RC CM = margin × RC revenue · currency EUR · dates en-GB
           </p>
         </>
       )}

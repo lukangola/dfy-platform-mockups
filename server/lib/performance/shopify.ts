@@ -1,7 +1,13 @@
 /**
- * Shopify orders → performance_orders (sales side).
+ * Shopify orders → performance_orders (sales side) + cost of goods.
  *
- * Admin REST API (custom app token, scopes read_orders + read_customers).
+ * Admin REST API, custom-app token, READ-ONLY scopes: read_orders, read_customers,
+ * read_products, read_inventory. Nothing is ever written to the shop.
+ *
+ * Cost of goods: each order's line items carry a variant id; the variant's unit cost
+ * (InventoryItem.unitCost) is fetched once via Admin GraphQL, cached per brand in
+ * performance_variant_costs and refreshed only when older than 30 days and seen again
+ * in a synced order. cogs = Σ quantity × unit cost; cogs_complete = every line item had one.
  *   First run : backfill every order since Jan 1 of last year (created_at_min), 250/page.
  *   Next runs : incremental by updated_at_min = cursor (catches edits, cancellations, refunds
  *               that change totals), so a 10-minute poll is enough for a live dashboard
@@ -12,7 +18,7 @@
  *   window_days — no earlier order by the same customer within N days
  * Guest orders are keyed by email; orders with neither are treated as new-customer.
  */
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db, schema } from "../db.js";
 import type { PerformanceClientConfig } from "./config.js";
 import { backfillStart, sleep } from "./time.js";
@@ -21,8 +27,12 @@ import type { RegionKey } from "../../../shared/performance/engine.js";
 export const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION ?? "2025-01";
 const FIELDS = [
   "id", "created_at", "updated_at", "processed_at", "cancelled_at", "test", "currency", "financial_status",
-  "total_price", "subtotal_price", "email", "customer", "shipping_address", "billing_address",
+  "total_price", "subtotal_price", "email", "customer", "shipping_address", "billing_address", "line_items",
 ].join(",");
+/** Read-only scopes the dashboard needs (orders + customers for NC/RC, products + inventory for unit costs). */
+export const REQUIRED_SCOPES = ["read_orders", "read_customers", "read_products", "read_inventory"];
+const COST_TTL_MS = 30 * 86_400_000;
+const COST_BATCH = 100;
 
 interface ShopifyOrder {
   id: number; created_at: string; updated_at: string; processed_at?: string | null; cancelled_at?: string | null;
@@ -31,6 +41,7 @@ interface ShopifyOrder {
   customer?: { id?: number; created_at?: string; email?: string | null; default_address?: { country_code?: string | null } | null } | null;
   shipping_address?: { country_code?: string | null } | null;
   billing_address?: { country_code?: string | null } | null;
+  line_items?: Array<{ variant_id?: number | null; quantity?: number | null }>;
 }
 
 export function regionFor(country: string | null | undefined, mapping: Record<string, RegionKey>): RegionKey {
@@ -68,13 +79,132 @@ function nextPageInfo(link: string | null): string | null {
   return url ? new URL(url).searchParams.get("page_info") : null;
 }
 
-/** Quick credential check used by the UI's "Test connection". */
-export async function testShopify(config: PerformanceClientConfig): Promise<{ ok: true; shop: string; currency: string | null }> {
+/** Admin GraphQL (same token). Retries on THROTTLED; throws on other GraphQL errors. */
+async function shopifyGraphql<T>(host: string, token: string, query: string, variables: Record<string, unknown>): Promise<T> {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const res = await fetch(`https://${host}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+      method: "POST",
+      headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (res.status === 429) { await sleep(2000); continue; }
+    const body = (await res.json().catch(() => ({}))) as { data?: T; errors?: Array<{ message?: string; extensions?: { code?: string } }> };
+    if (!res.ok) throw new Error(`Shopify GraphQL ${res.status} ${res.statusText}`);
+    if (body.errors?.length) {
+      if (body.errors.some((e) => e.extensions?.code === "THROTTLED")) { await sleep(2000 * (attempt + 1)); continue; }
+      const msg = body.errors.map((e) => e.message).filter(Boolean).join("; ");
+      if (body.errors.some((e) => e.extensions?.code === "ACCESS_DENIED") || /access denied|scope/i.test(msg)) {
+        throw new Error(`Shopify: unit costs need the read_products + read_inventory scopes on the custom app (${msg})`);
+      }
+      throw new Error(`Shopify GraphQL: ${msg}`);
+    }
+    if (!body.data) throw new Error("Shopify GraphQL: empty response");
+    return body.data;
+  }
+  throw new Error("Shopify GraphQL: throttled repeatedly");
+}
+
+/** Quick credential check used by the UI's "Test connection": shop + which scopes the token really has. */
+export async function testShopify(config: PerformanceClientConfig): Promise<{
+  ok: true; shop: string; currency: string | null; scopes: string[]; missingScopes: string[]; writeScopes: string[];
+}> {
   const { shopDomain, token } = config.shopify;
   if (!shopDomain || !token) throw new Error("Shopify shop domain and admin token are required");
-  const { body } = await shopifyGet(`https://${shopHost(shopDomain)}/admin/api/${SHOPIFY_API_VERSION}/shop.json`, token);
+  const host = shopHost(shopDomain);
+  const { body } = await shopifyGet(`https://${host}/admin/api/${SHOPIFY_API_VERSION}/shop.json`, token);
   const shop = (body as { shop?: { name?: string; currency?: string } }).shop;
-  return { ok: true, shop: shop?.name ?? shopHost(shopDomain), currency: shop?.currency ?? null };
+  let scopes: string[] = [];
+  try {
+    const r = await shopifyGet(`https://${host}/admin/oauth/access_scopes.json`, token);
+    scopes = ((r.body as { access_scopes?: Array<{ handle: string }> }).access_scopes ?? []).map((x) => x.handle).sort();
+  } catch { /* older tokens may not expose scopes — not fatal */ }
+  const have = new Set(scopes);
+  return {
+    ok: true, shop: shop?.name ?? host, currency: shop?.currency ?? null, scopes,
+    missingScopes: scopes.length ? REQUIRED_SCOPES.filter((sc) => !have.has(sc)) : [],
+    writeScopes: scopes.filter((sc) => sc.startsWith("write_")),
+  };
+}
+
+/**
+ * Per-brand cache of variant unit costs. Loaded once per sync; unknown or stale
+ * (> 30 days) variants that appear in synced orders are fetched in batches of 100
+ * through one GraphQL `nodes` query each — so a 10-minute poll with a handful of
+ * new orders costs at most one small request, usually none.
+ */
+class VariantCostCache {
+  private readonly costs = new Map<string, number | null>();
+  private readonly stale = new Set<string>();
+  /** first error from the cost lookup — orders still sync; reported at the end */
+  error: string | null = null;
+
+  constructor(private readonly config: PerformanceClientConfig, private readonly host: string, private readonly token: string) {}
+
+  async load(): Promise<void> {
+    const rows = await db.select({ variantId: schema.performanceVariantCosts.variantId, unitCost: schema.performanceVariantCosts.unitCost, fetchedAt: schema.performanceVariantCosts.fetchedAt })
+      .from(schema.performanceVariantCosts).where(eq(schema.performanceVariantCosts.brandId, this.config.brandId));
+    const cutoff = Date.now() - COST_TTL_MS;
+    for (const r of rows) {
+      this.costs.set(r.variantId, r.unitCost == null ? null : Number(r.unitCost));
+      if (r.fetchedAt.getTime() < cutoff) this.stale.add(r.variantId);
+    }
+  }
+
+  /** Make sure every variant id has a (fresh) cost in the cache; failures are recorded, not thrown. */
+  async ensure(variantIds: Iterable<string>): Promise<void> {
+    if (this.error) return;
+    const need = Array.from(new Set(variantIds)).filter((id) => !this.costs.has(id) || this.stale.has(id));
+    for (let i = 0; i < need.length; i += COST_BATCH) {
+      const batch = need.slice(i, i + COST_BATCH);
+      try {
+        await this.fetchBatch(batch);
+      } catch (err) {
+        this.error = err instanceof Error ? err.message : String(err);
+        return;
+      }
+    }
+  }
+
+  private async fetchBatch(ids: string[]): Promise<void> {
+    type Node = { id: string; inventoryItem?: { id?: string; unitCost?: { amount?: string; currencyCode?: string } | null } | null } | null;
+    const data = await shopifyGraphql<{ nodes: Node[] }>(this.host, this.token, `
+      query VariantCosts($ids: [ID!]!) {
+        nodes(ids: $ids) { ... on ProductVariant { id inventoryItem { id unitCost { amount currencyCode } } } }
+      }`, { ids: ids.map((id) => `gid://shopify/ProductVariant/${id}`) });
+    const now = new Date();
+    const values = ids.map((id, i) => {
+      const node = data.nodes[i];
+      const amount = node?.inventoryItem?.unitCost?.amount;
+      const cost = amount != null && amount !== "" ? Number(amount) : null;
+      this.costs.set(id, Number.isFinite(cost as number) ? cost : null);
+      this.stale.delete(id);
+      return {
+        brandId: this.config.brandId, variantId: id,
+        inventoryItemId: node?.inventoryItem?.id?.split("/").pop() ?? null,
+        unitCost: cost != null && Number.isFinite(cost) ? cost.toFixed(4) : null,
+        currency: node?.inventoryItem?.unitCost?.currencyCode ?? null,
+        fetchedAt: now,
+      };
+    });
+    await db.insert(schema.performanceVariantCosts).values(values).onConflictDoUpdate({
+      target: [schema.performanceVariantCosts.brandId, schema.performanceVariantCosts.variantId],
+      set: { inventoryItemId: sql`excluded.inventory_item_id`, unitCost: sql`excluded.unit_cost`, currency: sql`excluded.currency`, fetchedAt: sql`excluded.fetched_at` },
+    });
+  }
+
+  /** [cogs, complete] for an order; cogs null when no line item had a cost. */
+  cogsFor(order: ShopifyOrder): [string | null, boolean] {
+    const items = order.line_items ?? [];
+    if (!items.length) return [null, false];
+    let sum = 0, known = 0;
+    for (const li of items) {
+      const vid = li.variant_id != null ? String(li.variant_id) : null;
+      const cost = vid ? this.costs.get(vid) : undefined;
+      if (cost == null) continue;
+      sum += cost * (li.quantity ?? 1); known++;
+    }
+    return [known ? (Math.round(sum * 100) / 100).toFixed(2) : null, known === items.length];
+  }
 }
 
 export interface SyncResult { rows: number; cursor: string | null }
@@ -95,11 +225,14 @@ export async function syncShopifyOrders(config: PerformanceClientConfig, cursor:
   let url: string | null = `${base}?${params.toString()}`;
   let rows = 0;
   let maxUpdated = cursor ?? "";
+  const costs = new VariantCostCache(config, host, token);
+  await costs.load();
   while (url) {
     const { body, link }: { body: unknown; link: string | null } = await shopifyGet(url, token);
     const orders = ((body as { orders?: ShopifyOrder[] }).orders ?? []);
     if (orders.length) {
-      await upsertOrders(config, orders);
+      await costs.ensure(orders.flatMap((o) => (o.line_items ?? []).flatMap((li) => (li.variant_id != null ? [String(li.variant_id)] : []))));
+      await upsertOrders(config, orders, costs);
       rows += orders.length;
       for (const o of orders) if (o.updated_at > maxUpdated) maxUpdated = o.updated_at;
       onProgress?.(rows);
@@ -108,11 +241,14 @@ export async function syncShopifyOrders(config: PerformanceClientConfig, cursor:
     url = next ? `${base}?limit=250&fields=${encodeURIComponent(FIELDS)}&page_info=${encodeURIComponent(next)}` : null;
   }
   await recomputeNewCustomer(config);
+  // Orders are in; if unit costs could not be loaded, surface it (status = error) so the margin isn't silently 100%.
+  if (costs.error) throw new Error(`Orders synced (${rows}), but cost of goods could not be loaded: ${costs.error}`);
   return { rows, cursor: maxUpdated || cursor };
 }
 
-async function upsertOrders(config: PerformanceClientConfig, orders: ShopifyOrder[]): Promise<void> {
+async function upsertOrders(config: PerformanceClientConfig, orders: ShopifyOrder[], costs: VariantCostCache): Promise<void> {
   const values = orders.map((o) => {
+    const [cogs, cogsComplete] = costs.cogsFor(o);
     const country = o.shipping_address?.country_code ?? o.billing_address?.country_code ?? o.customer?.default_address?.country_code ?? null;
     const customerKey = o.customer?.id != null ? `id:${o.customer.id}` : (o.email ?? o.customer?.email) ? `email:${(o.email ?? o.customer?.email ?? "").toLowerCase()}` : null;
     return {
@@ -130,6 +266,7 @@ async function upsertOrders(config: PerformanceClientConfig, orders: ShopifyOrde
       financialStatus: o.financial_status ?? null,
       cancelled: Boolean(o.cancelled_at) || o.financial_status === "voided",
       test: Boolean(o.test),
+      cogs, cogsComplete,
     };
   });
   await db
@@ -144,6 +281,7 @@ async function upsertOrders(config: PerformanceClientConfig, orders: ShopifyOrde
         totalPrice: sql`excluded.total_price`, subtotalPrice: sql`excluded.subtotal_price`,
         currency: sql`excluded.currency`, financialStatus: sql`excluded.financial_status`,
         cancelled: sql`excluded.cancelled`, test: sql`excluded.test`,
+        cogs: sql`excluded.cogs`, cogsComplete: sql`excluded.cogs_complete`,
       },
     });
 }

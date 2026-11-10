@@ -3,8 +3,6 @@ CREATE TABLE "performance_client_configs" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"data_source" text DEFAULT 'mock' NOT NULL,
-	"gross_margin" numeric(6, 4) DEFAULT '0.52' NOT NULL,
-	"remarketing_share" numeric(6, 4) DEFAULT '0.12' NOT NULL,
 	"nc_definition" text DEFAULT 'first_ever' NOT NULL,
 	"nc_window_days" integer DEFAULT 365 NOT NULL,
 	"revenue_field" text DEFAULT 'total' NOT NULL,
@@ -38,7 +36,9 @@ CREATE TABLE "performance_orders" (
 	"financial_status" text,
 	"cancelled" boolean DEFAULT false NOT NULL,
 	"test" boolean DEFAULT false NOT NULL,
-	"is_new_customer" boolean DEFAULT true NOT NULL
+	"is_new_customer" boolean DEFAULT true NOT NULL,
+	"cogs" numeric(12, 2),
+	"cogs_complete" boolean DEFAULT false NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "performance_spend_hours" (
@@ -65,9 +65,20 @@ CREATE TABLE "performance_sync_state" (
 	"error" text
 );
 --> statement-breakpoint
+CREATE TABLE "performance_variant_costs" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"brand_id" uuid NOT NULL,
+	"variant_id" text NOT NULL,
+	"inventory_item_id" text,
+	"unit_cost" numeric(12, 4),
+	"currency" text,
+	"fetched_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
 CREATE UNIQUE INDEX "performance_orders_brand_order_uq" ON "performance_orders" USING btree ("brand_id","shopify_order_id");--> statement-breakpoint
 CREATE INDEX "performance_orders_brand_created_idx" ON "performance_orders" USING btree ("brand_id","created_at");--> statement-breakpoint
 CREATE INDEX "performance_orders_brand_customer_idx" ON "performance_orders" USING btree ("brand_id","customer_key");--> statement-breakpoint
 CREATE UNIQUE INDEX "performance_spend_brand_platform_account_hour_uq" ON "performance_spend_hours" USING btree ("brand_id","platform","account_id","hour");--> statement-breakpoint
 CREATE INDEX "performance_spend_brand_hour_idx" ON "performance_spend_hours" USING btree ("brand_id","hour");--> statement-breakpoint
-CREATE UNIQUE INDEX "performance_sync_state_brand_source_uq" ON "performance_sync_state" USING btree ("brand_id","source");
+CREATE UNIQUE INDEX "performance_sync_state_brand_source_uq" ON "performance_sync_state" USING btree ("brand_id","source");--> statement-breakpoint
+CREATE UNIQUE INDEX "performance_variant_costs_brand_variant_uq" ON "performance_variant_costs" USING btree ("brand_id","variant_id");

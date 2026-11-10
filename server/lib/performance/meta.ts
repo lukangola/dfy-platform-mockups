@@ -5,6 +5,8 @@
  * account's time zone to UTC hour buckets. Each configured account maps to one
  * dashboard region. Pulled in 60-day chunks; incremental runs re-pull the last
  * 3 days so late-attributed spend settles.
+ * The token travels only in the Authorization header — never in a URL, so it
+ * can't end up in logs, error messages or paging links.
  */
 import { sql } from "drizzle-orm";
 import { db, schema } from "../db.js";
@@ -16,9 +18,9 @@ const GRAPH = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
 
 interface InsightRow { date_start: string; spend?: string; impressions?: string; clicks?: string; hourly_stats_aggregated_by_advertiser_time_zone?: string }
 
-async function graphGet<T>(url: string): Promise<T> {
+async function graphGet<T>(url: string, token: string): Promise<T> {
   for (let attempt = 0; attempt < 5; attempt++) {
-    const res = await fetch(url);
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
     const body = (await res.json().catch(() => ({}))) as T & { error?: { message?: string; code?: number } };
     if (res.ok && !body.error) return body;
     const code = body.error?.code;
@@ -47,7 +49,7 @@ export async function testMeta(config: PerformanceClientConfig): Promise<{ ok: t
   const out = [];
   for (const a of accounts) {
     const r = await graphGet<{ id: string; name?: string; timezone_name?: string; currency?: string }>(
-      `${GRAPH}/${actId(a.id)}?fields=name,timezone_name,currency&access_token=${encodeURIComponent(token)}`,
+      `${GRAPH}/${actId(a.id)}?fields=name,timezone_name,currency`, token,
     );
     out.push({ id: r.id, name: r.name ?? r.id, timezone: r.timezone_name ?? "UTC", currency: r.currency ?? "" });
   }
@@ -63,7 +65,7 @@ export async function syncMetaSpend(config: PerformanceClientConfig, lastSyncedA
   let rows = 0;
   for (const acct of accounts) {
     const id = actId(acct.id);
-    const meta = await graphGet<{ timezone_name?: string }>(`${GRAPH}/${id}?fields=timezone_name&access_token=${encodeURIComponent(token)}`);
+    const meta = await graphGet<{ timezone_name?: string }>(`${GRAPH}/${id}?fields=timezone_name`, token);
     const tz = meta.timezone_name ?? "UTC";
     for (const [since, until] of dateChunks(from, to, 60)) {
       const params = new URLSearchParams({
@@ -73,11 +75,10 @@ export async function syncMetaSpend(config: PerformanceClientConfig, lastSyncedA
         breakdowns: "hourly_stats_aggregated_by_advertiser_time_zone",
         time_range: JSON.stringify({ since, until }),
         limit: "500",
-        access_token: token,
       });
       let url: string | null = `${GRAPH}/${id}/insights?${params.toString()}`;
       while (url) {
-        const page: { data?: InsightRow[]; paging?: { next?: string } } = await graphGet(url);
+        const page: { data?: InsightRow[]; paging?: { next?: string } } = await graphGet(url, token);
         const values = (page.data ?? []).flatMap((r) => {
           const h = hourFromBreakdown(r.hourly_stats_aggregated_by_advertiser_time_zone);
           if (h == null) return [];
