@@ -74,13 +74,13 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
     dataSource: config.dataSource,
     ncDefinition: config.ncDefinition, ncWindowDays: String(config.ncWindowDays), revenueField: config.revenueField,
     syncEveryMinutes: String(config.syncEveryMinutes),
-    shopifyShopDomain: config.shopify.shopDomain ?? "", shopifyToken: "",
+    shopifyShopDomain: config.shopify.shopDomain ?? "", shopifyClientId: config.shopify.clientId ?? "", shopifyClientSecret: "", shopifyToken: "",
     metaToken: "", metaAccounts: accountsText(config.meta.accounts),
     googleDeveloperToken: "", googleClientId: config.google.clientId ?? "", googleClientSecret: "", googleRefreshToken: "",
     googleLoginCustomerId: config.google.loginCustomerId ?? "", googleAccounts: accountsText(config.google.accounts),
   }));
   useEffect(() => {
-    setForm((f) => ({ ...f, dataSource: config.dataSource, shopifyShopDomain: config.shopify.shopDomain ?? "", metaAccounts: accountsText(config.meta.accounts), googleClientId: config.google.clientId ?? "", googleLoginCustomerId: config.google.loginCustomerId ?? "", googleAccounts: accountsText(config.google.accounts) }));
+    setForm((f) => ({ ...f, dataSource: config.dataSource, shopifyShopDomain: config.shopify.shopDomain ?? "", shopifyClientId: config.shopify.clientId ?? "", metaAccounts: accountsText(config.meta.accounts), googleClientId: config.google.clientId ?? "", googleLoginCustomerId: config.google.loginCustomerId ?? "", googleAccounts: accountsText(config.google.accounts) }));
   }, [config]);
 
   const [saving, setSaving] = useState(false);
@@ -96,7 +96,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
     dataSource: form.dataSource,
     ncDefinition: form.ncDefinition, ncWindowDays: Number(form.ncWindowDays), revenueField: form.revenueField,
     syncEveryMinutes: Number(form.syncEveryMinutes),
-    shopifyShopDomain: form.shopifyShopDomain, shopifyToken: form.shopifyToken,
+    shopifyShopDomain: form.shopifyShopDomain, shopifyClientId: form.shopifyClientId, shopifyClientSecret: form.shopifyClientSecret, shopifyToken: form.shopifyToken,
     metaToken: form.metaToken, metaAccounts: parseAccounts(form.metaAccounts),
     googleDeveloperToken: form.googleDeveloperToken, googleClientId: form.googleClientId, googleClientSecret: form.googleClientSecret,
     googleRefreshToken: form.googleRefreshToken, googleLoginCustomerId: form.googleLoginCustomerId, googleAccounts: parseAccounts(form.googleAccounts),
@@ -107,7 +107,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
     try {
       const { config: next } = await savePerformanceConfig(brandId, patch());
       onSaved(next);
-      setForm((f) => ({ ...f, shopifyToken: "", metaToken: "", googleDeveloperToken: "", googleClientSecret: "", googleRefreshToken: "" }));
+      setForm((f) => ({ ...f, shopifyClientSecret: "", shopifyToken: "", metaToken: "", googleDeveloperToken: "", googleClientSecret: "", googleRefreshToken: "" }));
       setNotice({ kind: "ok", text: "Saved. Credentials are stored encrypted." });
       return true;
     } catch (err) {
@@ -178,8 +178,10 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
         <section className="rounded-lg border border-white/[0.07] p-4 space-y-3">
           <div className="flex items-center justify-between"><div className="text-[11px] font-semibold text-white/85">Shopify · sales</div><StatusPill st={by("shopify")} /></div>
           <div><label htmlFor="shopDomain" className={label}>Shop domain</label><input id="shopDomain" className={input} value={form.shopifyShopDomain} onChange={set("shopifyShopDomain")} placeholder="brand.myshopify.com" /></div>
-          <SecretField id="shopToken" name="Admin API access token (read-only)" set={config.shopify.tokenSet} value={form.shopifyToken} onChange={(v) => setForm((f) => ({ ...f, shopifyToken: v }))} placeholder="shpat_…" />
-          <p className="text-[10px] text-white/30 font-mono">Shopify admin → Settings → Apps and sales channels → Develop apps → create app → Admin API scopes, tick only <span className="text-white/50">read_orders, read_customers, read_products, read_inventory</span> (no write_*) → install → copy the token. Orders give revenue + new/returning customers; products + inventory give the unit costs for margin. Backfills from 1 Jan last year once, then polls only orders that changed.</p>
+          <div><label htmlFor="shopClientId" className={label}>Client ID (Dev Dashboard app)</label><input id="shopClientId" className={input} value={form.shopifyClientId} onChange={set("shopifyClientId")} placeholder="from the app's Settings in dev.shopify.com" autoComplete="off" /></div>
+          <SecretField id="shopClientSecret" name="Client secret (read-only scopes)" set={config.shopify.clientSecretSet} value={form.shopifyClientSecret} onChange={(v) => setForm((f) => ({ ...f, shopifyClientSecret: v }))} placeholder="shpss_…" />
+          <p className="text-[10px] text-white/30 font-mono">dev.shopify.com → Create app → name it, leave the URLs as they are → Scopes: <span className="text-white/50">read_orders, read_customers, read_products, read_inventory</span> (nothing else, no write_*) → release the version → install it on the store (app and store in the same Shopify organization) → copy Client ID + Client secret from the app's Settings. Shopify shows no token any more: Inana swaps these for a 24-hour token itself and renews it once a day. Orders give revenue + new/returning customers; products + inventory give the unit costs for margin. Backfills from 1 Jan last year once, then polls only orders that changed.</p>
+          <SecretField id="shopToken" name="Legacy access token (only for apps made in the admin before 2026)" set={config.shopify.tokenSet} value={form.shopifyToken} onChange={(v) => setForm((f) => ({ ...f, shopifyToken: v }))} placeholder="shpat_… — leave empty for a Dev Dashboard app" />
           <button type="button" className={btnGhost} onClick={() => void test("shopify")} disabled={testing !== null}>{testing === "shopify" ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} Test connection</button>
           <TestLine source="shopify" />
         </section>

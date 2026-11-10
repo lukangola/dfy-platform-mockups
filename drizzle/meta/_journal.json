@@ -225,6 +225,13 @@
       "when": 1794320926409,
       "tag": "0031_performance_dashboard",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1794351168127,
+      "tag": "0032_shopify_client_credentials",
+      "breakpoints": true
     }
   ]
 }

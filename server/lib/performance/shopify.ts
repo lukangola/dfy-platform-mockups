@@ -1,8 +1,10 @@
 /**
  * Shopify orders → performance_orders (sales side) + cost of goods.
  *
- * Admin REST API, custom-app token, READ-ONLY scopes: read_orders, read_customers,
- * read_products, read_inventory. Nothing is ever written to the shop.
+ * Admin REST API, READ-ONLY scopes: read_orders, read_customers, read_products,
+ * read_inventory. Nothing is ever written to the shop. Credentials (see shopifyAccessToken):
+ * a Dev Dashboard app's Client ID + secret (exchanged here for 24h tokens) or, for apps
+ * created in the admin before 2026, the legacy static access token.
  *
  * Cost of goods: each order's line items carry a variant id; the variant's unit cost
  * (InventoryItem.unitCost) is fetched once via Admin GraphQL, cached per brand in
@@ -54,15 +56,67 @@ function shopHost(domain: string): string {
   return d.includes(".") ? d : `${d}.myshopify.com`;
 }
 
-/** GET with Shopify rate-limit handling (429 → wait Retry-After, default 2s). */
-async function shopifyGet(url: string, token: string): Promise<{ body: unknown; link: string | null }> {
+/**
+ * Access token for the shop. Two kinds of app:
+ *  - Dev Dashboard app (the only kind Shopify lets you create since 1 Jan 2026): no token is shown
+ *    anywhere; its Client ID + Client secret are exchanged here for a 24-hour token (client
+ *    credentials grant — works when the app and the store are in the same Shopify organization).
+ *    Cached per brand in memory and renewed ~10 minutes before expiry: one small request a day,
+ *    never one per sync.
+ *  - Legacy custom app (created in the admin before 2026): its static `shpat_` token is used as is.
+ * `fresh` forces a new exchange (after a 401, or when "Test connection" validates typed credentials).
+ */
+type TokenSource = (fresh?: boolean) => Promise<string>;
+const tokenCache = new Map<string, { token: string; expiresAt: number }>();
+const TOKEN_RENEW_MARGIN_MS = 10 * 60_000;
+
+export function forgetShopifyToken(brandId: string): void {
+  tokenCache.delete(brandId);
+}
+
+async function shopifyAccessToken(config: PerformanceClientConfig, fresh = false): Promise<string> {
+  const { shopDomain, token, clientId, clientSecret } = config.shopify;
+  if (!shopDomain) throw new Error("Shopify shop domain is required");
+  if (token) return token;
+  if (!clientId || !clientSecret) {
+    throw new Error("Shopify is not connected: paste the app's Client ID and Client secret (Dev Dashboard) — or, for a legacy custom app, its access token");
+  }
+  const hit = tokenCache.get(config.brandId);
+  if (!fresh && hit && hit.expiresAt - Date.now() > TOKEN_RENEW_MARGIN_MS) return hit.token;
+  const res = await fetch(`https://${shopHost(shopDomain)}/admin/oauth/access_token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: new URLSearchParams({ grant_type: "client_credentials", client_id: clientId, client_secret: clientSecret }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { access_token?: string; expires_in?: number; error?: string; error_description?: string };
+  if (!res.ok || !body.access_token) {
+    const detail = body.error_description ?? body.error ?? `${res.status} ${res.statusText}`;
+    if (body.error === "shop_not_permitted") {
+      throw new Error("Shopify refused the client credentials: the app and the store must belong to the same Shopify organization. Create the app in the Dev Dashboard of the organization that owns this store (or have the store owner do it), install it on the store, then paste its Client ID + secret here.");
+    }
+    if (res.status === 401 || body.error === "invalid_client") throw new Error(`Shopify rejected the Client ID / Client secret (${detail})`);
+    throw new Error(`Shopify token exchange failed: ${detail}. Is the app installed on this store?`);
+  }
+  const ttl = Number(body.expires_in) > 0 ? Number(body.expires_in) * 1000 : 86_400_000;
+  tokenCache.set(config.brandId, { token: body.access_token, expiresAt: Date.now() + ttl });
+  return body.access_token;
+}
+
+function tokenSource(config: PerformanceClientConfig): TokenSource {
+  return (fresh) => shopifyAccessToken(config, fresh);
+}
+
+/** GET with Shopify rate-limit handling (429 → wait Retry-After, default 2s); one retry with a fresh token on 401. */
+async function shopifyGet(url: string, auth: TokenSource): Promise<{ body: unknown; link: string | null }> {
+  let renewed = false;
   for (let attempt = 0; attempt < 6; attempt++) {
-    const res = await fetch(url, { headers: { "X-Shopify-Access-Token": token, Accept: "application/json" } });
+    const res = await fetch(url, { headers: { "X-Shopify-Access-Token": await auth(), Accept: "application/json" } });
     if (res.status === 429) {
       const wait = Number(res.headers.get("Retry-After") ?? "2") * 1000;
       await sleep(Math.min(wait || 2000, 10_000));
       continue;
     }
+    if (res.status === 401 && !renewed) { renewed = true; await auth(true); continue; }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new Error(`Shopify ${res.status} ${res.statusText}: ${text.slice(0, 300)}`);
@@ -79,22 +133,24 @@ function nextPageInfo(link: string | null): string | null {
   return url ? new URL(url).searchParams.get("page_info") : null;
 }
 
-/** Admin GraphQL (same token). Retries on THROTTLED; throws on other GraphQL errors. */
-async function shopifyGraphql<T>(host: string, token: string, query: string, variables: Record<string, unknown>): Promise<T> {
+/** Admin GraphQL (same credentials). Retries on THROTTLED; one retry with a fresh token on 401; throws on other errors. */
+async function shopifyGraphql<T>(host: string, auth: TokenSource, query: string, variables: Record<string, unknown>): Promise<T> {
+  let renewed = false;
   for (let attempt = 0; attempt < 6; attempt++) {
     const res = await fetch(`https://${host}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
       method: "POST",
-      headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json", Accept: "application/json" },
+      headers: { "X-Shopify-Access-Token": await auth(), "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({ query, variables }),
     });
     if (res.status === 429) { await sleep(2000); continue; }
+    if (res.status === 401 && !renewed) { renewed = true; await auth(true); continue; }
     const body = (await res.json().catch(() => ({}))) as { data?: T; errors?: Array<{ message?: string; extensions?: { code?: string } }> };
     if (!res.ok) throw new Error(`Shopify GraphQL ${res.status} ${res.statusText}`);
     if (body.errors?.length) {
       if (body.errors.some((e) => e.extensions?.code === "THROTTLED")) { await sleep(2000 * (attempt + 1)); continue; }
       const msg = body.errors.map((e) => e.message).filter(Boolean).join("; ");
       if (body.errors.some((e) => e.extensions?.code === "ACCESS_DENIED") || /access denied|scope/i.test(msg)) {
-        throw new Error(`Shopify: unit costs need the read_products + read_inventory scopes on the custom app (${msg})`);
+        throw new Error(`Shopify: unit costs need the read_products + read_inventory scopes on the app (${msg})`);
       }
       throw new Error(`Shopify GraphQL: ${msg}`);
     }
@@ -108,14 +164,16 @@ async function shopifyGraphql<T>(host: string, token: string, query: string, var
 export async function testShopify(config: PerformanceClientConfig): Promise<{
   ok: true; shop: string; currency: string | null; scopes: string[]; missingScopes: string[]; writeScopes: string[];
 }> {
-  const { shopDomain, token } = config.shopify;
-  if (!shopDomain || !token) throw new Error("Shopify shop domain and admin token are required");
+  const { shopDomain } = config.shopify;
+  if (!shopDomain) throw new Error("Shopify shop domain is required");
   const host = shopHost(shopDomain);
-  const { body } = await shopifyGet(`https://${host}/admin/api/${SHOPIFY_API_VERSION}/shop.json`, token);
+  const auth = tokenSource(config);
+  await auth(true); // validate the credentials as typed, not a cached token
+  const { body } = await shopifyGet(`https://${host}/admin/api/${SHOPIFY_API_VERSION}/shop.json`, auth);
   const shop = (body as { shop?: { name?: string; currency?: string } }).shop;
   let scopes: string[] = [];
   try {
-    const r = await shopifyGet(`https://${host}/admin/oauth/access_scopes.json`, token);
+    const r = await shopifyGet(`https://${host}/admin/oauth/access_scopes.json`, auth);
     scopes = ((r.body as { access_scopes?: Array<{ handle: string }> }).access_scopes ?? []).map((x) => x.handle).sort();
   } catch { /* older tokens may not expose scopes — not fatal */ }
   const have = new Set(scopes);
@@ -138,7 +196,7 @@ class VariantCostCache {
   /** first error from the cost lookup — orders still sync; reported at the end */
   error: string | null = null;
 
-  constructor(private readonly config: PerformanceClientConfig, private readonly host: string, private readonly token: string) {}
+  constructor(private readonly config: PerformanceClientConfig, private readonly host: string, private readonly auth: TokenSource) {}
 
   async load(): Promise<void> {
     const rows = await db.select({ variantId: schema.performanceVariantCosts.variantId, unitCost: schema.performanceVariantCosts.unitCost, fetchedAt: schema.performanceVariantCosts.fetchedAt })
@@ -167,7 +225,7 @@ class VariantCostCache {
 
   private async fetchBatch(ids: string[]): Promise<void> {
     type Node = { id: string; inventoryItem?: { id?: string; unitCost?: { amount?: string; currencyCode?: string } | null } | null } | null;
-    const data = await shopifyGraphql<{ nodes: Node[] }>(this.host, this.token, `
+    const data = await shopifyGraphql<{ nodes: Node[] }>(this.host, this.auth, `
       query VariantCosts($ids: [ID!]!) {
         nodes(ids: $ids) { ... on ProductVariant { id inventoryItem { id unitCost { amount currencyCode } } } }
       }`, { ids: ids.map((id) => `gid://shopify/ProductVariant/${id}`) });
@@ -214,9 +272,10 @@ export interface SyncResult { rows: number; cursor: string | null }
  * seen so far (ISO); null = backfill. Returns the new cursor.
  */
 export async function syncShopifyOrders(config: PerformanceClientConfig, cursor: string | null, onProgress?: (rows: number) => void): Promise<SyncResult> {
-  const { shopDomain, token } = config.shopify;
-  if (!shopDomain || !token) throw new Error("Shopify is not connected (shop domain + admin token)");
+  const { shopDomain } = config.shopify;
+  if (!shopDomain) throw new Error("Shopify is not connected (shop domain missing)");
   const host = shopHost(shopDomain);
+  const auth = tokenSource(config);
   const base = `https://${host}/admin/api/${SHOPIFY_API_VERSION}/orders.json`;
   const params = new URLSearchParams({ status: "any", limit: "250", fields: FIELDS });
   if (cursor) params.set("updated_at_min", cursor);
@@ -225,10 +284,10 @@ export async function syncShopifyOrders(config: PerformanceClientConfig, cursor:
   let url: string | null = `${base}?${params.toString()}`;
   let rows = 0;
   let maxUpdated = cursor ?? "";
-  const costs = new VariantCostCache(config, host, token);
+  const costs = new VariantCostCache(config, host, auth);
   await costs.load();
   while (url) {
-    const { body, link }: { body: unknown; link: string | null } = await shopifyGet(url, token);
+    const { body, link }: { body: unknown; link: string | null } = await shopifyGet(url, auth);
     const orders = ((body as { orders?: ShopifyOrder[] }).orders ?? []);
     if (orders.length) {
       await costs.ensure(orders.flatMap((o) => (o.line_items ?? []).flatMap((li) => (li.variant_id != null ? [String(li.variant_id)] : []))));

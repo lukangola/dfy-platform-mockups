@@ -10,7 +10,7 @@
  */
 import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "../db.js";
-import { getClientConfig, liveBrandIds, type PerformanceClientConfig } from "./config.js";
+import { getClientConfig, liveBrandIds, type PerformanceClientConfig, shopifyConnected } from "./config.js";
 import { syncGoogleSpend } from "./googleAds.js";
 import { syncMetaSpend } from "./meta.js";
 import { syncShopifyOrders } from "./shopify.js";
@@ -34,7 +34,7 @@ async function upsertState(brandId: string, source: SyncSource, set: Partial<typ
 }
 
 function isConnected(config: PerformanceClientConfig, source: SyncSource): boolean {
-  if (source === "shopify") return Boolean(config.shopify.shopDomain && config.shopify.token);
+  if (source === "shopify") return shopifyConnected(config);
   if (source === "meta") return Boolean(config.meta.token && config.meta.accounts.length);
   return Boolean(config.google.refreshToken && config.google.developerToken && config.google.accounts.length);
 }

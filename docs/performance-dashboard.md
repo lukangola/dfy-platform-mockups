@@ -31,12 +31,20 @@ platform-table spend equals the Meta / Google / TikTok columns of the Total row.
 ## Go live tomorrow (what Marcus does, nothing else needed)
 
 1. Open the Performance page → click **Data sources** (or the amber MOCK DATA pill).
-2. **Shopify**: shop domain (`brand.myshopify.com`) + Admin API access token (`shpat_…`) from
-   Shopify admin → Settings → Apps and sales channels → Develop apps → create app → Admin API
-   scopes: tick only the four read scopes `read_orders`, `read_customers`, `read_products`,
-   `read_inventory` (no `write_*`) → install → reveal token. Click **Test connection** — it shows
-   the shop, the currency and the scopes the token really has, and warns about missing read
-   scopes or any write scope.
+2. **Shopify**: shop domain (`brand.myshopify.com`) + the app's **Client ID** and **Client secret**.
+   Since 1 Jan 2026 Shopify no longer creates custom apps in the admin and shows no access token
+   anywhere; apps are made in the Dev Dashboard (dev.shopify.com) instead: **Create app** → name
+   (e.g. Inana.ai), App URL can stay as it is (nothing is hosted; `https://shopify.dev/apps/default-app-home`
+   is Shopify's own placeholder), no redirect URL, no "embed", no "legacy install flow" →
+   **Scopes**: only `read_orders, read_customers, read_products, read_inventory` (no `write_*`) →
+   release the version → **install it on the store** → copy Client ID + Client secret from the
+   app's Settings. The server exchanges them for a 24-hour token (client credentials grant) and
+   renews it once a day; nothing else to do. Requirement: the app and the store must be in the
+   same Shopify organization (create the app from the organization that owns the store; for a
+   client's store the client, or someone with the App developer role there, creates it). Legacy
+   custom apps created in the admin before 2026 still work: paste their `shpat_` token in the
+   legacy field instead. Click **Test connection** — it exchanges the credentials, shows the shop,
+   the currency and the scopes really granted, and warns about missing read scopes or any write scope.
 3. **Meta**: a System-user access token with only `ads_read` (Business settings → Users → System
    users → Generate token, tick `ads_read`, assign the ad accounts, no expiry), and the ad accounts
    with their region: `act_123:NLBE, act_456:UK`. Click **Test connection** (account name, time
@@ -56,10 +64,12 @@ platform-table spend equals the Meta / Google / TikTok columns of the Total row.
 
 ### Why tokens, not an OAuth login
 
-- **Shopify**: a custom app installed on the shop is Shopify's own recommended way for a
-  single-store integration. OAuth would mean building and hosting a public Shopify app with an
-  HTTPS callback and app review, for no security gain on your own store. The token is scoped
-  read-only on Shopify's side, so even a leaked token could not change anything.
+- **Shopify**: a Dev Dashboard app installed on your own store, with the server exchanging its
+  Client ID + secret for short-lived tokens, is Shopify's own flow for a single-store integration
+  (the admin "custom app" with a copyable token was retired on 1 Jan 2026). A browser OAuth login
+  would mean hosting a public callback URL and an install flow, for no security gain on your own
+  store. The app is scoped read-only on Shopify's side, so even a leaked secret could not change
+  anything, and the 24-hour tokens never leave the server (in-memory cache, never stored).
 - **Meta**: a System-user token is long-lived and belongs to the business, not to a person's
   login, and carries only `ads_read`. An OAuth "Log in with Facebook" would give a 60-day token tied
   to one person and require a Meta app review for `ads_read`.

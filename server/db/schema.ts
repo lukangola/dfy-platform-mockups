@@ -920,7 +920,11 @@ export const performanceClientConfigs = pgTable("performance_client_configs", {
   regionMapping: jsonb("region_mapping"),
   syncEveryMinutes: integer("sync_every_minutes").notNull().default(10),
   shopifyShopDomain: text("shopify_shop_domain"),
+  /** legacy custom app (created in the admin before 2026): its static Admin API access token */
   shopifyTokenEnc: text("shopify_token_enc"),
+  /** Dev Dashboard app (the only kind creatable since 2026): Client ID + secret, exchanged server-side for 24h tokens */
+  shopifyClientId: text("shopify_client_id"),
+  shopifyClientSecretEnc: text("shopify_client_secret_enc"),
   metaTokenEnc: text("meta_token_enc"),
   /** [{ id: "act_123", region: "NLBE" }] */
   metaAccounts: jsonb("meta_accounts").notNull().default(sql`'[]'::jsonb`),

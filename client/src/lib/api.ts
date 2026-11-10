@@ -2546,7 +2546,7 @@ export type PerformanceConfig = {
   revenueField: "total" | "subtotal";
   regionMapping: Record<string, PerformanceRegion>;
   syncEveryMinutes: number;
-  shopify: { shopDomain: string | null; tokenSet: boolean };
+  shopify: { shopDomain: string | null; tokenSet: boolean; clientId: string | null; clientSecretSet: boolean };
   meta: { tokenSet: boolean; accounts: PerformanceAccountMap[] };
   google: {
     developerTokenSet: boolean; clientId: string | null; clientSecretSet: boolean; refreshTokenSet: boolean;
@@ -2570,7 +2570,7 @@ export type PerformanceConfigPatch = Partial<{
   dataSource: "mock" | "live";
   ncDefinition: "first_ever" | "window_days"; ncWindowDays: number; revenueField: "total" | "subtotal";
   syncEveryMinutes: number;
-  shopifyShopDomain: string | null; shopifyToken: string | null;
+  shopifyShopDomain: string | null; shopifyToken: string | null; shopifyClientId: string | null; shopifyClientSecret: string | null;
   metaToken: string | null; metaAccounts: PerformanceAccountMap[];
   googleDeveloperToken: string | null; googleClientId: string | null; googleClientSecret: string | null;
   googleRefreshToken: string | null; googleLoginCustomerId: string | null; googleAccounts: PerformanceAccountMap[];

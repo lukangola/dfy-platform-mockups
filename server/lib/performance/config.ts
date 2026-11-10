@@ -12,6 +12,7 @@ import { eq, sql } from "drizzle-orm";
 import { db, schema } from "../db.js";
 import type { PlatformKey, RegionKey } from "../../../shared/performance/engine.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { forgetShopifyToken } from "./shopify.js";
 
 export type DataSourceKind = "mock" | "live";
 export type NcDefinition = "first_ever" | "window_days";
@@ -28,7 +29,8 @@ export interface PerformanceClientConfig {
   regionMapping: Record<string, RegionKey>;
   syncEveryMinutes: number;
   mockSeed: number;
-  shopify: { shopDomain: string | null; token: string | null };
+  /** token = legacy custom app (pre-2026); clientId + clientSecret = Dev Dashboard app (exchanged for 24h tokens server-side) */
+  shopify: { shopDomain: string | null; token: string | null; clientId: string | null; clientSecret: string | null };
   meta: { token: string | null; accounts: AccountMap[] };
   google: {
     developerToken: string | null; clientId: string | null; clientSecret: string | null;
@@ -55,7 +57,7 @@ function defaults(brandId: string, name: string): PerformanceClientConfig {
     regionMapping: { ...DEFAULT_REGION_MAPPING },
     syncEveryMinutes: 10,
     mockSeed: seedFromId(brandId),
-    shopify: { shopDomain: null, token: null },
+    shopify: { shopDomain: null, token: null, clientId: null, clientSecret: null },
     meta: { token: null, accounts: [] },
     google: { developerToken: null, clientId: null, clientSecret: null, refreshToken: null, loginCustomerId: null, accounts: [] },
   };
@@ -88,7 +90,10 @@ export async function getClientConfig(brandId: string, brandName: string): Promi
     ncWindowDays: row.ncWindowDays, revenueField: row.revenueField === "subtotal" ? "subtotal" : "total",
     regionMapping: parseMapping(row.regionMapping) ?? base.regionMapping,
     syncEveryMinutes: row.syncEveryMinutes,
-    shopify: { shopDomain: row.shopifyShopDomain, token: decryptSecret(row.shopifyTokenEnc) },
+    shopify: {
+      shopDomain: row.shopifyShopDomain, token: decryptSecret(row.shopifyTokenEnc),
+      clientId: row.shopifyClientId, clientSecret: decryptSecret(row.shopifyClientSecretEnc),
+    },
     meta: { token: decryptSecret(row.metaTokenEnc), accounts: parseAccounts(row.metaAccounts) },
     google: {
       developerToken: decryptSecret(row.googleDeveloperTokenEnc), clientId: row.googleClientId,
@@ -114,6 +119,7 @@ export interface ConfigPatch {
   regionMapping?: Record<string, string> | null;
   syncEveryMinutes?: number;
   shopifyShopDomain?: string | null; shopifyToken?: string | null;
+  shopifyClientId?: string | null; shopifyClientSecret?: string | null;
   metaToken?: string | null; metaAccounts?: AccountMap[];
   googleDeveloperToken?: string | null; googleClientId?: string | null; googleClientSecret?: string | null;
   googleRefreshToken?: string | null; googleLoginCustomerId?: string | null; googleAccounts?: AccountMap[];
@@ -139,6 +145,8 @@ export async function saveClientConfig(brandId: string, patch: ConfigPatch): Pro
   if (patch.syncEveryMinutes != null) set.syncEveryMinutes = Math.round(clamp(patch.syncEveryMinutes, 2, 1440, 10));
   if (patch.shopifyShopDomain !== undefined) set.shopifyShopDomain = patch.shopifyShopDomain?.trim() || null;
   const st = secretSet(patch.shopifyToken); if (st.set) set.shopifyTokenEnc = st.value;
+  if (patch.shopifyClientId !== undefined) set.shopifyClientId = patch.shopifyClientId?.trim() || null;
+  const sc = secretSet(patch.shopifyClientSecret); if (sc.set) set.shopifyClientSecretEnc = sc.value;
   const mt = secretSet(patch.metaToken); if (mt.set) set.metaTokenEnc = mt.value;
   if (patch.metaAccounts) set.metaAccounts = parseAccounts(patch.metaAccounts);
   const gd = secretSet(patch.googleDeveloperToken); if (gd.set) set.googleDeveloperTokenEnc = gd.value;
@@ -152,6 +160,12 @@ export async function saveClientConfig(brandId: string, patch: ConfigPatch): Pro
     target: schema.performanceClientConfigs.brandId,
     set: { ...set, updatedAt: sql`now()` },
   });
+  forgetShopifyToken(brandId); // credentials may have changed — next call exchanges them again
+}
+
+/** Shopify is usable: shop domain + either a legacy token or Dev Dashboard client credentials. */
+export function shopifyConnected(c: PerformanceClientConfig): boolean {
+  return Boolean(c.shopify.shopDomain && (c.shopify.token || (c.shopify.clientId && c.shopify.clientSecret)));
 }
 
 /** What the client sees — never a secret, only whether one is set. */
@@ -160,7 +174,10 @@ export function publicConfig(c: PerformanceClientConfig) {
     brandId: c.brandId, name: c.name, dataSource: c.dataSource,
     ncDefinition: c.ncDefinition, ncWindowDays: c.ncWindowDays, revenueField: c.revenueField,
     regionMapping: c.regionMapping, syncEveryMinutes: c.syncEveryMinutes,
-    shopify: { shopDomain: c.shopify.shopDomain, tokenSet: Boolean(c.shopify.token) },
+    shopify: {
+      shopDomain: c.shopify.shopDomain, tokenSet: Boolean(c.shopify.token),
+      clientId: c.shopify.clientId, clientSecretSet: Boolean(c.shopify.clientSecret),
+    },
     meta: { tokenSet: Boolean(c.meta.token), accounts: c.meta.accounts },
     google: {
       developerTokenSet: Boolean(c.google.developerToken), clientId: c.google.clientId,
@@ -172,7 +189,7 @@ export function publicConfig(c: PerformanceClientConfig) {
       GOOG: Boolean(c.google.refreshToken) && c.google.accounts.length > 0,
       TT: false,
     } as Record<PlatformKey, boolean>,
-    shopifyConfigured: Boolean(c.shopify.shopDomain && c.shopify.token),
+    shopifyConfigured: shopifyConnected(c),
   };
 }
 export type PublicPerformanceConfig = ReturnType<typeof publicConfig>;

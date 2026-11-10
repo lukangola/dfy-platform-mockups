@@ -70,7 +70,7 @@ performanceRouter.put("/config", async (req, res) => {
   try {
     const brand = await loadBrand(req, res); if (!brand) return;
     const patch = (req.body ?? {}) as ConfigPatch;
-    const touchesSecret = ["shopifyToken", "metaToken", "googleDeveloperToken", "googleClientSecret", "googleRefreshToken"].some((k) => typeof (patch as Record<string, unknown>)[k] === "string" && (patch as Record<string, unknown>)[k] !== "");
+    const touchesSecret = ["shopifyToken", "shopifyClientSecret", "metaToken", "googleDeveloperToken", "googleClientSecret", "googleRefreshToken"].some((k) => typeof (patch as Record<string, unknown>)[k] === "string" && (patch as Record<string, unknown>)[k] !== "");
     if (touchesSecret && !hasSecretsKey()) {
       res.status(400).json({ error: "CONNECTIONS_KEY is not set in .env.local — credentials can't be stored encrypted. Generate one: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"" });
       return;
