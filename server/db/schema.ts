@@ -925,6 +925,11 @@ export const performanceClientConfigs = pgTable("performance_client_configs", {
   /** Dev Dashboard app (the only kind creatable since 2026): Client ID + secret, exchanged server-side for 24h tokens */
   shopifyClientId: text("shopify_client_id"),
   shopifyClientSecretEnc: text("shopify_client_secret_enc"),
+  /** Partner-account app installed through Shopify's install flow (authorization code grant): the
+   *  token lands in shopify_token_enc; newer apps get a 1-hour token + 90-day refresh token */
+  shopifyRefreshTokenEnc: text("shopify_refresh_token_enc"),
+  shopifyTokenExpiresAt: timestamp("shopify_token_expires_at", { withTimezone: true }),
+  shopifyInstalledAt: timestamp("shopify_installed_at", { withTimezone: true }),
   metaTokenEnc: text("meta_token_enc"),
   /** [{ id: "act_123", region: "NLBE" }] */
   metaAccounts: jsonb("meta_accounts").notNull().default(sql`'[]'::jsonb`),

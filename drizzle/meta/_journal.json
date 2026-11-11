@@ -232,6 +232,13 @@
       "when": 1794351168127,
       "tag": "0032_shopify_client_credentials",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1794393156506,
+      "tag": "0033_shopify_install_flow",
+      "breakpoints": true
     }
   ]
 }

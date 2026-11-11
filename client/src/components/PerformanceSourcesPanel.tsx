@@ -84,7 +84,23 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
   }, [config]);
 
   const [saving, setSaving] = useState(false);
-  const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(() => {
+    // landing here from /api/performance/shopify/callback
+    const q = new URLSearchParams(window.location.search);
+    const r = q.get("shopify");
+    if (!r) return null;
+    window.history.replaceState(null, "", window.location.pathname);
+    return r === "installed"
+      ? { kind: "ok", text: "Shopify app installed on the store — click Test connection." }
+      : { kind: "error", text: `Shopify install failed: ${q.get("message") ?? "unknown error"}` };
+  });
+  const appOrigin = window.location.origin;
+
+  /** Partner-app install flow: save what's typed, then let Shopify ask for the read-only scopes on the store. */
+  const installOnStore = async () => {
+    if (!(await save())) return;
+    window.location.assign(`/api/performance/shopify/install?brandId=${encodeURIComponent(brandId)}&origin=${encodeURIComponent(appOrigin)}`);
+  };
   const [testing, setTesting] = useState<string | null>(null);
   const [tests, setTests] = useState<Record<string, PerformanceTestResult>>({});
   const [advanced, setAdvanced] = useState(false);
@@ -187,7 +203,17 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
           <div><label htmlFor="shopClientId" className={label}>Client ID (Dev Dashboard app)</label><input id="shopClientId" className={input} value={form.shopifyClientId} onChange={set("shopifyClientId")} placeholder="from the app's Settings in dev.shopify.com" autoComplete="off" /></div>
           <SecretField id="shopClientSecret" name="Client secret (read-only scopes)" set={config.shopify.clientSecretSet} value={form.shopifyClientSecret} onChange={(v) => setForm((f) => ({ ...f, shopifyClientSecret: v }))} placeholder="shpss_…" />
           <p className="text-[10px] text-white/30 font-mono">dev.shopify.com → Create app → name it, leave the URLs as they are → Scopes: <span className="text-white/50">read_orders, read_customers, read_products, read_inventory</span> (nothing else, no write_*) → release the version → install it on the store (app and store in the same Shopify organization) → copy Client ID + Client secret from the app's Settings. Shopify shows no token any more: Inana swaps these for a 24-hour token itself and renews it once a day. Orders give revenue + new/returning customers; products + inventory give the unit costs for margin. Backfills from 1 Jan last year once, then polls only orders that changed.</p>
-          <SecretField id="shopToken" name="Legacy access token (only for apps made in the admin before 2026)" set={config.shopify.tokenSet} value={form.shopifyToken} onChange={(v) => setForm((f) => ({ ...f, shopifyToken: v }))} placeholder="shpat_… — leave empty for a Dev Dashboard app" />
+          <div className="rounded-md border border-white/[0.06] bg-white/[0.02] p-2 space-y-1.5">
+            <div className="text-[10px] font-mono text-white/50">App created under a Partner organization (agency account)? The exchange above is refused for a client's store; install it through Shopify instead:</div>
+            {config.shopify.installedAt && (
+              <div className="text-[10px] font-mono text-emerald-400">✓ installed via Shopify on {new Date(config.shopify.installedAt).toLocaleDateString("en-GB")} — token stored encrypted, renewed automatically</div>
+            )}
+            <button type="button" className={btnGhost} onClick={() => void installOnStore()} disabled={saving || !form.shopifyShopDomain || !form.shopifyClientId || !(form.shopifyClientSecret || config.shopify.clientSecretSet)}>
+              <Plug size={12} /> {config.shopify.installedAt ? "Reinstall on store" : "Install on store"}
+            </button>
+            <p className="text-[10px] text-white/30 font-mono">In the app's Home choose <span className="text-white/50">Custom distribution</span> for this store, and under Settings add the redirect URL <span className="text-white/50 select-all">{appOrigin}/api/performance/shopify/callback</span>. Then click Install on store: Shopify asks you to approve the four read scopes on the store and sends you back here. Shopify shows Partner-organization apps only the last 60 days of orders until "Read all orders" is approved for the app — Test connection reports this.</p>
+          </div>
+          <SecretField id="shopToken" name="Legacy access token (only for apps made in the admin before 2026)" set={config.shopify.tokenSet && !config.shopify.installedAt} value={form.shopifyToken} onChange={(v) => setForm((f) => ({ ...f, shopifyToken: v }))} placeholder="shpat_… — leave empty for a Dev Dashboard app" />
           <button type="button" className={btnGhost} onClick={() => void test("shopify")} disabled={testing !== null}>{testing === "shopify" ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} Test connection</button>
           <TestLine source="shopify" />
         </section>

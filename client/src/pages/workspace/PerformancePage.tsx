@@ -242,7 +242,7 @@ export default function PerformancePage() {
   const [sync, setSync] = useState<PerformanceSyncState[]>([]);
   const [running, setRunning] = useState(false);
   const [secretsKeySet, setSecretsKeySet] = useState(true);
-  const [showSources, setShowSources] = useState(false);
+  const [showSources, setShowSources] = useState(() => new URLSearchParams(window.location.search).has("shopify")); // back from the Shopify install flow
   const [data, setData] = useState<Dataset | null>(null);
   const [source, setSource] = useState<"mock" | "live" | null>(null);
   const [loading, setLoading] = useState(false);

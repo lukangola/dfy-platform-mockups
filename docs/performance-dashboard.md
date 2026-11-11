@@ -51,6 +51,19 @@ platform-table spend equals the Meta / Google / TikTok columns of the Total row.
    says "only the last 60 days", create the app from the store's organization or request
    "Read all orders" in the Partner Dashboard and add `read_all_orders`. No reports scope is
    needed: every number is computed from the raw orders, products and inventory items.
+
+   **App created under a Partner organization (agency account) instead?** The exchange above is
+   refused for a client's store ("same organization"). Use the install flow in the Shopify card:
+   in the app's Home choose **Custom distribution** for the store (irreversible, fine for an
+   agency app), under Settings add the redirect URL `http://localhost:3000/api/performance/shopify/callback`
+   (the panel shows the exact one for the origin you use), save shop domain + Client ID + secret in
+   Inana and click **Install on store**. Shopify asks you to approve the four read scopes on the
+   store and sends you back; Inana stores the token encrypted (newer apps: 1-hour token + 90-day
+   refresh token, renewed automatically ~10 minutes before expiry). Such apps only see the last
+   60 days of orders until "Read all orders" is approved for them — Test connection says so.
+   Pasting different app credentials later (e.g. the client's own app) drops the installed token;
+   run a full sync afterwards to backfill the history. Set `PUBLIC_APP_URL` in `.env.local` if the
+   app is reached under another origin than the browser reports.
 3. **Meta**: a System-user access token with only `ads_read` (Business settings → Users → System
    users → Generate token, tick `ads_read`, assign the ad accounts, no expiry), and the ad accounts
    with their region: `act_123:NLBE, act_456:UK`. Click **Test connection** (account name, time
@@ -72,10 +85,12 @@ platform-table spend equals the Meta / Google / TikTok columns of the Total row.
 
 - **Shopify**: a Dev Dashboard app installed on your own store, with the server exchanging its
   Client ID + secret for short-lived tokens, is Shopify's own flow for a single-store integration
-  (the admin "custom app" with a copyable token was retired on 1 Jan 2026). A browser OAuth login
-  would mean hosting a public callback URL and an install flow, for no security gain on your own
-  store. The app is scoped read-only on Shopify's side, so even a leaked secret could not change
-  anything, and the 24-hour tokens never leave the server (in-memory cache, never stored).
+  (the admin "custom app" with a copyable token was retired on 1 Jan 2026). For an app that lives
+  in a Partner organization and is installed on a client's store, Shopify requires its install
+  flow (authorization code grant) instead; the card offers that too, and the resulting token is
+  stored encrypted with its refresh token. The app is scoped read-only on Shopify's side, so even
+  a leaked secret could not change anything, and the 24-hour tokens from the exchange never leave
+  the server (in-memory cache, never stored).
 - **Meta**: a System-user token is long-lived and belongs to the business, not to a person's
   login, and carries only `ads_read`. An OAuth "Log in with Facebook" would give a 60-day token tied
   to one person and require a Meta app review for `ads_read`.

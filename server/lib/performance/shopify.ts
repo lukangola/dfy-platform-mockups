@@ -24,6 +24,7 @@ import { eq, sql } from "drizzle-orm";
 import { db, schema } from "../db.js";
 import type { PerformanceClientConfig } from "./config.js";
 import { backfillStart, sleep } from "./time.js";
+import { refreshShopifyInstallToken, storeShopifyTokens } from "./shopifyOAuth.js";
 import type { RegionKey } from "../../../shared/performance/engine.js";
 
 export const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION ?? "2025-01";
@@ -57,17 +58,18 @@ function shopHost(domain: string): string {
 }
 
 /**
- * Access token for the shop. Two kinds of app:
- *  - Dev Dashboard app (the only kind Shopify lets you create since 1 Jan 2026): no token is shown
- *    anywhere; its Client ID + Client secret are exchanged here for a 24-hour token (client
- *    credentials grant — works when the app and the store are in the same Shopify organization).
- *    Cached per brand in memory and renewed ~10 minutes before expiry: one small request a day,
- *    never one per sync.
+ * Access token for the shop. Three ways in:
+ *  - Dev Dashboard app in the store's own organization: no token is shown anywhere; its Client ID
+ *    + Client secret are exchanged here for a 24-hour token (client credentials grant). Cached per
+ *    brand in memory and renewed ~10 minutes before expiry: one small request a day, never one per sync.
+ *  - Partner-organization app installed on the store through the install flow (shopifyOAuth.ts):
+ *    the stored token is used; if it came with an expiry + refresh token it is refreshed ~10 minutes
+ *    before expiry and the new pair is persisted.
  *  - Legacy custom app (created in the admin before 2026): its static `shpat_` token is used as is.
- * `fresh` forces a new exchange (after a 401, or when "Test connection" validates typed credentials).
+ * `fresh` forces a new exchange/refresh (after a 401, or when "Test connection" validates credentials).
  */
 type TokenSource = (fresh?: boolean) => Promise<string>;
-const tokenCache = new Map<string, { token: string; expiresAt: number }>();
+const tokenCache = new Map<string, { token: string; expiresAt: number; refreshToken?: string | null }>();
 const TOKEN_RENEW_MARGIN_MS = 10 * 60_000;
 
 export function forgetShopifyToken(brandId: string): void {
@@ -75,9 +77,18 @@ export function forgetShopifyToken(brandId: string): void {
 }
 
 async function shopifyAccessToken(config: PerformanceClientConfig, fresh = false): Promise<string> {
-  const { shopDomain, token, clientId, clientSecret } = config.shopify;
+  const { shopDomain, token, clientId, clientSecret, refreshToken, tokenExpiresAt } = config.shopify;
   if (!shopDomain) throw new Error("Shopify shop domain is required");
-  if (token) return token;
+  if (token) {
+    if (!refreshToken || !tokenExpiresAt || !clientId || !clientSecret) return token; // static token
+    const hit = tokenCache.get(config.brandId);
+    if (!fresh && hit && hit.expiresAt - Date.now() > TOKEN_RENEW_MARGIN_MS) return hit.token;
+    if (!fresh && !hit && tokenExpiresAt.getTime() - Date.now() > TOKEN_RENEW_MARGIN_MS) return token;
+    const set = await refreshShopifyInstallToken(shopHost(shopDomain), clientId, clientSecret, hit?.refreshToken ?? refreshToken);
+    await storeShopifyTokens(config.brandId, set);
+    tokenCache.set(config.brandId, { token: set.token, expiresAt: set.expiresAt?.getTime() ?? Date.now() + 86_400_000, refreshToken: set.refreshToken });
+    return set.token;
+  }
   if (!clientId || !clientSecret) {
     throw new Error("Shopify is not connected: paste the app's Client ID and Client secret (Dev Dashboard) — or, for a legacy custom app, its access token");
   }

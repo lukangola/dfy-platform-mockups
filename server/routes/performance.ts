@@ -7,6 +7,8 @@
  *   POST /api/performance/sync?brandId=[&full=1] → 202 { started }      run a sync now (full = wipe + backfill)
  *   GET  /api/performance/status?brandId=        → { sync[], running }  poll while a sync runs
  *   GET  /api/performance/hours?brandId=&from=&to= → { dataset, source } hourly buckets in [from, to]
+ *   GET  /api/performance/shopify/install?brandId=&origin= → 302 to Shopify's authorize page (Partner app install flow)
+ *   GET  /api/performance/shopify/callback?code&hmac&shop&state → stores the token, 302 back to the dashboard
  *
  * Feature-flagged: in production the router answers 404 unless FEATURE_PERFORMANCE=1.
  */
@@ -19,7 +21,8 @@ import { canSeeBrand } from "../lib/brandAccess.js";
 import { getClientConfig, publicConfig, saveClientConfig, type ConfigPatch } from "../lib/performance/config.js";
 import { getDataSource } from "../lib/performance/source.js";
 import { clearBrandData, getSyncStates, isSyncRunning, runBrandSync } from "../lib/performance/sync.js";
-import { testShopify } from "../lib/performance/shopify.js";
+import { REQUIRED_SCOPES, forgetShopifyToken, testShopify } from "../lib/performance/shopify.js";
+import { createShopifyInstallUrl, exchangeShopifyCode, shopifyShopHost, storeShopifyTokens, takeShopifyInstallState, verifyShopifyCallbackHmac } from "../lib/performance/shopifyOAuth.js";
 import { testMeta } from "../lib/performance/meta.js";
 import { testGoogle } from "../lib/performance/googleAds.js";
 import { hasSecretsKey } from "../lib/performance/secrets.js";
@@ -79,6 +82,51 @@ performanceRouter.put("/config", async (req, res) => {
     const config = await getClientConfig(brand.id, brand.name);
     res.json({ config: publicConfig(config) });
   } catch (err) { fail(res, err); }
+});
+
+/**
+ * Shopify install flow for an app that lives in a Partner organization (see shopifyOAuth.ts).
+ * `origin` is the browser's origin (the app is reached through the Vite proxy, so the API can't
+ * derive it from the request); it must match the redirect URL entered in the app's settings.
+ */
+performanceRouter.get("/shopify/install", async (req, res) => {
+  try {
+    const brand = await loadBrand(req, res); if (!brand) return;
+    const config = await getClientConfig(brand.id, brand.name);
+    const { shopDomain, clientId, clientSecret } = config.shopify;
+    if (!shopDomain || !clientId || !clientSecret) { res.status(400).json({ error: "Save the shop domain, Client ID and Client secret first" }); return; }
+    const origin = process.env.PUBLIC_APP_URL ?? (typeof req.query.origin === "string" ? req.query.origin : "");
+    res.redirect(302, createShopifyInstallUrl({ brandId: brand.id, shopDomain, clientId, scopes: REQUIRED_SCOPES, origin }));
+  } catch (err) { fail(res, err); }
+});
+
+performanceRouter.get("/shopify/callback", async (req, res) => {
+  const q = req.query as Record<string, unknown>;
+  const pending = takeShopifyInstallState(typeof q.state === "string" ? q.state : "");
+  if (!pending) {
+    res.status(400).type("text/plain").send("This Shopify install link has expired or was already used. Go back to Inana and click \"Install on store\" again.");
+    return;
+  }
+  const back = (params: Record<string, string>) => res.redirect(302, `${pending.origin}/workspace/performance?${new URLSearchParams(params).toString()}`);
+  try {
+    const auth = req.auth!;
+    const [brand] = await db.select().from(schema.brands).where(eq(schema.brands.id, pending.brandId)).limit(1);
+    if (!brand || brand.teamId !== auth.team.id || !(await canSeeBrand(auth.user.id, auth.role, brand.id))) throw new Error("Brand not found");
+    const config = await getClientConfig(brand.id, brand.name);
+    const { shopDomain, clientId, clientSecret } = config.shopify;
+    if (!shopDomain || !clientId || !clientSecret) throw new Error("Shopify credentials were changed while installing — save them and try again");
+    if (!verifyShopifyCallbackHmac(q, clientSecret)) throw new Error("Shopify's callback signature did not match the Client secret");
+    const shop = typeof q.shop === "string" ? q.shop.toLowerCase() : "";
+    if (shop !== pending.shop || shop !== shopifyShopHost(shopDomain)) throw new Error(`The install came back from ${shop || "an unknown shop"}, expected ${pending.shop}`);
+    const code = typeof q.code === "string" ? q.code : "";
+    if (!code) throw new Error("Shopify did not return an authorization code");
+    const tokens = await exchangeShopifyCode(shop, clientId, clientSecret, code);
+    await storeShopifyTokens(brand.id, tokens, true);
+    forgetShopifyToken(brand.id);
+    back({ shopify: "installed" });
+  } catch (err) {
+    back({ shopify: "error", message: (err instanceof Error ? err.message : String(err)).slice(0, 300) });
+  }
 });
 
 performanceRouter.post("/test", async (req, res) => {

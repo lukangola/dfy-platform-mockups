@@ -2546,7 +2546,11 @@ export type PerformanceConfig = {
   revenueField: "total" | "subtotal";
   regionMapping: Record<string, PerformanceRegion>;
   syncEveryMinutes: number;
-  shopify: { shopDomain: string | null; tokenSet: boolean; clientId: string | null; clientSecretSet: boolean };
+  shopify: {
+    shopDomain: string | null; tokenSet: boolean; clientId: string | null; clientSecretSet: boolean;
+    /** set when the token came from Shopify's install flow (Partner app); ISO date */
+    installedAt: string | null;
+  };
   meta: { tokenSet: boolean; accounts: PerformanceAccountMap[] };
   google: {
     developerTokenSet: boolean; clientId: string | null; clientSecretSet: boolean; refreshTokenSet: boolean;

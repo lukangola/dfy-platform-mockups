@@ -30,7 +30,11 @@ export interface PerformanceClientConfig {
   syncEveryMinutes: number;
   mockSeed: number;
   /** token = legacy custom app (pre-2026); clientId + clientSecret = Dev Dashboard app (exchanged for 24h tokens server-side) */
-  shopify: { shopDomain: string | null; token: string | null; clientId: string | null; clientSecret: string | null };
+  shopify: {
+    shopDomain: string | null; token: string | null; clientId: string | null; clientSecret: string | null;
+    /** install-flow extras (Partner app): refresh token + expiry of `token`, and when it was installed */
+    refreshToken: string | null; tokenExpiresAt: Date | null; installedAt: Date | null;
+  };
   meta: { token: string | null; accounts: AccountMap[] };
   google: {
     developerToken: string | null; clientId: string | null; clientSecret: string | null;
@@ -57,7 +61,7 @@ function defaults(brandId: string, name: string): PerformanceClientConfig {
     regionMapping: { ...DEFAULT_REGION_MAPPING },
     syncEveryMinutes: 10,
     mockSeed: seedFromId(brandId),
-    shopify: { shopDomain: null, token: null, clientId: null, clientSecret: null },
+    shopify: { shopDomain: null, token: null, clientId: null, clientSecret: null, refreshToken: null, tokenExpiresAt: null, installedAt: null },
     meta: { token: null, accounts: [] },
     google: { developerToken: null, clientId: null, clientSecret: null, refreshToken: null, loginCustomerId: null, accounts: [] },
   };
@@ -93,6 +97,7 @@ export async function getClientConfig(brandId: string, brandName: string): Promi
     shopify: {
       shopDomain: row.shopifyShopDomain, token: decryptSecret(row.shopifyTokenEnc),
       clientId: row.shopifyClientId, clientSecret: decryptSecret(row.shopifyClientSecretEnc),
+      refreshToken: decryptSecret(row.shopifyRefreshTokenEnc), tokenExpiresAt: row.shopifyTokenExpiresAt, installedAt: row.shopifyInstalledAt,
     },
     meta: { token: decryptSecret(row.metaTokenEnc), accounts: parseAccounts(row.metaAccounts) },
     google: {
@@ -147,6 +152,18 @@ export async function saveClientConfig(brandId: string, patch: ConfigPatch): Pro
   const st = secretSet(patch.shopifyToken); if (st.set) set.shopifyTokenEnc = st.value;
   if (patch.shopifyClientId !== undefined) set.shopifyClientId = patch.shopifyClientId?.trim() || null;
   const sc = secretSet(patch.shopifyClientSecret); if (sc.set) set.shopifyClientSecretEnc = sc.value;
+  // A token pasted by hand, or new app credentials / another shop, supersedes an earlier install-flow token.
+  if (st.set || sc.set || set.shopifyClientId !== undefined || set.shopifyShopDomain !== undefined) {
+    const [cur] = await db.select({ clientId: schema.performanceClientConfigs.shopifyClientId, shop: schema.performanceClientConfigs.shopifyShopDomain, installedAt: schema.performanceClientConfigs.shopifyInstalledAt })
+      .from(schema.performanceClientConfigs).where(eq(schema.performanceClientConfigs.brandId, brandId)).limit(1);
+    const changed = st.set || sc.set
+      || (set.shopifyClientId !== undefined && set.shopifyClientId !== (cur?.clientId ?? null))
+      || (set.shopifyShopDomain !== undefined && set.shopifyShopDomain !== (cur?.shop ?? null));
+    if (changed && cur?.installedAt) {
+      if (!st.set) set.shopifyTokenEnc = null;
+      set.shopifyRefreshTokenEnc = null; set.shopifyTokenExpiresAt = null; set.shopifyInstalledAt = null;
+    }
+  }
   const mt = secretSet(patch.metaToken); if (mt.set) set.metaTokenEnc = mt.value;
   if (patch.metaAccounts) set.metaAccounts = parseAccounts(patch.metaAccounts);
   const gd = secretSet(patch.googleDeveloperToken); if (gd.set) set.googleDeveloperTokenEnc = gd.value;
@@ -177,6 +194,7 @@ export function publicConfig(c: PerformanceClientConfig) {
     shopify: {
       shopDomain: c.shopify.shopDomain, tokenSet: Boolean(c.shopify.token),
       clientId: c.shopify.clientId, clientSecretSet: Boolean(c.shopify.clientSecret),
+      installedAt: c.shopify.installedAt ? c.shopify.installedAt.toISOString() : null,
     },
     meta: { tokenSet: Boolean(c.meta.token), accounts: c.meta.accounts },
     google: {
