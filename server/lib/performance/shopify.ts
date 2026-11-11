@@ -161,8 +161,42 @@ async function shopifyGraphql<T>(host: string, auth: TokenSource, query: string,
 }
 
 /** Quick credential check used by the UI's "Test connection": shop + which scopes the token really has. */
+/** Shopify only returns the last 60 days of orders to apps without `read_all_orders`; probe just past that. */
+const ORDER_HISTORY_PROBE_DAYS = 61;
+
+/**
+ * Can this app see orders older than Shopify's 60-day default window? Count is not
+ * subject to the window, the list is — so "count > 0 but list empty" means the app is
+ * limited (Partner-account app without read_all_orders). Two tiny requests, never fatal.
+ */
+async function probeOrderHistory(host: string, auth: TokenSource): Promise<ShopifyHistoryProbe | null> {
+  try {
+    const cutoff = new Date(Date.now() - ORDER_HISTORY_PROBE_DAYS * 86_400_000).toISOString();
+    const q = `status=any&created_at_max=${encodeURIComponent(cutoff)}`;
+    const base = `https://${host}/admin/api/${SHOPIFY_API_VERSION}/orders`;
+    const c = await shopifyGet(`${base}/count.json?${q}`, auth);
+    const olderCount = Number((c.body as { count?: number }).count ?? 0);
+    if (!olderCount) return { cutoff, olderCount: 0, olderReachable: true };
+    const l = await shopifyGet(`${base}.json?${q}&limit=1&fields=id`, auth);
+    const olderReachable = ((l.body as { orders?: unknown[] }).orders ?? []).length > 0;
+    return { cutoff, olderCount, olderReachable };
+  } catch {
+    return null; // the probe is advisory; a failure here must not fail the connection test
+  }
+}
+
+export interface ShopifyHistoryProbe {
+  /** ISO instant 61 days ago — orders created before it are "older" */
+  cutoff: string;
+  /** orders older than the cutoff, per the (unrestricted) count endpoint */
+  olderCount: number;
+  /** false = the list endpoint hides them: the app only sees the last 60 days */
+  olderReachable: boolean;
+}
+
 export async function testShopify(config: PerformanceClientConfig): Promise<{
   ok: true; shop: string; currency: string | null; scopes: string[]; missingScopes: string[]; writeScopes: string[];
+  history: ShopifyHistoryProbe | null;
 }> {
   const { shopDomain } = config.shopify;
   if (!shopDomain) throw new Error("Shopify shop domain is required");
@@ -177,10 +211,12 @@ export async function testShopify(config: PerformanceClientConfig): Promise<{
     scopes = ((r.body as { access_scopes?: Array<{ handle: string }> }).access_scopes ?? []).map((x) => x.handle).sort();
   } catch { /* older tokens may not expose scopes — not fatal */ }
   const have = new Set(scopes);
+  const history = await probeOrderHistory(host, auth);
   return {
     ok: true, shop: shop?.name ?? host, currency: shop?.currency ?? null, scopes,
     missingScopes: scopes.length ? REQUIRED_SCOPES.filter((sc) => !have.has(sc)) : [],
     writeScopes: scopes.filter((sc) => sc.startsWith("write_")),
+    history,
   };
 }
 

@@ -2596,6 +2596,8 @@ export type PerformanceTestResult =
       ok: true; shop?: string; currency?: string | null;
       /** Shopify: granted scopes, the read scopes the dashboard still needs, and any write scopes the token carries */
       scopes?: string[]; missingScopes?: string[]; writeScopes?: string[];
+      /** Shopify: can the app see orders older than Shopify's 60-day default window? null = probe failed */
+      history?: { cutoff: string; olderCount: number; olderReachable: boolean } | null;
       accounts?: Array<{ id: string; name: string; timezone: string; currency: string }>;
     }
   | { ok: false; error: string };

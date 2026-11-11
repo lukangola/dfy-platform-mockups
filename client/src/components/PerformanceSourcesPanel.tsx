@@ -143,11 +143,17 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
         {r.accounts?.map((a) => <div key={a.id} className="text-white/50">{a.name} · {a.id} · {a.timezone}{a.currency ? ` · ${a.currency}` : ""}</div>)}
         {r.scopes && r.scopes.length > 0 && <div className="text-white/50 break-words">scopes: {r.scopes.join(", ")}</div>}
         {r.missingScopes && r.missingScopes.length > 0 && (
-          <div className="text-amber-300">missing {r.missingScopes.join(", ")} — {r.missingScopes.some((x) => x === "read_products" || x === "read_inventory") ? "cost of goods can't be loaded, margin would show 100%" : "orders / customers can't be read"}. Add the scope on the custom app, reinstall, paste the new token.</div>
+          <div className="text-amber-300">missing {r.missingScopes.join(", ")} — {r.missingScopes.some((x) => x === "read_products" || x === "read_inventory") ? "cost of goods can't be loaded, margin would show 100%" : "orders / customers can't be read"}. Add the scope on the app, release a new version, approve it on the store, test again.</div>
         )}
         {r.writeScopes && r.writeScopes.length > 0 && (
-          <div className="text-amber-300">this token can also write ({r.writeScopes.join(", ")}). The dashboard never writes, but a read-only token is safer — remove the write_* scopes on the custom app.</div>
+          <div className="text-amber-300">this app can also write ({r.writeScopes.join(", ")}). The dashboard never writes, but read-only is safer — remove the write_* scopes on the app.</div>
         )}
+        {r.history && (r.history.olderCount === 0
+          ? <div className="text-white/50">history: no orders older than 60 days on this store yet</div>
+          : r.history.olderReachable
+            ? <div className="text-white/50">history: full — {r.history.olderCount.toLocaleString()} orders older than 60 days are reachable</div>
+            : <div className="text-amber-300">history: only the last 60 days of orders are reachable ({r.history.olderCount.toLocaleString()} older orders are hidden). Shopify limits apps created under a Partner account to 60 days. Create the app from the store's own organization instead, or request "Read all orders" in the Partner Dashboard and add read_all_orders to the app.</div>)}
+        {r.history === null && <div className="text-white/50">history: could not check how far back orders are readable</div>}
       </div>
     );
   };

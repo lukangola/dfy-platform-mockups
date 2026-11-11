@@ -44,7 +44,13 @@ platform-table spend equals the Meta / Google / TikTok columns of the Total row.
    client's store the client, or someone with the App developer role there, creates it). Legacy
    custom apps created in the admin before 2026 still work: paste their `shpat_` token in the
    legacy field instead. Click **Test connection** — it exchanges the credentials, shows the shop,
-   the currency and the scopes really granted, and warns about missing read scopes or any write scope.
+   the currency and the scopes really granted, warns about missing read scopes or any write scope,
+   and checks the order history: Shopify shows apps created under a *Partner* account only the
+   last 60 days of orders (the dashboard backfills from 1 Jan last year). An app created from the
+   store's own organization sees everything, so the test line should read "history: full". If it
+   says "only the last 60 days", create the app from the store's organization or request
+   "Read all orders" in the Partner Dashboard and add `read_all_orders`. No reports scope is
+   needed: every number is computed from the raw orders, products and inventory items.
 3. **Meta**: a System-user access token with only `ads_read` (Business settings → Users → System
    users → Generate token, tick `ads_read`, assign the ad accounts, no expiry), and the ad accounts
    with their region: `act_123:NLBE, act_456:UK`. Click **Test connection** (account name, time
