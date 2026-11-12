@@ -916,8 +916,10 @@ export const performanceClientConfigs = pgTable("performance_client_configs", {
   ncWindowDays: integer("nc_window_days").notNull().default(365),
   /** total | subtotal — which Shopify price is "revenue" */
   revenueField: text("revenue_field").notNull().default("total"),
-  /** ISO-2 country → region key; null = default (NL/BE→NLBE, GB→UK, US→USA, else OTH) */
+  /** @deprecated superseded by `regions`; kept so the column history stays linear */
   regionMapping: jsonb("region_mapping"),
+  /** named regions in display order, [{ label: "NL/BE", countries: ["NL","BE"] }]; "Other" is implied last; null = default (NL/BE, UK, USA) */
+  regions: jsonb("regions"),
   syncEveryMinutes: integer("sync_every_minutes").notNull().default(10),
   shopifyShopDomain: text("shopify_shop_domain"),
   /** legacy custom app (created in the admin before 2026): its static Admin API access token */
@@ -931,7 +933,7 @@ export const performanceClientConfigs = pgTable("performance_client_configs", {
   shopifyTokenExpiresAt: timestamp("shopify_token_expires_at", { withTimezone: true }),
   shopifyInstalledAt: timestamp("shopify_installed_at", { withTimezone: true }),
   metaTokenEnc: text("meta_token_enc"),
-  /** [{ id: "act_123", region: "NLBE" }] */
+  /** [{ id: "act_123", region: "NLBE" }] — region = key of one of the brand's regions or OTH */
   metaAccounts: jsonb("meta_accounts").notNull().default(sql`'[]'::jsonb`),
   googleDeveloperTokenEnc: text("google_developer_token_enc"),
   googleClientId: text("google_client_id"),

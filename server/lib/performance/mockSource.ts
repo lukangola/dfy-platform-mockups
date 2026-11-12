@@ -6,7 +6,7 @@
  * growth over the window, NL/BE 48% of revenue, Meta ~94% of spend, TikTok only
  * in NL/BE + UK, USA intentionally marginal.
  */
-import { HOUR, PLATFORMS, REGIONS, type Dataset, type HourBucket, type PlatformKey, type RegionKey } from "../../../shared/performance/engine.js";
+import { DEFAULT_REGIONS, HOUR, PLATFORMS, type Dataset, type HourBucket, type PlatformKey, type RegionKey } from "../../../shared/performance/engine.js";
 import type { DataSource } from "./source.js";
 
 function mulberry32(seed: number) {
@@ -68,7 +68,7 @@ export function buildMockData(seed: number, nowMs: number): Dataset {
       const ncR = ncO * NC_AOV[r] * (0.92 + 0.16 * rng());
       const rcR = rcO * RC_AOV[r] * (0.92 + 0.16 * rng());
       const cogs = (ncR + rcR) * COGS_RATE[r] * (0.97 + 0.06 * rng());
-      c[REGIONS[r].key] = [ncO, Math.round(ncR * 100) / 100, rcO, Math.round(rcR * 100) / 100, Math.round(cogs * 100) / 100];
+      c[DEFAULT_REGIONS[r].key] = [ncO, Math.round(ncR * 100) / 100, rcO, Math.round(rcR * 100) / 100, Math.round(cogs * 100) / 100];
     }
 
     const s = {} as Record<PlatformKey, [number, number, number, number]>;
@@ -82,7 +82,7 @@ export function buildMockData(seed: number, nowMs: number): Dataset {
     }
     hours[i] = { t, c, s };
   }
-  return { hours, startMs, now: nowMs, nowHourMs: nowHour.getTime() };
+  return { regions: [...DEFAULT_REGIONS], hours, startMs, now: nowMs, nowHourMs: nowHour.getTime() };
 }
 
 /** Cache: one full series per seed per wall-clock hour. The last (partial) bucket is rescaled on read. */
@@ -106,6 +106,6 @@ export class MockSource implements DataSource {
     const i0 = Math.max(0, Math.floor((fromMs - full.startMs) / HOUR));
     const i1 = Math.min(full.hours.length - 1, Math.floor((Math.min(toMs, now) - full.startMs) / HOUR));
     const hours = i1 >= i0 ? full.hours.slice(i0, i1 + 1) : [];
-    return { hours, startMs: full.startMs + i0 * HOUR, now, nowHourMs: full.nowHourMs };
+    return { regions: full.regions, hours, startMs: full.startMs + i0 * HOUR, now, nowHourMs: full.nowHourMs };
   }
 }

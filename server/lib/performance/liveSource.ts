@@ -6,19 +6,17 @@
  */
 import { sql } from "drizzle-orm";
 import { db } from "../db.js";
-import { HOUR, PLATFORMS, REGIONS, type Dataset, type HourBucket, type PlatformKey, type RegionKey } from "../../../shared/performance/engine.js";
-import type { PerformanceClientConfig } from "./config.js";
+import { HOUR, PLATFORMS, type Dataset, type HourBucket, type PlatformKey, type RegionCell, type RegionDef } from "../../../shared/performance/engine.js";
+import { regionDefs, type PerformanceClientConfig } from "./config.js";
 import type { DataSource } from "./source.js";
 
-const REGION_SET = new Set<string>(REGIONS.map((r) => r.key));
 const PLATFORM_SET = new Set<string>(PLATFORMS.map((p) => p.key));
 
-function emptyBucket(t: number): HourBucket {
-  return {
-    t,
-    c: { NLBE: [0, 0, 0, 0, 0], UK: [0, 0, 0, 0, 0], USA: [0, 0, 0, 0, 0], OTH: [0, 0, 0, 0, 0] },
-    s: { META: [0, 0, 0, 0], GOOG: [0, 0, 0, 0], TT: [0, 0, 0, 0] },
-  };
+function emptyBucket(t: number, regions: RegionDef[]): HourBucket {
+  const c: Record<string, RegionCell> = {};
+  for (const r of regions) c[r.key] = [0, 0, 0, 0, 0];
+  const zeros = () => regions.map(() => 0);
+  return { t, c, s: { META: zeros(), GOOG: zeros(), TT: zeros() } };
 }
 
 export class LiveSource implements DataSource {
@@ -30,7 +28,9 @@ export class LiveSource implements DataSource {
     const startMs = Math.floor(fromMs / HOUR) * HOUR;
     const endHourMs = Math.floor(Math.min(toMs, now) / HOUR) * HOUR;
     const n = endHourMs >= startMs ? Math.floor((endHourMs - startMs) / HOUR) + 1 : 0;
-    const hours: HourBucket[] = Array.from({ length: n }, (_, i) => emptyBucket(startMs + i * HOUR));
+    const regions = regionDefs(this.config);
+    const regionIndex = new Map(regions.map((r, i) => [r.key, i]));
+    const hours: HourBucket[] = Array.from({ length: n }, (_, i) => emptyBucket(startMs + i * HOUR, regions));
     const idx = (t: number) => Math.floor((t - startMs) / HOUR);
     const from = new Date(startMs), to = new Date(endHourMs + HOUR);
     const revenueCol = this.config.revenueField === "subtotal" ? sql`COALESCE(subtotal_price, total_price)` : sql`total_price`;
@@ -45,8 +45,8 @@ export class LiveSource implements DataSource {
     `);
     for (const r of sales.rows) {
       const i = idx(new Date(r.h).getTime());
-      if (i < 0 || i >= n || !REGION_SET.has(r.region)) continue;
-      const cell = hours[i].c[r.region as RegionKey];
+      if (i < 0 || i >= n || !regionIndex.has(r.region)) continue;
+      const cell = hours[i].c[r.region];
       const orders = Number(r.n), rev = Math.round(Number(r.rev) * 100) / 100;
       if (r.nc) { cell[0] += orders; cell[1] += rev; } else { cell[2] += orders; cell[3] += rev; }
       cell[4] += Math.round(Number(r.cogs) * 100) / 100;
@@ -70,11 +70,11 @@ export class LiveSource implements DataSource {
     `);
     for (const r of spend.rows) {
       const i = idx(new Date(r.hour).getTime());
-      if (i < 0 || i >= n || !PLATFORM_SET.has(r.platform) || !REGION_SET.has(r.region)) continue;
-      const ri = REGIONS.findIndex((x) => x.key === r.region);
+      const ri = regionIndex.get(r.region);
+      if (i < 0 || i >= n || !PLATFORM_SET.has(r.platform) || ri === undefined) continue;
       hours[i].s[r.platform as PlatformKey][ri] += Math.round(Number(r.spend) * 100) / 100;
     }
 
-    return { hours, startMs, now, nowHourMs: Math.floor(now / HOUR) * HOUR, costCoverage };
+    return { regions, hours, startMs, now, nowHourMs: Math.floor(now / HOUR) * HOUR, costCoverage };
   }
 }

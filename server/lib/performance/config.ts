@@ -10,7 +10,7 @@
  */
 import { eq, sql } from "drizzle-orm";
 import { db, schema } from "../db.js";
-import type { PlatformKey, RegionKey } from "../../../shared/performance/engine.js";
+import { DEFAULT_REGIONS, OTHER_REGION, flagFor, regionKeyFor, type PlatformKey, type RegionDef, type RegionKey } from "../../../shared/performance/engine.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { forgetShopifyToken } from "./shopify.js";
 
@@ -18,6 +18,10 @@ export type DataSourceKind = "mock" | "live";
 export type NcDefinition = "first_ever" | "window_days";
 export type RevenueField = "total" | "subtotal";
 export interface AccountMap { id: string; region: RegionKey }
+/** A named region: the countries (ISO-3166 alpha-2) that roll up into it. Everything else is "Other". */
+export interface RegionConfig extends RegionDef { countries: string[] }
+/** What the UI sends: label + countries (key and flag are derived). */
+export interface RegionInput { label: string; countries: string[] }
 
 export interface PerformanceClientConfig {
   brandId: string;
@@ -26,6 +30,9 @@ export interface PerformanceClientConfig {
   ncDefinition: NcDefinition;
   ncWindowDays: number;
   revenueField: RevenueField;
+  /** named regions in display order (without "Other") */
+  regions: RegionConfig[];
+  /** derived: ISO-2 country → region key (countries not listed → OTH) */
   regionMapping: Record<string, RegionKey>;
   syncEveryMinutes: number;
   mockSeed: number;
@@ -42,8 +49,54 @@ export interface PerformanceClientConfig {
   };
 }
 
-export const DEFAULT_REGION_MAPPING: Record<string, RegionKey> = { NL: "NLBE", BE: "NLBE", GB: "UK", US: "USA" };
-const REGION_KEYS: RegionKey[] = ["NLBE", "UK", "USA", "OTH"];
+export const DEFAULT_REGION_INPUT: RegionInput[] = [
+  { label: "NL/BE", countries: ["NL", "BE"] }, { label: "UK", countries: ["GB"] }, { label: "USA", countries: ["US"] },
+];
+export const MAX_REGIONS = 8;
+
+/**
+ * Validate + normalise regions from the UI or the DB. Keys come from the labels, flags from the
+ * first country. Throws on duplicates, an empty label, a label that collides with "Other", or
+ * more than MAX_REGIONS — the panel shows the message.
+ */
+export function parseRegions(v: unknown): RegionConfig[] {
+  if (!Array.isArray(v)) throw new Error("regions must be a list");
+  if (v.length > MAX_REGIONS) throw new Error(`at most ${MAX_REGIONS} regions (plus Other)`);
+  const out: RegionConfig[] = [];
+  const seenCountry = new Map<string, string>();
+  for (const x of v as Array<Record<string, unknown>>) {
+    const label = typeof x?.label === "string" ? x.label.trim().replace(/\s+/g, " ").slice(0, 24) : "";
+    const key = regionKeyFor(label);
+    if (!label || !key) throw new Error("every region needs a label with letters or digits");
+    if (key === OTHER_REGION.key || /^OTHER$/i.test(label)) throw new Error(`"${label}" is reserved for the catch-all region`);
+    if (out.some((r) => r.key === key)) throw new Error(`region "${label}" appears twice (same key ${key})`);
+    const raw = Array.isArray(x.countries) ? x.countries : typeof x.countries === "string" ? x.countries.split(/[,\s]+/) : [];
+    const countries: string[] = [];
+    for (const c of raw) {
+      const cc = String(c ?? "").trim().toUpperCase();
+      if (!cc) continue;
+      if (!/^[A-Z]{2}$/.test(cc)) throw new Error(`"${cc}" is not a 2-letter country code (region ${label})`);
+      const owner = seenCountry.get(cc);
+      if (owner && owner !== key) throw new Error(`${cc} is in both ${owner} and ${key}`);
+      if (!countries.includes(cc)) { countries.push(cc); seenCountry.set(cc, key); }
+    }
+    if (!countries.length) throw new Error(`region "${label}" has no countries`);
+    out.push({ key, label, flag: flagFor(countries[0]), countries });
+  }
+  return out;
+}
+
+export function regionMappingOf(regions: RegionConfig[]): Record<string, RegionKey> {
+  const m: Record<string, RegionKey> = {};
+  for (const r of regions) for (const cc of r.countries) m[cc] = r.key;
+  return m;
+}
+
+/** Display list for datasets and the UI: the named regions, then "Other". */
+export function regionDefs(c: Pick<PerformanceClientConfig, "regions">): RegionDef[] {
+  return [...c.regions.map(({ key, label, flag }) => ({ key, label, flag })), OTHER_REGION];
+}
+const REGION_KEY_SET = (regions: RegionConfig[]) => new Set<string>([...regions.map((r) => r.key), OTHER_REGION.key]);
 
 /** Stable small integer from a brand id — different brands, different mock series. */
 function seedFromId(id: string): number {
@@ -54,11 +107,12 @@ function seedFromId(id: string): number {
 }
 
 function defaults(brandId: string, name: string): PerformanceClientConfig {
+  const regions = parseRegions(DEFAULT_REGION_INPUT);
   return {
     brandId, name,
     dataSource: process.env.PERFORMANCE_DATA_SOURCE === "live" ? "live" : "mock",
     ncDefinition: "first_ever", ncWindowDays: 365, revenueField: "total",
-    regionMapping: { ...DEFAULT_REGION_MAPPING },
+    regions, regionMapping: regionMappingOf(regions),
     syncEveryMinutes: 10,
     mockSeed: seedFromId(brandId),
     shopify: { shopDomain: null, token: null, clientId: null, clientSecret: null, refreshToken: null, tokenExpiresAt: null, installedAt: null },
@@ -67,43 +121,45 @@ function defaults(brandId: string, name: string): PerformanceClientConfig {
   };
 }
 
-function parseAccounts(v: unknown): AccountMap[] {
+/** Account → region pairs; a region that is not one of the brand's keys (or OTH) is dropped. */
+function parseAccounts(v: unknown, regions: RegionConfig[]): AccountMap[] {
   if (!Array.isArray(v)) return [];
+  const keys = REGION_KEY_SET(regions);
   return v.flatMap((x) => {
     const id = typeof x?.id === "string" ? x.id.trim() : "";
-    const region = REGION_KEYS.includes(x?.region) ? (x.region as RegionKey) : null;
-    return id && region ? [{ id, region }] : [];
+    const region = typeof x?.region === "string" ? x.region.toUpperCase() : "";
+    return id && keys.has(region) ? [{ id, region }] : [];
   });
 }
 
-function parseMapping(v: unknown): Record<string, RegionKey> | null {
-  if (!v || typeof v !== "object") return null;
-  const out: Record<string, RegionKey> = {};
-  for (const [k, r] of Object.entries(v as Record<string, unknown>)) if (REGION_KEYS.includes(r as RegionKey)) out[k.toUpperCase()] = r as RegionKey;
-  return Object.keys(out).length ? out : null;
+/** Stored regions, or the defaults when the row has none / holds something unreadable. */
+function storedRegions(v: unknown): RegionConfig[] {
+  if (!Array.isArray(v) || !v.length) return parseRegions(DEFAULT_REGION_INPUT);
+  try { return parseRegions(v); } catch { return parseRegions(DEFAULT_REGION_INPUT); }
 }
 
 export async function getClientConfig(brandId: string, brandName: string): Promise<PerformanceClientConfig> {
   const base = defaults(brandId, brandName);
   const [row] = await db.select().from(schema.performanceClientConfigs).where(eq(schema.performanceClientConfigs.brandId, brandId)).limit(1);
   if (!row) return base;
+  const regions = storedRegions(row.regions);
   return {
     ...base,
     dataSource: row.dataSource === "live" ? "live" : "mock",
     ncDefinition: row.ncDefinition === "window_days" ? "window_days" : "first_ever",
     ncWindowDays: row.ncWindowDays, revenueField: row.revenueField === "subtotal" ? "subtotal" : "total",
-    regionMapping: parseMapping(row.regionMapping) ?? base.regionMapping,
+    regions, regionMapping: regionMappingOf(regions),
     syncEveryMinutes: row.syncEveryMinutes,
     shopify: {
       shopDomain: row.shopifyShopDomain, token: decryptSecret(row.shopifyTokenEnc),
       clientId: row.shopifyClientId, clientSecret: decryptSecret(row.shopifyClientSecretEnc),
       refreshToken: decryptSecret(row.shopifyRefreshTokenEnc), tokenExpiresAt: row.shopifyTokenExpiresAt, installedAt: row.shopifyInstalledAt,
     },
-    meta: { token: decryptSecret(row.metaTokenEnc), accounts: parseAccounts(row.metaAccounts) },
+    meta: { token: decryptSecret(row.metaTokenEnc), accounts: parseAccounts(row.metaAccounts, regions) },
     google: {
       developerToken: decryptSecret(row.googleDeveloperTokenEnc), clientId: row.googleClientId,
       clientSecret: decryptSecret(row.googleClientSecretEnc), refreshToken: decryptSecret(row.googleRefreshTokenEnc),
-      loginCustomerId: row.googleLoginCustomerId, accounts: parseAccounts(row.googleAccounts),
+      loginCustomerId: row.googleLoginCustomerId, accounts: parseAccounts(row.googleAccounts, regions),
     },
   };
 }
@@ -121,7 +177,8 @@ export async function liveBrandIds(): Promise<string[]> {
 export interface ConfigPatch {
   dataSource?: DataSourceKind;
   ncDefinition?: NcDefinition; ncWindowDays?: number; revenueField?: RevenueField;
-  regionMapping?: Record<string, string> | null;
+  /** named regions (label + countries); null = back to the defaults */
+  regions?: RegionInput[] | null;
   syncEveryMinutes?: number;
   shopifyShopDomain?: string | null; shopifyToken?: string | null;
   shopifyClientId?: string | null; shopifyClientSecret?: string | null;
@@ -146,7 +203,11 @@ export async function saveClientConfig(brandId: string, patch: ConfigPatch): Pro
   if (patch.ncDefinition) set.ncDefinition = patch.ncDefinition === "window_days" ? "window_days" : "first_ever";
   if (patch.ncWindowDays != null) set.ncWindowDays = Math.round(clamp(patch.ncWindowDays, 1, 3650, 365));
   if (patch.revenueField) set.revenueField = patch.revenueField === "subtotal" ? "subtotal" : "total";
-  if (patch.regionMapping !== undefined) set.regionMapping = patch.regionMapping ? parseMapping(patch.regionMapping) : null;
+  let regions: RegionConfig[] | null = null;
+  if (patch.regions !== undefined) {
+    regions = parseRegions(patch.regions ?? DEFAULT_REGION_INPUT);
+    set.regions = patch.regions ? regions.map(({ label, countries }) => ({ label, countries })) : null;
+  }
   if (patch.syncEveryMinutes != null) set.syncEveryMinutes = Math.round(clamp(patch.syncEveryMinutes, 2, 1440, 10));
   if (patch.shopifyShopDomain !== undefined) set.shopifyShopDomain = patch.shopifyShopDomain?.trim() || null;
   const st = secretSet(patch.shopifyToken); if (st.set) set.shopifyTokenEnc = st.value;
@@ -164,20 +225,35 @@ export async function saveClientConfig(brandId: string, patch: ConfigPatch): Pro
       set.shopifyRefreshTokenEnc = null; set.shopifyTokenExpiresAt = null; set.shopifyInstalledAt = null;
     }
   }
+  // Account → region pairs are validated against the regions being saved (or the stored ones).
+  const regionsForAccounts = regions ?? (patch.metaAccounts || patch.googleAccounts ? (await getClientConfig(brandId, "")).regions : []);
   const mt = secretSet(patch.metaToken); if (mt.set) set.metaTokenEnc = mt.value;
-  if (patch.metaAccounts) set.metaAccounts = parseAccounts(patch.metaAccounts);
+  if (patch.metaAccounts) set.metaAccounts = parseAccounts(patch.metaAccounts, regionsForAccounts);
   const gd = secretSet(patch.googleDeveloperToken); if (gd.set) set.googleDeveloperTokenEnc = gd.value;
   if (patch.googleClientId !== undefined) set.googleClientId = patch.googleClientId?.trim() || null;
   const gs = secretSet(patch.googleClientSecret); if (gs.set) set.googleClientSecretEnc = gs.value;
   const gr = secretSet(patch.googleRefreshToken); if (gr.set) set.googleRefreshTokenEnc = gr.value;
   if (patch.googleLoginCustomerId !== undefined) set.googleLoginCustomerId = patch.googleLoginCustomerId?.replace(/\D/g, "") || null;
-  if (patch.googleAccounts) set.googleAccounts = parseAccounts(patch.googleAccounts);
+  if (patch.googleAccounts) set.googleAccounts = parseAccounts(patch.googleAccounts, regionsForAccounts);
 
   await db.insert(schema.performanceClientConfigs).values({ brandId, ...set }).onConflictDoUpdate({
     target: schema.performanceClientConfigs.brandId,
     set: { ...set, updatedAt: sql`now()` },
   });
+  if (regions) await reassignOrderRegions(brandId, regionMappingOf(regions));
   forgetShopifyToken(brandId); // credentials may have changed — next call exchanges them again
+}
+
+/** Regions changed: re-derive the stored region of every synced order from its country. */
+export async function reassignOrderRegions(brandId: string, mapping: Record<string, RegionKey>): Promise<void> {
+  const entries = Object.entries(mapping);
+  const cases = entries.length
+    ? sql.join(entries.map(([cc, key]) => sql`WHEN ${cc} THEN ${key}`), sql` `)
+    : sql`WHEN NULL THEN NULL`;
+  await db.execute(sql`
+    UPDATE performance_orders SET region = CASE country ${cases} ELSE ${OTHER_REGION.key} END
+    WHERE brand_id = ${brandId} AND region IS DISTINCT FROM (CASE country ${cases} ELSE ${OTHER_REGION.key} END)
+  `);
 }
 
 /** Shopify is usable: shop domain + either a legacy token or Dev Dashboard client credentials. */
@@ -190,7 +266,7 @@ export function publicConfig(c: PerformanceClientConfig) {
   return {
     brandId: c.brandId, name: c.name, dataSource: c.dataSource,
     ncDefinition: c.ncDefinition, ncWindowDays: c.ncWindowDays, revenueField: c.revenueField,
-    regionMapping: c.regionMapping, syncEveryMinutes: c.syncEveryMinutes,
+    regions: c.regions, syncEveryMinutes: c.syncEveryMinutes,
     shopify: {
       shopDomain: c.shopify.shopDomain, tokenSet: Boolean(c.shopify.token),
       clientId: c.shopify.clientId, clientSecretSet: Boolean(c.shopify.clientSecret),

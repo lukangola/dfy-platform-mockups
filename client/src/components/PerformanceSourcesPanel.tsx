@@ -16,12 +16,14 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, AlertTriangle, ChevronDown, ChevronRight, Loader2, Plug, RefreshCw, Save, ShieldCheck } from "lucide-react";
 import {
   savePerformanceConfig, startPerformanceSync, testPerformanceSource,
-  type PerformanceAccountMap, type PerformanceConfig, type PerformanceConfigPatch, type PerformanceSyncState, type PerformanceTestResult,
+  type PerformanceAccountMap, type PerformanceConfig, type PerformanceConfigPatch, type PerformanceRegionDef, type PerformanceSyncState, type PerformanceTestResult,
 } from "@/lib/api";
 
-const REGIONS: Array<{ key: PerformanceAccountMap["region"]; label: string }> = [
-  { key: "NLBE", label: "NL/BE" }, { key: "UK", label: "UK" }, { key: "USA", label: "USA" }, { key: "OTH", label: "Other" },
-];
+const OTHER_KEY = "OTH";
+/** Region keys an account may map to: the brand's regions plus Other. */
+function regionKeys(regions: PerformanceRegionDef[]): string[] {
+  return [...regions.map((r) => r.key), OTHER_KEY];
+}
 
 const input = "w-full bg-[#0A0C0F] border border-white/[0.08] rounded-md px-2.5 py-1.5 text-[12px] text-white/85 placeholder:text-white/25 focus:outline-none focus:border-cyan-400/40 font-mono";
 const label = "block text-[10px] font-mono uppercase tracking-wider text-white/35 mb-1";
@@ -38,16 +40,29 @@ export function relTime(iso: string | null | undefined): string {
   return `${Math.round(s / 86400)}d ago`;
 }
 
-/** "act_123:NLBE, act_456:UK" ⇄ [{id, region}] */
-function parseAccounts(text: string): PerformanceAccountMap[] {
+/** "act_123:NLBE, act_456:UK" ⇄ [{id, region}] — unknown regions are dropped */
+function parseAccounts(text: string, keys: string[]): PerformanceAccountMap[] {
   return text.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean).flatMap((pair) => {
     const [id, region] = pair.split(/[:=\s]+/);
-    const r = REGIONS.find((x) => x.key === (region ?? "").toUpperCase())?.key;
-    return id && r ? [{ id: id.trim(), region: r }] : [];
+    const r = (region ?? "").toUpperCase();
+    return id && keys.includes(r) ? [{ id: id.trim(), region: r }] : [];
   });
 }
 function accountsText(list: PerformanceAccountMap[]): string {
   return list.map((a) => `${a.id}:${a.region}`).join(", ");
+}
+
+/** "NL/BE: NL, BE; UK: GB; USA: US" ⇄ [{label, countries}] — the server validates (keys, duplicates, codes). */
+function parseRegionsText(text: string): Array<{ label: string; countries: string[] }> {
+  return text.split(/[;\n]+/).map((s) => s.trim()).filter(Boolean).map((part) => {
+    const i = part.indexOf(":");
+    const label = (i >= 0 ? part.slice(0, i) : part).trim();
+    const countries = (i >= 0 ? part.slice(i + 1) : "").split(/[,\s]+/).map((c) => c.trim().toUpperCase()).filter(Boolean);
+    return { label, countries };
+  });
+}
+function regionsText(list: PerformanceRegionDef[]): string {
+  return list.map((r) => `${r.label}: ${r.countries.join(", ")}`).join("; ");
 }
 
 function SecretField({ id, name, set, value, onChange, placeholder }: { id: string; name: string; set: boolean; value: string; onChange: (v: string) => void; placeholder?: string }) {
@@ -73,6 +88,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
   const [form, setForm] = useState(() => ({
     dataSource: config.dataSource,
     ncDefinition: config.ncDefinition, ncWindowDays: String(config.ncWindowDays), revenueField: config.revenueField,
+    regions: regionsText(config.regions),
     syncEveryMinutes: String(config.syncEveryMinutes),
     shopifyShopDomain: config.shopify.shopDomain ?? "", shopifyClientId: config.shopify.clientId ?? "", shopifyClientSecret: "", shopifyToken: "",
     metaToken: "", metaAccounts: accountsText(config.meta.accounts),
@@ -80,7 +96,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
     googleLoginCustomerId: config.google.loginCustomerId ?? "", googleAccounts: accountsText(config.google.accounts),
   }));
   useEffect(() => {
-    setForm((f) => ({ ...f, dataSource: config.dataSource, shopifyShopDomain: config.shopify.shopDomain ?? "", shopifyClientId: config.shopify.clientId ?? "", metaAccounts: accountsText(config.meta.accounts), googleClientId: config.google.clientId ?? "", googleLoginCustomerId: config.google.loginCustomerId ?? "", googleAccounts: accountsText(config.google.accounts) }));
+    setForm((f) => ({ ...f, dataSource: config.dataSource, regions: regionsText(config.regions), shopifyShopDomain: config.shopify.shopDomain ?? "", shopifyClientId: config.shopify.clientId ?? "", metaAccounts: accountsText(config.meta.accounts), googleClientId: config.google.clientId ?? "", googleLoginCustomerId: config.google.loginCustomerId ?? "", googleAccounts: accountsText(config.google.accounts) }));
   }, [config]);
 
   const [saving, setSaving] = useState(false);
@@ -108,15 +124,21 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const by = (s: PerformanceSyncState["source"]) => sync.find((x) => x.source === s);
 
-  const patch = (): PerformanceConfigPatch => ({
-    dataSource: form.dataSource,
-    ncDefinition: form.ncDefinition, ncWindowDays: Number(form.ncWindowDays), revenueField: form.revenueField,
-    syncEveryMinutes: Number(form.syncEveryMinutes),
-    shopifyShopDomain: form.shopifyShopDomain, shopifyClientId: form.shopifyClientId, shopifyClientSecret: form.shopifyClientSecret, shopifyToken: form.shopifyToken,
-    metaToken: form.metaToken, metaAccounts: parseAccounts(form.metaAccounts),
-    googleDeveloperToken: form.googleDeveloperToken, googleClientId: form.googleClientId, googleClientSecret: form.googleClientSecret,
-    googleRefreshToken: form.googleRefreshToken, googleLoginCustomerId: form.googleLoginCustomerId, googleAccounts: parseAccounts(form.googleAccounts),
-  });
+  const patch = (): PerformanceConfigPatch => {
+    const regions = parseRegionsText(form.regions);
+    const keys = [...regions.map((r) => r.label.toUpperCase().replace(/[^A-Z0-9]/g, "")), OTHER_KEY];
+    return {
+      dataSource: form.dataSource,
+      ncDefinition: form.ncDefinition, ncWindowDays: Number(form.ncWindowDays), revenueField: form.revenueField,
+      regions: regions.length ? regions : null,
+      syncEveryMinutes: Number(form.syncEveryMinutes),
+      shopifyShopDomain: form.shopifyShopDomain, shopifyClientId: form.shopifyClientId, shopifyClientSecret: form.shopifyClientSecret, shopifyToken: form.shopifyToken,
+      metaToken: form.metaToken, metaAccounts: parseAccounts(form.metaAccounts, keys),
+      googleDeveloperToken: form.googleDeveloperToken, googleClientId: form.googleClientId, googleClientSecret: form.googleClientSecret,
+      googleRefreshToken: form.googleRefreshToken, googleLoginCustomerId: form.googleLoginCustomerId, googleAccounts: parseAccounts(form.googleAccounts, keys),
+    };
+  };
+  const regionKeyList = regionKeys(config.regions).join(", ");
 
   const save = async (): Promise<boolean> => {
     setSaving(true); setNotice(null);
@@ -222,8 +244,8 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
         <section className="rounded-lg border border-white/[0.07] p-4 space-y-3">
           <div className="flex items-center justify-between"><div className="text-[11px] font-semibold text-white/85">Meta · ad spend</div><StatusPill st={by("meta")} /></div>
           <SecretField id="metaToken" name="System-user token (ads_read only)" set={config.meta.tokenSet} value={form.metaToken} onChange={(v) => setForm((f) => ({ ...f, metaToken: v }))} placeholder="EAAB…" />
-          <div><label htmlFor="metaAccounts" className={label}>Ad accounts → region</label><input id="metaAccounts" className={input} value={form.metaAccounts} onChange={set("metaAccounts")} placeholder="act_123:NLBE, act_456:UK" /></div>
-          <p className="text-[10px] text-white/30 font-mono">Meta Business settings → Users → System users → Generate token: tick only <span className="text-white/50">ads_read</span>, assign the ad accounts, no expiry. Read-only — spend per hour per account, nothing else. Regions: NLBE, UK, USA, OTH. Incremental runs re-pull only the last 3 days.</p>
+          <div><label htmlFor="metaAccounts" className={label}>Ad accounts → region</label><input id="metaAccounts" className={input} value={form.metaAccounts} onChange={set("metaAccounts")} placeholder={`act_123:${config.regions[0]?.key ?? OTHER_KEY}, act_456:${config.regions[1]?.key ?? OTHER_KEY}`} /></div>
+          <p className="text-[10px] text-white/30 font-mono">Meta Business settings → Users → System users → Generate token: tick only <span className="text-white/50">ads_read</span>, assign the ad accounts, no expiry. Read-only — spend per hour per account, nothing else. Regions: {regionKeyList} (Advanced settings). Incremental runs re-pull only the last 3 days.</p>
           <button type="button" className={btnGhost} onClick={() => void test("meta")} disabled={testing !== null}>{testing === "meta" ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} Test connection</button>
           <TestLine source="meta" />
         </section>
@@ -236,7 +258,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
           <SecretField id="gSecret" name="OAuth client secret" set={config.google.clientSecretSet} value={form.googleClientSecret} onChange={(v) => setForm((f) => ({ ...f, googleClientSecret: v }))} />
           <SecretField id="gRefresh" name="Refresh token" set={config.google.refreshTokenSet} value={form.googleRefreshToken} onChange={(v) => setForm((f) => ({ ...f, googleRefreshToken: v }))} />
           <div><label htmlFor="gMcc" className={label}>Login customer id (MCC, optional)</label><input id="gMcc" className={input} value={form.googleLoginCustomerId} onChange={set("googleLoginCustomerId")} placeholder="1234567890" /></div>
-          <div><label htmlFor="gAccounts" className={label}>Customer ids → region</label><input id="gAccounts" className={input} value={form.googleAccounts} onChange={set("googleAccounts")} placeholder="1234567890:NLBE, 2345678901:UK" /></div>
+          <div><label htmlFor="gAccounts" className={label}>Customer ids → region</label><input id="gAccounts" className={input} value={form.googleAccounts} onChange={set("googleAccounts")} placeholder={`1234567890:${config.regions[0]?.key ?? OTHER_KEY}, 2345678901:${config.regions[1]?.key ?? OTHER_KEY}`} /></div>
           <p className="text-[10px] text-white/30 font-mono">Google Ads has one API scope for everything; the dashboard only runs read reports (cost per hour). Incremental runs re-pull only the last 3 days.</p>
           <button type="button" className={btnGhost} onClick={() => void test("google")} disabled={testing !== null}>{testing === "google" ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} Test connection</button>
           <TestLine source="google" />
@@ -247,10 +269,15 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
       <section className="rounded-lg border border-white/[0.07] p-4">
         <button type="button" className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-white/70 hover:text-white" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced}>
           {advanced ? <ChevronDown size={12} /> : <ChevronRight size={12} />} Advanced settings
-          <span className="text-[10px] font-mono font-normal text-white/30 ml-2">new customer = {form.ncDefinition === "window_days" ? `first order in ${form.ncWindowDays} days` : "first-ever order"} · revenue = {form.revenueField === "subtotal" ? "subtotal" : "order total"} · sync every {form.syncEveryMinutes || "10"} min</span>
+          <span className="text-[10px] font-mono font-normal text-white/30 ml-2">regions = {config.regions.map((r) => r.label).join(", ") || "none"} + Other · new customer = {form.ncDefinition === "window_days" ? `first order in ${form.ncWindowDays} days` : "first-ever order"} · revenue = {form.revenueField === "subtotal" ? "subtotal" : "order total"} · sync every {form.syncEveryMinutes || "10"} min</span>
         </button>
         {advanced && (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 mt-3">
+            <div className="sm:col-span-2 lg:col-span-4">
+              <label htmlFor="regions" className={label}>Regions = label: countries; …</label>
+              <input id="regions" className={input} value={form.regions} onChange={set("regions")} placeholder="NL/BE: NL, BE; UK: GB; USA: US" />
+              <p className="text-[10px] text-white/30 font-mono mt-1">Up to 8 regions, 2-letter country codes (shipping country of the order); everything else is <span className="text-white/50">Other</span>. The key for ad-account mapping is the label without punctuation ({config.regions.map((r) => `${r.label} → ${r.key}`).join(", ") || "—"}). Empty = NL/BE, UK, USA. Saving re-assigns the synced orders; the first-ever-order rule only counts customers whose first order is inside the synced history.</p>
+            </div>
             <div><label htmlFor="ncd" className={label}>New customer =</label>
               <select id="ncd" className={input} value={form.ncDefinition} onChange={set("ncDefinition")}>
                 <option value="first_ever">first-ever order (Shopify)</option>

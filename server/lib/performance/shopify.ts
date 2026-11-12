@@ -394,7 +394,15 @@ async function upsertOrders(config: PerformanceClientConfig, orders: ShopifyOrde
 
 /** Recompute is_new_customer for the whole brand (cheap: one window query per sync). */
 export async function recomputeNewCustomer(config: PerformanceClientConfig): Promise<void> {
-  const start = backfillStart();
+  // History floor: customers created before the oldest order we can see may have earlier orders
+  // we cannot see (a Partner-organization app only gets the last 60 days), so they count as
+  // returning. With full history this is the backfill start, as before.
+  const [oldest] = (await db.execute<{ min: string | null }>(sql`
+    SELECT MIN(created_at)::text AS min FROM performance_orders
+    WHERE brand_id = ${config.brandId} AND cancelled = FALSE AND test = FALSE
+  `)).rows;
+  const floor = oldest?.min ? new Date(oldest.min) : null;
+  const start = floor && floor > backfillStart() ? floor : backfillStart();
   const windowMs = config.ncWindowDays * 86_400_000;
   const rule = config.ncDefinition === "window_days"
     ? sql`(r.prev_created IS NULL OR (EXTRACT(EPOCH FROM (r.created_at - r.prev_created)) * 1000) > ${windowMs})`

@@ -2534,8 +2534,11 @@ export function getAdPipelineCardJobStatus(cardId: string): Promise<{ job: AdPip
 
 import type { Dataset as PerformanceDataset } from "@shared/performance/engine";
 
-export type PerformanceRegion = "NLBE" | "UK" | "USA" | "OTH";
+/** Region key: derived from the label ("NL/BE" → "NLBE"); "OTH" is the catch-all. */
+export type PerformanceRegion = string;
 export type PerformanceAccountMap = { id: string; region: PerformanceRegion };
+/** A named region of the brand (key/flag derived server-side from label / first country). */
+export type PerformanceRegionDef = { key: PerformanceRegion; label: string; flag: string; countries: string[] };
 
 export type PerformanceConfig = {
   brandId: string;
@@ -2544,7 +2547,8 @@ export type PerformanceConfig = {
   ncDefinition: "first_ever" | "window_days";
   ncWindowDays: number;
   revenueField: "total" | "subtotal";
-  regionMapping: Record<string, PerformanceRegion>;
+  /** named regions in display order; "Other" is implied last */
+  regions: PerformanceRegionDef[];
   syncEveryMinutes: number;
   shopify: {
     shopDomain: string | null; tokenSet: boolean; clientId: string | null; clientSecretSet: boolean;
@@ -2573,6 +2577,8 @@ export type PerformanceSyncState = {
 export type PerformanceConfigPatch = Partial<{
   dataSource: "mock" | "live";
   ncDefinition: "first_ever" | "window_days"; ncWindowDays: number; revenueField: "total" | "subtotal";
+  /** named regions (label + ISO-2 countries); null = back to NL/BE, UK, USA */
+  regions: Array<{ label: string; countries: string[] }> | null;
   syncEveryMinutes: number;
   shopifyShopDomain: string | null; shopifyToken: string | null; shopifyClientId: string | null; shopifyClientSecret: string | null;
   metaToken: string | null; metaAccounts: PerformanceAccountMap[];

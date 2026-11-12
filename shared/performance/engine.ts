@@ -8,7 +8,10 @@
  * THE CONTRACT: every data source — mock today, Shopify + Meta/Google/TikTok
  * later — produces hourly buckets of exactly this shape:
  *
- *   { t, c: { REGION: [ncOrders, ncRev, rcOrders, rcRev, cogs] }, s: { PLATFORM: [spendPerRegion x4] } }
+ *   { t, c: { REGION: [ncOrders, ncRev, rcOrders, rcRev, cogs] }, s: { PLATFORM: [spendPerRegion] } }
+ *
+ * Regions are per brand (`Dataset.regions`, named ones followed by "Other"); the
+ * default set is DEFAULT_REGIONS. Spend arrays are indexed like `Dataset.regions`.
  *
  * Everything downstream (agg → metrics → range/series → UI) keeps working once
  * real data fills it. Do not fork agg/metrics per source.
@@ -18,18 +21,34 @@
  * margin is derived, never typed in. All ad spend counts as acquisition spend.
  */
 
-export type RegionKey = "NLBE" | "UK" | "USA" | "OTH";
+/** Region key: derived from the label (A–Z, 0–9), e.g. "NL/BE" → "NLBE". "OTH" is the catch-all. */
+export type RegionKey = string;
 export type PlatformKey = "META" | "GOOG" | "TT";
 
 export interface RegionDef { key: RegionKey; label: string; flag: string }
 export interface PlatformDef { key: PlatformKey; label: string; sym: string }
 
-export const REGIONS: readonly RegionDef[] = [
+export const OTHER_REGION: RegionDef = { key: "OTH", label: "Other", flag: "🌍" };
+
+/** The reference set (and the mock's): NL/BE, UK, USA + Other. */
+export const DEFAULT_REGIONS: readonly RegionDef[] = [
   { key: "NLBE", label: "NL/BE", flag: "🇳🇱" },
   { key: "UK", label: "UK", flag: "🇬🇧" },
   { key: "USA", label: "USA", flag: "🇺🇸" },
-  { key: "OTH", label: "Other", flag: "🌍" },
+  OTHER_REGION,
 ];
+
+/** "NL/BE" → "NLBE", "DACH" → "DACH". Empty when nothing alphanumeric is left. */
+export function regionKeyFor(label: string): RegionKey {
+  return label.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
+}
+
+/** Flag emoji for an ISO-3166 alpha-2 code ("DE" → 🇩🇪); 🌍 for anything else. */
+export function flagFor(countryCode: string | null | undefined): string {
+  const cc = (countryCode ?? "").toUpperCase();
+  if (!/^[A-Z]{2}$/.test(cc)) return OTHER_REGION.flag;
+  return String.fromCodePoint(0x1f1e6 + cc.charCodeAt(0) - 65, 0x1f1e6 + cc.charCodeAt(1) - 65);
+}
 
 export const PLATFORMS: readonly PlatformDef[] = [
   { key: "META", label: "Meta", sym: "∞" },
@@ -39,8 +58,8 @@ export const PLATFORMS: readonly PlatformDef[] = [
 
 /** [ncOrders, ncRevenue, rcOrders, rcRevenue, cogs] — cogs = cost of goods sold for all orders in the bucket */
 export type RegionCell = [number, number, number, number, number];
-/** spend per region, indexed like REGIONS */
-export type PlatformSpend = [number, number, number, number];
+/** spend per region, indexed like `Dataset.regions` */
+export type PlatformSpend = number[];
 
 export interface HourBucket {
   /** bucket start, epoch ms, aligned to the hour */
@@ -51,6 +70,8 @@ export interface HourBucket {
 
 /** A contiguous hourly dataset. `hours[i].t === startMs + i * HOUR`. */
 export interface Dataset {
+  /** the brand's regions in display order, "Other" last — keys of `c`, index of `s` */
+  regions: RegionDef[];
   hours: HourBucket[];
   startMs: number;
   /** "as of" — the moment the data was produced */
@@ -91,14 +112,16 @@ export function agg(D: Dataset, t0: number, t1: number, region: RegionKey | null
   const i1 = Math.min(D.hours.length - 1, idxOf(D, t1 - 1));
   for (let i = i0; i <= i1; i++) {
     const h = D.hours[i];
-    for (let r = 0; r < REGIONS.length; r++) {
-      const k = REGIONS[r].key;
+    for (let r = 0; r < D.regions.length; r++) {
+      const k = D.regions[r].key;
       if (region && k !== region) continue;
       const o = h.c[k];
-      out.ncO += o[0]; out.ncR += o[1]; out.rcO += o[2]; out.rcR += o[3]; out.cogs += o[4] ?? 0;
-      if (o[0] + o[2] > 0) out.salesRows += o[0] + o[2];
+      if (o) {
+        out.ncO += o[0]; out.ncR += o[1]; out.rcO += o[2]; out.rcR += o[3]; out.cogs += o[4] ?? 0;
+        if (o[0] + o[2] > 0) out.salesRows += o[0] + o[2];
+      }
       for (const p of PLATFORMS) {
-        const sp = h.s[p.key][r];
+        const sp = h.s[p.key]?.[r] ?? 0;
         out.spend += sp; out.plat[p.key] += sp;
         if (sp > 0) out.adRows++;
       }

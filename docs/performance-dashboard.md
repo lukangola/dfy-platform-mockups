@@ -17,8 +17,9 @@ under Dashboard. The amber **MOCK DATA** pill means the numbers are generated, n
 What to click:
 - **Today / Yesterday / Month to date / Year to date** — cards, tables and sparklines rescope;
   Today/Yesterday are hourly, MTD/YTD daily.
-- **Country** — Total / NL/BE / UK / USA / Other. Cards and the platform table scope to that
-  market; the matching region row is highlighted.
+- **Country** — Total / the brand's regions / Other (default NL/BE, UK, USA; per brand under
+  Data sources → Advanced settings, e.g. `DE: DE; AT: AT` for a DACH shop). Cards and the
+  platform table scope to that market; the matching region row is highlighted.
 - **Compare** — Previous period shows ▲/▼ deltas on every number (green = good direction,
   red = bad; NCPA/CPA invert; spend is grey = neutral). Off hides them.
 - Hover any sparkline for the bucket's time and value. **Refresh** refetches.
@@ -78,8 +79,10 @@ platform-table spend equals the Meta / Google / TikTok columns of the Total row.
    Google Ads API `generate_user_credentials` helper), optional MCC id, and customer ids with region:
    `1234567890:NLBE`. Click **Test connection**.
 5. Set **Data source = Live** and click **Save & sync now**. (Nothing to type for margin — it
-   comes from Shopify's "Cost per item"; the new-customer rule lives under Advanced settings and
-   defaults to Shopify's own first-ever-order definition.) The first Shopify backfill (since 1 Jan last year) runs in the background;
+   comes from Shopify's "Cost per item"; the new-customer rule and the regions live under Advanced
+   settings. Regions: `label: countries; …` with 2-letter codes of the order's shipping country, up
+   to 8, everything else = Other; the ad-account mapping uses the label without punctuation as key,
+   e.g. `NL/BE` → `NLBE`. Saving re-assigns the synced orders.) The first Shopify backfill (since 1 Jan last year) runs in the background;
    the header shows per-source freshness ("Shopify synced 2m ago · Meta … · Google …"). After that
    the server re-syncs every 10 minutes (configurable) while the source is Live.
 6. Reconcile: Yesterday's revenue vs. Shopify admin; Yesterday's spend vs. Ads Manager (±1%);
@@ -151,7 +154,8 @@ API versions (env overrides): `SHOPIFY_API_VERSION` (2025-01), `META_GRAPH_VERSI
 | Tables (migration `drizzle/0031_performance_dashboard.sql`) | `performance_client_configs`, `performance_orders`, `performance_spend_hours`, `performance_sync_state` |
 
 Hourly-bucket contract (every source must produce it):
-`{ t, c: { REGION: [ncOrders, ncRev, rcOrders, rcRev, cogs] }, s: { PLATFORM: [spendPerRegion x4] } }`
+`{ t, c: { REGION: [ncOrders, ncRev, rcOrders, rcRev, cogs] }, s: { PLATFORM: [spendPerRegion] } }` — the
+dataset carries the brand's `regions` (named ones, then Other); spend arrays are indexed like it.
 
 ### What each sync pulls (so nothing is re-downloaded needlessly)
 
@@ -182,7 +186,9 @@ redoes the backfill.
 - NC CM = margin × NC revenue − ad spend (all ad spend counts as acquisition); RC CM = margin × RC revenue
 - NCPA = ad spend ÷ NC orders; NC ROAS = NC revenue ÷ ad spend
 - New customer = first-ever order of that customer (Shopify's definition); orders of customers whose
-  Shopify record predates the backfill count as returning
+  Shopify record predates the oldest synced order count as returning (with full history that is the
+  backfill start; with a Partner-organization app it is the 60-day floor, so hidden earlier orders
+  do not make a customer look new)
 - Platform ROAS/CPA use fixed mock attribution factors (Meta 2.05, Google 6.2, TikTok 2.4)
 
 ## Still open (not blocking the live dashboard)

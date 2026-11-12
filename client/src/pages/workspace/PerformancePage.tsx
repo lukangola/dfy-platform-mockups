@@ -28,7 +28,7 @@ import { PERFORMANCE_ENABLED } from "@/lib/featureFlags";
 import { getPerformanceConfig, getPerformanceHours, getPerformanceStatus, type PerformanceConfig, type PerformanceSyncState } from "@/lib/api";
 import PerformanceSourcesPanel, { relTime } from "@/components/PerformanceSourcesPanel";
 import {
-  REGIONS, PLATFORMS, RANGE_LABELS, HOUR, DAY,
+  PLATFORMS, RANGE_LABELS, HOUR, DAY,
   agg, metrics, range, series, platSeries, platformStats,
   eur, num, ratio, pct, delta, fmtDelta,
   type Dataset, type Grain, type Metrics, type MetricKey, type RangeKey, type RegionKey,
@@ -298,7 +298,7 @@ export default function PerformancePage() {
     const cur = withPlatformCols(metrics(agg(data, r.cur[0], r.cur[1], reg)));
     const prev = withPlatformCols(metrics(agg(data, r.prev[0], r.prev[1], reg)));
     const cardSeries = CARDS.map((c) => series(data, r.cur[0], r.cur[1], r.grain, reg, (m) => m[c.k as MetricKey] as number | null));
-    const rows = [...REGIONS.map((rg) => ({ key: rg.key as RegionKey | null, label: rg.label, flag: rg.flag })), { key: null, label: "Total", flag: "" }]
+    const rows = [...data.regions.map((rg) => ({ key: rg.key as RegionKey | null, label: rg.label, flag: rg.flag })), { key: null, label: "Total", flag: "" }]
       .map((row) => {
         const cs = agg(data, r.cur[0], r.cur[1], row.key);
         const ps = agg(data, r.prev[0], r.prev[1], row.key);
@@ -323,7 +323,8 @@ export default function PerformancePage() {
 
   const nowD = data ? new Date(data.now) : new Date();
   const dateChip = nowD.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
-  const regLabel = country ? REGIONS.find((x) => x.key === country)!.label : null;
+  const regions = data?.regions ?? [];
+  const regLabel = country ? (regions.find((x) => x.key === country)?.label ?? country) : null;
   const caption = view?.r.grain === "hour"
     ? `Hourly · ${nowD.toLocaleDateString("en-GB", { month: "short", day: "numeric" })} · ${source === "live" ? "live" : "mock"}`
     : `Daily · ${source === "live" ? "live" : "mock"}`;
@@ -401,7 +402,7 @@ export default function PerformancePage() {
           Country
           <select className={selectCls} value={country} onChange={(e) => setCountry(e.target.value as RegionKey | "")}>
             <option value="">Total</option>
-            {REGIONS.map((rg) => <option key={rg.key} value={rg.key}>{rg.label}</option>)}
+            {regions.map((rg) => <option key={rg.key} value={rg.key}>{rg.label}</option>)}
           </select>
         </label>
         <label className="inline-flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider text-white/35">
