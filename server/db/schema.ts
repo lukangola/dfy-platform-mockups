@@ -1027,13 +1027,15 @@ export const performanceSpendHours = pgTable(
     accountId: text("account_id").notNull(),
     /** bucket start, aligned to the hour (UTC instant) */
     hour: timestamp("hour", { withTimezone: true }).notNull(),
+    /** ISO-2 country the spend was delivered in (Meta's daily country report, pro-rated per hour); "" = unknown → the account's region */
+    country: text("country").notNull().default(""),
     region: text("region").notNull(),
     spend: numeric("spend", { precision: 12, scale: 4 }).notNull(),
     impressions: integer("impressions"),
     clicks: integer("clicks"),
   },
   (t) => [
-    uniqueIndex("performance_spend_brand_platform_account_hour_uq").on(t.brandId, t.platform, t.accountId, t.hour),
+    uniqueIndex("performance_spend_brand_platform_account_hour_country_uq").on(t.brandId, t.platform, t.accountId, t.hour, t.country),
     index("performance_spend_brand_hour_idx").on(t.brandId, t.hour),
   ],
 );

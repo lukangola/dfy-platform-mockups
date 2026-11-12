@@ -276,9 +276,27 @@ export async function saveClientConfig(brandId: string, patch: ConfigPatch): Pro
     target: schema.performanceClientConfigs.brandId,
     set: { ...set, updatedAt: sql`now()` },
   });
-  if (regions) await reassignOrderRegions(brandId, regionMappingOf(regions));
+  if (regions || patch.metaAccounts || patch.googleAccounts) {
+    const saved = await getClientConfig(brandId, "");
+    if (regions) await reassignOrderRegions(brandId, saved.regionMapping);
+    await reassignSpendRegions(brandId, saved.regionMapping, [...saved.meta.accounts, ...saved.google.accounts]);
+  }
   forgetShopifyToken(brandId); // credentials may have changed — next call exchanges them again
   forgetAmazonToken(brandId);
+}
+
+/**
+ * Regions or account mappings changed: spend slices with a country follow the country mapping
+ * (like orders); slices without one ("" = Meta gave no country that day, or Google) follow the
+ * account's configured region.
+ */
+export async function reassignSpendRegions(brandId: string, mapping: Record<string, RegionKey>, accounts: AccountMap[]): Promise<void> {
+  const entries = Object.entries(mapping);
+  const byCountry = entries.length ? sql.join(entries.map(([cc, key]) => sql`WHEN ${cc} THEN ${key}`), sql` `) : sql`WHEN NULL THEN NULL`;
+  const byAccount = accounts.length ? sql.join(accounts.map((a) => sql`WHEN ${a.id} THEN ${a.region}`), sql` `) : sql`WHEN NULL THEN NULL`;
+  const target = sql`CASE WHEN country <> '' THEN (CASE country ${byCountry} ELSE ${OTHER_REGION.key} END)
+    ELSE COALESCE((CASE account_id ${byAccount} ELSE NULL END), (CASE 'act_' || account_id ${byAccount} ELSE NULL END), region) END`;
+  await db.execute(sql`UPDATE performance_spend_hours SET region = ${target} WHERE brand_id = ${brandId} AND region IS DISTINCT FROM (${target})`);
 }
 
 /** Regions changed: re-derive the stored region of every synced order from its country. */

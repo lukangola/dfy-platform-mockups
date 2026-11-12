@@ -95,7 +95,11 @@ platform-table spend equals the Meta / Google / TikTok columns of the Total row.
 3. **Meta**: a System-user access token with only `ads_read` (Business settings → Users → System
    users → Generate token, tick `ads_read`, assign the ad accounts, no expiry), and the ad accounts
    with their region: `act_123:NLBE, act_456:UK`. Click **Test connection** (account name, time
-   zone, currency).
+   zone, currency). Spend is split by country: Meta refuses hourly + country in one request, so
+   the sync also pulls the daily spend per country and pro-rates every hour by that day's
+   country shares; each slice is stored with its country and mapped to the regions exactly like
+   orders. The account's region is only the fallback for days without country rows. One ad
+   account serving several markets is therefore fine.
 4. **Google Ads**: developer token (API Center of the MCC), OAuth client id + secret (Google Cloud →
    Credentials, Desktop/Web app), a refresh token for that client (OAuth playground or the
    Google Ads API `generate_user_credentials` helper), optional MCC id, and customer ids with region:
@@ -146,7 +150,7 @@ cancellations.
 ```
 Shopify Admin REST (orders, 250/page, created_at_min → updated_at_min cursor) ─┐
 Amazon SP-API Orders (100/page, CreatedAfter → LastUpdatedAfter cursor)      ─┼─► performance_orders (channel) / performance_spend_hours
-Meta Marketing API (account insights, hourly breakdown, account tz → UTC)   ─┤          │
+Meta Marketing API (hourly insights × daily country shares, account tz → UTC) ─┤          │
 Google Ads API (GAQL customer report, segments.date + hour, account tz → UTC) ─┘          │
                                        sync.ts (10-min loop + "Sync now") ──────────────► performance_sync_state (freshness)
                                                                                            │
