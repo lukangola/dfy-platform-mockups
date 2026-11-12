@@ -55,11 +55,16 @@ platform-table spend equals the Meta / Google / TikTok columns of the Total row.
    **App created under a Partner organization (agency account) instead?** The exchange above is
    refused for a client's store ("same organization"). Use the install flow in the Shopify card:
    in the app's Home choose **Custom distribution** for the store (irreversible, fine for an
-   agency app), under Settings add the redirect URL `http://localhost:3000/api/performance/shopify/callback`
+   agency app; "single store", not the multi-store Plus link), add the redirect URL
+   `http://localhost:3000/api/performance/shopify/callback` to the app's released version config
    (the panel shows the exact one for the origin you use), save shop domain + Client ID + secret in
-   Inana and click **Install on store**. Shopify asks you to approve the four read scopes on the
-   store and sends you back; Inana stores the token encrypted (newer apps: 1-hour token + 90-day
-   refresh token, renewed automatically ~10 minutes before expiry). Such apps only see the last
+   Inana. The **first** install must go through Shopify's signed link: copy the install link from
+   the Distribution page, open it logged in to the store, click Install (Shopify then lands on the
+   app URL, which can be ignored). Inana's **Install on store** button sends a plain authorize URL,
+   which Shopify rejects for a custom-distribution app that is not installed yet ("The installation
+   link for this app is invalid"). Once the app is installed, click **Install on store**: Shopify
+   sends the code straight back and Inana stores the token encrypted (newer apps: 1-hour token +
+   90-day refresh token, renewed automatically ~10 minutes before expiry). Such apps only see the last
    60 days of orders until "Read all orders" is approved for them — Test connection says so.
    Pasting different app credentials later (e.g. the client's own app) drops the installed token;
    run a full sync afterwards to backfill the history. Set `PUBLIC_APP_URL` in `.env.local` if the
