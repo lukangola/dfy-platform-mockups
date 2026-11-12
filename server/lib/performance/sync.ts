@@ -8,7 +8,7 @@
  *   startPerformanceSyncLoop() — every minute, run brands whose source is live and whose
  *                                last successful sync is older than sync_every_minutes
  */
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db, schema } from "../db.js";
 import { getClientConfig, liveBrandIds, type PerformanceClientConfig, shopifyConnected } from "./config.js";
 import { syncGoogleSpend } from "./googleAds.js";
@@ -70,9 +70,11 @@ export async function runBrandSync(brandId: string, brandName: string, opts: { f
         } else {
           rows = (await syncGoogleSpend(config, lastSynced)).rows;
         }
+        // Plain number: the same `set` also feeds INSERT ... VALUES, where a column reference
+        // ("rows_total + n") is invalid — the first run of a brand used to fail right here.
         await upsertState(brandId, source, {
           status: "ok", lastSyncedAt: startedAt, cursor, error: null,
-          rowsTotal: sql`${schema.performanceSyncState.rowsTotal} + ${rows}` as unknown as number,
+          rowsTotal: (opts.full ? 0 : (prev?.rowsTotal ?? 0)) + rows,
         });
         console.log(`[performance] ${brandName}: ${source} synced ${rows} rows`);
       } catch (err) {
