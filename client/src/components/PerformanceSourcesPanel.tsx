@@ -1,22 +1,22 @@
 /**
  * "Connect data sources" panel for the Performance dashboard.
  *
- * Managers paste the Shopify / Meta / Google Ads credentials once; the server
+ * Managers paste the Shopify / Amazon / Meta / Google Ads credentials once; the server
  * stores them encrypted and only ever reports "set". Each source has a Test
  * button (credential check, no data written) and the panel shows sync
  * freshness per source. Switching "Data source" to Live swaps the dashboard
  * from the mock generator to the synced tables.
  *
  * Every connection is read-only: Shopify read_* scopes (the Test button lists
- * the scopes the token really has and flags write_* ones), Meta ads_read only,
- * Google Ads read queries only. No economics inputs — margin comes from Shopify
- * unit costs.
+ * the scopes the token really has and flags write_* ones), Amazon SP-API Orders
+ * role only, Meta ads_read only, Google Ads read queries only. No economics
+ * inputs — margin comes from Shopify unit costs (Amazon SKUs matched to them).
  */
 import { useEffect, useState } from "react";
 import { CheckCircle2, AlertTriangle, ChevronDown, ChevronRight, Loader2, Plug, RefreshCw, Save, ShieldCheck } from "lucide-react";
 import {
   savePerformanceConfig, startPerformanceSync, testPerformanceSource,
-  type PerformanceAccountMap, type PerformanceConfig, type PerformanceConfigPatch, type PerformanceRegionDef, type PerformanceSyncState, type PerformanceTestResult,
+  type PerformanceAccountMap, type PerformanceConfig, type PerformanceConfigPatch, type PerformanceRegionDef, type PerformanceSource, type PerformanceSyncState, type PerformanceTestResult,
 } from "@/lib/api";
 
 const OTHER_KEY = "OTH";
@@ -91,12 +91,13 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
     regions: regionsText(config.regions),
     syncEveryMinutes: String(config.syncEveryMinutes),
     shopifyShopDomain: config.shopify.shopDomain ?? "", shopifyClientId: config.shopify.clientId ?? "", shopifyClientSecret: "", shopifyToken: "",
+    amazonClientId: config.amazon.clientId ?? "", amazonClientSecret: "", amazonRefreshToken: "", amazonRegion: config.amazon.region, amazonMarketplaceIds: config.amazon.marketplaceIds.join(", "),
     metaToken: "", metaAccounts: accountsText(config.meta.accounts),
     googleDeveloperToken: "", googleClientId: config.google.clientId ?? "", googleClientSecret: "", googleRefreshToken: "",
     googleLoginCustomerId: config.google.loginCustomerId ?? "", googleAccounts: accountsText(config.google.accounts),
   }));
   useEffect(() => {
-    setForm((f) => ({ ...f, dataSource: config.dataSource, regions: regionsText(config.regions), shopifyShopDomain: config.shopify.shopDomain ?? "", shopifyClientId: config.shopify.clientId ?? "", metaAccounts: accountsText(config.meta.accounts), googleClientId: config.google.clientId ?? "", googleLoginCustomerId: config.google.loginCustomerId ?? "", googleAccounts: accountsText(config.google.accounts) }));
+    setForm((f) => ({ ...f, dataSource: config.dataSource, regions: regionsText(config.regions), shopifyShopDomain: config.shopify.shopDomain ?? "", shopifyClientId: config.shopify.clientId ?? "", amazonClientId: config.amazon.clientId ?? "", amazonRegion: config.amazon.region, amazonMarketplaceIds: config.amazon.marketplaceIds.join(", "), metaAccounts: accountsText(config.meta.accounts), googleClientId: config.google.clientId ?? "", googleLoginCustomerId: config.google.loginCustomerId ?? "", googleAccounts: accountsText(config.google.accounts) }));
   }, [config]);
 
   const [saving, setSaving] = useState(false);
@@ -133,6 +134,8 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
       regions: regions.length ? regions : null,
       syncEveryMinutes: Number(form.syncEveryMinutes),
       shopifyShopDomain: form.shopifyShopDomain, shopifyClientId: form.shopifyClientId, shopifyClientSecret: form.shopifyClientSecret, shopifyToken: form.shopifyToken,
+      amazonClientId: form.amazonClientId, amazonClientSecret: form.amazonClientSecret, amazonRefreshToken: form.amazonRefreshToken,
+      amazonRegion: form.amazonRegion, amazonMarketplaceIds: form.amazonMarketplaceIds.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean),
       metaToken: form.metaToken, metaAccounts: parseAccounts(form.metaAccounts, keys),
       googleDeveloperToken: form.googleDeveloperToken, googleClientId: form.googleClientId, googleClientSecret: form.googleClientSecret,
       googleRefreshToken: form.googleRefreshToken, googleLoginCustomerId: form.googleLoginCustomerId, googleAccounts: parseAccounts(form.googleAccounts, keys),
@@ -145,7 +148,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
     try {
       const { config: next } = await savePerformanceConfig(brandId, patch());
       onSaved(next);
-      setForm((f) => ({ ...f, shopifyClientSecret: "", shopifyToken: "", metaToken: "", googleDeveloperToken: "", googleClientSecret: "", googleRefreshToken: "" }));
+      setForm((f) => ({ ...f, shopifyClientSecret: "", shopifyToken: "", amazonClientSecret: "", amazonRefreshToken: "", metaToken: "", googleDeveloperToken: "", googleClientSecret: "", googleRefreshToken: "" }));
       setNotice({ kind: "ok", text: "Saved. Credentials are stored encrypted." });
       return true;
     } catch (err) {
@@ -154,7 +157,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
     } finally { setSaving(false); }
   };
 
-  const test = async (source: "shopify" | "meta" | "google") => {
+  const test = async (source: PerformanceSource) => {
     setTesting(source);
     try {
       if (!(await save())) return; // test what's stored
@@ -171,13 +174,19 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
     onSyncStarted();
   };
 
-  const TestLine = ({ source }: { source: "shopify" | "meta" | "google" }) => {
+  const TestLine = ({ source }: { source: PerformanceSource }) => {
     const r = tests[source];
     if (!r) return null;
     if (!r.ok) return <div className="mt-1.5 text-[10px] font-mono text-rose-400 break-words">{r.error}</div>;
     return (
       <div className="mt-1.5 text-[10px] font-mono text-emerald-400">
-        ✓ connected{r.shop ? ` · ${r.shop}${r.currency ? ` (${r.currency})` : ""}` : ""}
+        ✓ connected{r.shop ? ` · ${r.shop}${r.currency ? ` (${r.currency})` : ""}` : ""}{r.seller !== undefined ? ` · ${r.seller ?? "seller name not readable"}${r.region ? ` (${r.region} endpoint)` : ""}` : ""}
+        {r.marketplaces?.map((m) => <div key={m.id} className="text-white/50">{m.name} · {m.id} · {m.country ?? "?"}{m.currency ? ` · ${m.currency}` : ""}</div>)}
+        {r.backfillFrom && (r.ordersSeen
+          ? <div className="text-white/50">orders: {r.ordersSeen >= 100 ? "100+" : r.ordersSeen} since {r.backfillFrom.slice(0, 10)} on the first page, oldest {r.oldestOrder ? new Date(r.oldestOrder).toLocaleDateString("en-GB") : "—"}</div>
+          : <div className="text-amber-300">orders: none since {r.backfillFrom.slice(0, 10)} on these marketplaces — check the marketplace ids / region</div>)}
+        {r.buyerInfo === true && <div className="text-white/50">buyer info: readable — new/returning customers per Amazon buyer, shipping country per order</div>}
+        {r.buyerInfo === false && <div className="text-amber-300">buyer info: not readable ({r.buyerInfoError ?? "no restricted data token"}). Revenue and margin are fine; every Amazon order will count as new-customer and the region comes from the marketplace. To fix, add the "Direct-to-Consumer Shipping (Restricted)" role to the app in Seller Central, re-authorise it and paste the new refresh token.</div>}
         {r.accounts?.map((a) => <div key={a.id} className="text-white/50">{a.name} · {a.id} · {a.timezone}{a.currency ? ` · ${a.currency}` : ""}</div>)}
         {r.scopes && r.scopes.length > 0 && <div className="text-white/50 break-words">scopes: {r.scopes.join(", ")}</div>}
         {r.missingScopes && r.missingScopes.length > 0 && (
@@ -201,14 +210,14 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <div className="text-[11px] font-mono uppercase tracking-wide text-cyan-300/70 inline-flex items-center gap-2"><Plug size={12} /> Connect data sources</div>
-          <p className="text-[11px] text-white/40 font-mono mt-1">Paste the credentials once. They are encrypted at rest and never shown again. All three connections are read-only — the dashboard only pulls numbers, it can't change anything in the shop or the ad accounts. Then switch Data source to Live and press Save &amp; sync now.</p>
+          <p className="text-[11px] text-white/40 font-mono mt-1">Paste the credentials once. They are encrypted at rest and never shown again. All four connections are read-only — the dashboard only pulls numbers, it can't change anything in the shop, on Amazon or in the ad accounts. Then switch Data source to Live and press Save &amp; sync now.</p>
           {!secretsKeySet && <p className="text-[11px] text-amber-300 font-mono mt-1">CONNECTIONS_KEY is missing in .env.local — credentials can't be saved until it is set (see docs/performance-dashboard.md).</p>}
         </div>
         <div className="flex items-center gap-2">
           <label className="inline-flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider text-white/35">Data source
             <select className={`${input} w-auto`} value={form.dataSource} onChange={set("dataSource")}>
               <option value="mock">Mock (generated)</option>
-              <option value="live">Live (Shopify + ads)</option>
+              <option value="live">Live (Shopify / Amazon + ads)</option>
             </select>
           </label>
           <button type="button" className={btnPrimary} onClick={() => void save()} disabled={saving}>{saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />} Save</button>
@@ -217,7 +226,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
 
       {notice && <div className={`text-[11px] font-mono ${notice.kind === "ok" ? "text-emerald-400" : "text-rose-400"}`}>{notice.text}</div>}
 
-      <div className="grid gap-5 lg:grid-cols-3">
+      <div className="grid gap-5 lg:grid-cols-2 xl:grid-cols-4">
         {/* Shopify */}
         <section className="rounded-lg border border-white/[0.07] p-4 space-y-3">
           <div className="flex items-center justify-between"><div className="text-[11px] font-semibold text-white/85">Shopify · sales</div><StatusPill st={by("shopify")} /></div>
@@ -238,6 +247,26 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
           <SecretField id="shopToken" name="Legacy access token (only for apps made in the admin before 2026)" set={config.shopify.tokenSet && !config.shopify.installedAt} value={form.shopifyToken} onChange={(v) => setForm((f) => ({ ...f, shopifyToken: v }))} placeholder="shpat_… — leave empty for a Dev Dashboard app" />
           <button type="button" className={btnGhost} onClick={() => void test("shopify")} disabled={testing !== null}>{testing === "shopify" ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} Test connection</button>
           <TestLine source="shopify" />
+        </section>
+
+        {/* Amazon */}
+        <section className="rounded-lg border border-white/[0.07] p-4 space-y-3">
+          <div className="flex items-center justify-between"><div className="text-[11px] font-semibold text-white/85">Amazon · sales</div><StatusPill st={by("amazon")} /></div>
+          <div><label htmlFor="amzClientId" className={label}>LWA client id</label><input id="amzClientId" className={input} value={form.amazonClientId} onChange={set("amazonClientId")} placeholder="amzn1.application-oa2-client.…" autoComplete="off" /></div>
+          <SecretField id="amzClientSecret" name="LWA client secret" set={config.amazon.clientSecretSet} value={form.amazonClientSecret} onChange={(v) => setForm((f) => ({ ...f, amazonClientSecret: v }))} placeholder="amzn1.oa2-cs.v1.…" />
+          <SecretField id="amzRefresh" name="Refresh token (self-authorisation)" set={config.amazon.refreshTokenSet} value={form.amazonRefreshToken} onChange={(v) => setForm((f) => ({ ...f, amazonRefreshToken: v }))} placeholder="Atzr|…" />
+          <div className="grid grid-cols-2 gap-2">
+            <div><label htmlFor="amzRegion" className={label}>Region endpoint</label>
+              <select id="amzRegion" className={input} value={form.amazonRegion} onChange={set("amazonRegion")}>
+                <option value="EU">EU (Europe, UK, IN, AE, SA)</option>
+                <option value="NA">NA (US, CA, MX, BR)</option>
+                <option value="FE">FE (JP, AU, SG)</option>
+              </select></div>
+            <div><label htmlFor="amzMarkets" className={label}>Marketplace ids (optional)</label><input id="amzMarkets" className={input} value={form.amazonMarketplaceIds} onChange={set("amazonMarketplaceIds")} placeholder="empty = all; A1PA6795UKMFR9 = .de" /></div>
+          </div>
+          <p className="text-[10px] text-white/30 font-mono">Seller Central → Apps &amp; Services → <span className="text-white/50">Develop Apps</span> → Add new app client: name it (e.g. Inana), API type SP API, OAuth redirect/login URIs can stay empty, Roles: tick only <span className="text-white/50">Inventory and Order Tracking</span> (that is the Orders API; nothing else — the dashboard only reads orders). Also tick <span className="text-white/50">Direct-to-Consumer Shipping (Restricted)</span> if you want new/returning customers and the shipping country per order; without it every Amazon order counts as new and the region is the marketplace's country. Save → <span className="text-white/50">View</span> → copy LWA client id + client secret → back in the list click <span className="text-white/50">Authorize</span> → the refresh token appears once; paste all three here. Order totals in the marketplace currency; cost of goods comes from Shopify's "Cost per item" matched by SKU — Amazon SKUs must equal the Shopify variant SKUs. Backfills from 1 Jan last year once (slow: Amazon allows one page a minute), then polls only orders that changed.</p>
+          <button type="button" className={btnGhost} onClick={() => void test("amazon")} disabled={testing !== null}>{testing === "amazon" ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} Test connection</button>
+          <TestLine source="amazon" />
         </section>
 
         {/* Meta */}
@@ -280,7 +309,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
             </div>
             <div><label htmlFor="ncd" className={label}>New customer =</label>
               <select id="ncd" className={input} value={form.ncDefinition} onChange={set("ncDefinition")}>
-                <option value="first_ever">first-ever order (Shopify)</option>
+                <option value="first_ever">first-ever order (per channel: Shopify customer / Amazon buyer)</option>
                 <option value="window_days">first order in N days</option>
               </select></div>
             <div><label htmlFor="ncw" className={label}>N days</label><input id="ncw" className={input} value={form.ncWindowDays} onChange={set("ncWindowDays")} disabled={form.ncDefinition !== "window_days"} /></div>

@@ -246,6 +246,13 @@
       "when": 1794483717605,
       "tag": "0034_performance_regions",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1794485814277,
+      "tag": "0035_amazon_sales_channel",
+      "breakpoints": true
     }
   ]
 }

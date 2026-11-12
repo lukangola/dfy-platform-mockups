@@ -3,7 +3,7 @@
  *
  *   GET  /api/performance/config?brandId=        → { config, sync[] }   economics, source, connection state, freshness
  *   PUT  /api/performance/config?brandId=        → { config }           save config / credentials (secrets encrypted at rest)
- *   POST /api/performance/test?brandId=&source=  → { result }           credential check against Shopify / Meta / Google
+ *   POST /api/performance/test?brandId=&source=  → { result }           credential check against Shopify / Amazon / Meta / Google
  *   POST /api/performance/sync?brandId=[&full=1] → 202 { started }      run a sync now (full = wipe + backfill)
  *   GET  /api/performance/status?brandId=        → { sync[], running }  poll while a sync runs
  *   GET  /api/performance/hours?brandId=&from=&to= → { dataset, source } hourly buckets in [from, to]
@@ -25,6 +25,7 @@ import { REQUIRED_SCOPES, forgetShopifyToken, testShopify } from "../lib/perform
 import { createShopifyInstallUrl, exchangeShopifyCode, shopifyShopHost, storeShopifyTokens, takeShopifyInstallState, verifyShopifyCallbackHmac } from "../lib/performance/shopifyOAuth.js";
 import { testMeta } from "../lib/performance/meta.js";
 import { testGoogle } from "../lib/performance/googleAds.js";
+import { testAmazon } from "../lib/performance/amazon.js";
 import { hasSecretsKey } from "../lib/performance/secrets.js";
 
 export const performanceRouter: Router = Router();
@@ -73,7 +74,7 @@ performanceRouter.put("/config", async (req, res) => {
   try {
     const brand = await loadBrand(req, res); if (!brand) return;
     const patch = (req.body ?? {}) as ConfigPatch;
-    const touchesSecret = ["shopifyToken", "shopifyClientSecret", "metaToken", "googleDeveloperToken", "googleClientSecret", "googleRefreshToken"].some((k) => typeof (patch as Record<string, unknown>)[k] === "string" && (patch as Record<string, unknown>)[k] !== "");
+    const touchesSecret = ["shopifyToken", "shopifyClientSecret", "amazonClientSecret", "amazonRefreshToken", "metaToken", "googleDeveloperToken", "googleClientSecret", "googleRefreshToken"].some((k) => typeof (patch as Record<string, unknown>)[k] === "string" && (patch as Record<string, unknown>)[k] !== "");
     if (touchesSecret && !hasSecretsKey()) {
       res.status(400).json({ error: "CONNECTIONS_KEY is not set in .env.local — credentials can't be stored encrypted. Generate one: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"" });
       return;
@@ -137,8 +138,9 @@ performanceRouter.post("/test", async (req, res) => {
     const result = source === "shopify" ? await testShopify(config)
       : source === "meta" ? await testMeta(config)
       : source === "google" ? await testGoogle(config)
+      : source === "amazon" ? await testAmazon(config)
       : null;
-    if (!result) { res.status(400).json({ error: "source must be shopify | meta | google" }); return; }
+    if (!result) { res.status(400).json({ error: "source must be shopify | amazon | meta | google" }); return; }
     res.json({ result });
   } catch (err) {
     // Credential problems are expected here — report as 200 with ok:false so the UI shows the message inline.

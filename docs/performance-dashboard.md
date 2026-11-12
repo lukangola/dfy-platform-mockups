@@ -1,4 +1,4 @@
-# Performance dashboard (Inana section) — mock + live (Shopify, Meta, Google Ads)
+# Performance dashboard (Inana section) — mock + live (Shopify, Amazon, Meta, Google Ads)
 
 Branch: `performance-dashboard` (worktree `.claude/worktrees/performance-dashboard`, cut from `origin/main`).
 Reference implementation + spec: `~/ClaudeCowork/performance-dashboard/` (`INANA_DASHBOARD_SPEC.md`, `BUILD_PLAN.md`).
@@ -70,6 +70,28 @@ platform-table spend equals the Meta / Google / TikTok columns of the Total row.
    Pasting different app credentials later (e.g. the client's own app) drops the installed token;
    run a full sync afterwards to backfill the history. Set `PUBLIC_APP_URL` in `.env.local` if the
    app is reached under another origin than the browser reports.
+2b. **Amazon** (clients that also sell on Amazon; skip otherwise): a private, self-authorised
+   Selling Partner API app in the seller's own Seller Central. Seller Central → Apps & Services →
+   **Develop Apps** (the account needs the Developer profile once; Amazon approves a private
+   "seller" developer profile without a review) → **Add new app client**: name (e.g. Inana), API
+   type **SP API**, OAuth login/redirect URIs empty (nothing is hosted), **Roles**: tick only
+   **Inventory and Order Tracking** — that role carries the Orders API, and the dashboard calls
+   nothing else (getOrders + getOrderItems + the seller's marketplace list). Optionally also tick
+   **Direct-to-Consumer Shipping (Restricted)**: it lets the dashboard read the anonymised buyer
+   email and the shipping country, which is what new/returning customers and the region per order
+   are computed from; without it every Amazon order counts as new-customer and the region is the
+   marketplace's country (amazon.de → DE). Still read-only either way. Save → **View** → copy
+   **LWA client id** and **client secret** → back in the app list click **Authorize** → the
+   **refresh token** is shown once; copy it. In the Amazon card paste the three values, choose the
+   **region endpoint** (EU for amazon.de/.nl/.co.uk/…, NA for .com/.ca/.mx, FE for .jp/.au/.sg) and
+   leave **Marketplace ids** empty to pull every marketplace the seller sells in (or list ids such
+   as `A1PA6795UKMFR9` for .de, `A1805IZSGTT6HS` for .nl, `A1F83G8C2ARO7P` for .co.uk). Click
+   **Test connection**: it exchanges the refresh token, lists the seller's marketplaces with
+   country and currency, shows how many orders the first page since the backfill start holds and
+   the oldest of them, and says whether buyer info is readable. If the Authorize step fails with
+   "developer profile", finish the profile under Develop Apps first; if the refresh token is
+   rejected later, re-authorise the app and paste the new token (saving the credentials again drops
+   nothing else; run a full re-sync only if you change marketplaces).
 3. **Meta**: a System-user access token with only `ads_read` (Business settings → Users → System
    users → Generate token, tick `ads_read`, assign the ad accounts, no expiry), and the ad accounts
    with their region: `act_123:NLBE, act_456:UK`. Click **Test connection** (account name, time
@@ -85,9 +107,11 @@ platform-table spend equals the Meta / Google / TikTok columns of the Total row.
    e.g. `NL/BE` → `NLBE`. Saving re-assigns the synced orders.) The first Shopify backfill (since 1 Jan last year) runs in the background;
    the header shows per-source freshness ("Shopify synced 2m ago · Meta … · Google …"). After that
    the server re-syncs every 10 minutes (configurable) while the source is Live.
-6. Reconcile: Yesterday's revenue vs. Shopify admin; Yesterday's spend vs. Ads Manager (±1%);
-   Gross margin % vs. Shopify's Profit report. If the header shows an amber "no Cost per item for
-   N% of revenue" line, add costs to those products in Shopify (Products → variant → Cost per item).
+6. Reconcile: Yesterday's revenue vs. Shopify admin (+ Seller Central → Business reports for
+   Amazon); Yesterday's spend vs. Ads Manager (±1%); Gross margin % vs. Shopify's Profit report.
+   If the header shows an amber "no cost of goods for N% of revenue" line, add costs to those
+   products in Shopify (Products → variant → Cost per item) and, for Amazon, make sure the Amazon
+   SKU equals the Shopify variant SKU (the server log lists the unmatched SKUs after each sync).
 
 ### Why tokens, not an OAuth login
 
@@ -99,6 +123,10 @@ platform-table spend equals the Meta / Google / TikTok columns of the Total row.
   stored encrypted with its refresh token. The app is scoped read-only on Shopify's side, so even
   a leaked secret could not change anything, and the 24-hour tokens from the exchange never leave
   the server (in-memory cache, never stored).
+- **Amazon**: a self-authorised SP-API app is Amazon's own flow for a seller integrating their
+  own account; the refresh token it issues is long-lived and the server swaps it for 1-hour access
+  tokens that stay in memory. The app's roles are set in Seller Central, so the token can only read
+  what the Orders role allows. No AWS keys or request signing are needed any more.
 - **Meta**: a System-user token is long-lived and belongs to the business, not to a person's
   login, and carries only `ads_read`. An OAuth "Log in with Facebook" would give a 60-day token tied
   to one person and require a Meta app review for `ads_read`.
@@ -117,7 +145,8 @@ cancellations.
 
 ```
 Shopify Admin REST (orders, 250/page, created_at_min → updated_at_min cursor) ─┐
-Meta Marketing API (account insights, hourly breakdown, account tz → UTC)   ─┼─► performance_orders / performance_spend_hours
+Amazon SP-API Orders (100/page, CreatedAfter → LastUpdatedAfter cursor)      ─┼─► performance_orders (channel) / performance_spend_hours
+Meta Marketing API (account insights, hourly breakdown, account tz → UTC)   ─┤          │
 Google Ads API (GAQL customer report, segments.date + hour, account tz → UTC) ─┘          │
                                        sync.ts (10-min loop + "Sync now") ──────────────► performance_sync_state (freshness)
                                                                                            │
@@ -130,8 +159,36 @@ backfill window (older customers count as returning); `window_days` = no earlier
 customer within N days. Guests are keyed by email; orders without customer or email count as new.
 Cancelled/voided and test orders are stored but excluded. Refunds are not netted yet (Phase 5).
 
+Amazon data notes (`channel = amazon` rows in `performance_orders`, same hourly buckets, no engine change):
+- **Order key** = the Amazon order id (`302-1234567-1234567`), stored in the `shopify_order_id`
+  column (the column predates Amazon; the unique key is brand + channel + id). **Order time** =
+  `PurchaseDate`. **Revenue** = `OrderTotal` in the marketplace currency (no conversion yet, like
+  Shopify); the subtotal is Σ item price − promotion discount when every item carries a price.
+- **Excluded**: `Pending` / `PendingAvailability` orders are not stored at all (they have no total
+  yet and come back as `Unshipped` on the next incremental run). `Canceled` and `Unfulfillable`
+  orders are stored with `cancelled = true`, so a cancellation after the fact neutralises the row.
+- **Region**: the order's `ShippingAddress.CountryCode` when Amazon returns it (it does for shipped
+  orders; with the restricted role for all), otherwise the marketplace's country (amazon.de → DE,
+  from the seller's marketplace list, else a built-in table). The sync log line says how many orders
+  used which (`country from shipping N / marketplace M`).
+- **New customer**: `customer_key = "amz:" + BuyerInfo.BuyerEmail` — Amazon's anonymised
+  `…@marketplace.amazon.de` address, opaque but stable per buyer. The existing first-ever-order rule
+  then applies. Keys never collide with Shopify's (`id:` / `email:`), so **NC/RC is per channel**: a
+  buyer who ordered on Shopify and then on Amazon is "new" on both. Reading the buyer email needs a
+  Restricted Data Token, i.e. the "Direct-to-Consumer Shipping (Restricted)" role; without it the key
+  is null and the order counts as new-customer (same as a Shopify guest without email).
+- **Cost of goods**: Amazon `SellerSKU` matched (trimmed, case-insensitive) against the Shopify
+  variant SKUs now cached in `performance_variant_costs.sku`; cogs = Σ quantity × Shopify unit cost.
+  Any unmatched SKU leaves `cogs_complete = false`, so the margin-coverage warning in the header
+  fires and the log lists the SKUs. Variants cached before the `sku` column existed are refreshed the
+  next time a Shopify order with that variant syncs (or on Full re-sync).
+- **Rate limits**: getOrders allows 0.0167 requests/s (burst 20) and getOrderItems 0.5/s, so a
+  first backfill of a few thousand orders takes hours; it runs last in the per-brand pass, upserts
+  page by page, and backs off on 429 using `x-amzn-RateLimit-Limit`. Incremental runs are small.
+
 API versions (env overrides): `SHOPIFY_API_VERSION` (2025-01), `META_GRAPH_VERSION` (v23.0),
-`GOOGLE_ADS_API_VERSION` (v22). If a platform retires a version the Test button shows the error.
+`GOOGLE_ADS_API_VERSION` (v22); Amazon uses Orders API v0, Sellers v1, Tokens 2021-03-01. If a
+platform retires a version the Test button shows the error.
 
 ## Where things live
 
@@ -147,11 +204,12 @@ API versions (env overrides): `SHOPIFY_API_VERSION` (2025-01), `META_GRAPH_VERSI
 | Connect-data-sources panel | `client/src/components/PerformanceSourcesPanel.tsx` |
 | LiveSource (SQL → hourly buckets) | `server/lib/performance/liveSource.ts` |
 | Shopify orders sync + NC/RC recompute | `server/lib/performance/shopify.ts` |
+| Amazon orders sync (SP-API Orders, SKU → Shopify cost) | `server/lib/performance/amazon.ts` |
 | Meta hourly spend sync | `server/lib/performance/meta.ts` |
 | Google Ads hourly spend sync | `server/lib/performance/googleAds.ts` |
 | Sync loop, "Sync now", freshness | `server/lib/performance/sync.ts` |
 | Credential encryption | `server/lib/performance/secrets.ts` |
-| Tables (migration `drizzle/0031_performance_dashboard.sql`) | `performance_client_configs`, `performance_orders`, `performance_spend_hours`, `performance_sync_state` |
+| Tables (migrations `drizzle/0031_performance_dashboard.sql` … `0035_amazon_sales_channel.sql`) | `performance_client_configs`, `performance_orders` (`channel`), `performance_variant_costs` (`sku`), `performance_spend_hours`, `performance_sync_state` |
 
 Hourly-bucket contract (every source must produce it):
 `{ t, c: { REGION: [ncOrders, ncRev, rcOrders, rcRev, cogs] }, s: { PLATFORM: [spendPerRegion] } }` — the
@@ -162,7 +220,8 @@ dataset carries the brand's `regions` (named ones, then Other); spend arrays are
 | Source | First run | Every 10 min after |
 | --- | --- | --- |
 | Shopify orders | all orders since 1 Jan last year, 250/page | only orders whose `updated_at` moved past the cursor (new, edited, cancelled, refunded) |
-| Shopify unit costs | one GraphQL request per 100 distinct variants seen in orders | only variants not cached yet, or cached > 30 days ago and seen again |
+| Shopify unit costs | one GraphQL request per 100 distinct variants seen in orders | only variants not cached yet, or cached > 30 days ago (or without SKU) and seen again |
+| Amazon orders | all orders created since 1 Jan last year, 100/page + one items call per live order | only orders whose `LastUpdateDate` moved past the cursor |
 | Meta spend | hourly rows since 1 Jan last year, 60-day chunks | last 3 days per account (late attribution settles) |
 | Google spend | hourly rows since 1 Jan last year, 90-day chunks | last 3 days per account |
 
@@ -180,8 +239,8 @@ redoes the backfill.
 
 ## Metric definitions
 
-- Cost of goods (COGS) = Σ quantity × Shopify "Cost per item" over the order's line items;
-  gross margin % = (revenue − COGS) ÷ revenue. Mock data uses a calibrated ~52% margin.
+- Cost of goods (COGS) = Σ quantity × Shopify "Cost per item" over the order's line items (Amazon
+  items by SKU match); gross margin % = (revenue − COGS) ÷ revenue. Mock data uses a calibrated ~52% margin.
 - CM = revenue − COGS − ad spend
 - NC CM = margin × NC revenue − ad spend (all ad spend counts as acquisition); RC CM = margin × RC revenue
 - NCPA = ad spend ÷ NC orders; NC ROAS = NC revenue ÷ ad spend
@@ -199,7 +258,10 @@ redoes the backfill.
 2. Platform ROAS/CPA in the by-platform table still use mock attribution factors; platform-reported
    conversions come with the campaign-level pull (Phase 4).
 3. TikTok and Windsor.ai fallback (Phase 4). Refund netting, currency conversion (shop currency is
-   assumed EUR), auth hardening for production (Phase 5).
+   assumed EUR; Amazon totals are stored in the marketplace currency as-is), auth hardening for
+   production (Phase 5). Amazon: the Reports API (`GET_FLAT_FILE_ALL_ORDERS_DATA_BY_LAST_UPDATE_GENERAL`)
+   would make the first backfill minutes instead of hours; Amazon ad spend (Advertising API) is a
+   separate platform and not pulled.
 4. Merge note: `drizzle/0031_performance_dashboard.sql` was generated from `main` (regenerated on
    2026-11-10 to include unit costs; the dev DB was reset to it). The unmerged `ai-employees`
    branch has its own 0031 (already applied to the shared dev DB) — renumber on merge.

@@ -8,8 +8,9 @@
  *
  * Cost of goods: each order's line items carry a variant id; the variant's unit cost
  * (InventoryItem.unitCost) is fetched once via Admin GraphQL, cached per brand in
- * performance_variant_costs and refreshed only when older than 30 days and seen again
- * in a synced order. cogs = Σ quantity × unit cost; cogs_complete = every line item had one.
+ * performance_variant_costs (with the variant's SKU, so Amazon orders can reuse the cost — see
+ * amazon.ts) and refreshed only when older than 30 days and seen again in a synced order.
+ * cogs = Σ quantity × unit cost; cogs_complete = every line item had one.
  *   First run : backfill every order since Jan 1 of last year (created_at_min), 250/page.
  *   Next runs : incremental by updated_at_min = cursor (catches edits, cancellations, refunds
  *               that change totals), so a 10-minute poll is enough for a live dashboard
@@ -246,12 +247,13 @@ class VariantCostCache {
   constructor(private readonly config: PerformanceClientConfig, private readonly host: string, private readonly auth: TokenSource) {}
 
   async load(): Promise<void> {
-    const rows = await db.select({ variantId: schema.performanceVariantCosts.variantId, unitCost: schema.performanceVariantCosts.unitCost, fetchedAt: schema.performanceVariantCosts.fetchedAt })
+    const rows = await db.select({ variantId: schema.performanceVariantCosts.variantId, unitCost: schema.performanceVariantCosts.unitCost, sku: schema.performanceVariantCosts.sku, fetchedAt: schema.performanceVariantCosts.fetchedAt })
       .from(schema.performanceVariantCosts).where(eq(schema.performanceVariantCosts.brandId, this.config.brandId));
     const cutoff = Date.now() - COST_TTL_MS;
     for (const r of rows) {
       this.costs.set(r.variantId, r.unitCost == null ? null : Number(r.unitCost));
-      if (r.fetchedAt.getTime() < cutoff) this.stale.add(r.variantId);
+      // rows cached before the sku column existed are refreshed the next time the variant is seen (Amazon matches on sku)
+      if (r.fetchedAt.getTime() < cutoff || r.sku == null) this.stale.add(r.variantId);
     }
   }
 
@@ -271,10 +273,10 @@ class VariantCostCache {
   }
 
   private async fetchBatch(ids: string[]): Promise<void> {
-    type Node = { id: string; inventoryItem?: { id?: string; unitCost?: { amount?: string; currencyCode?: string } | null } | null } | null;
+    type Node = { id: string; sku?: string | null; inventoryItem?: { id?: string; unitCost?: { amount?: string; currencyCode?: string } | null } | null } | null;
     const data = await shopifyGraphql<{ nodes: Node[] }>(this.host, this.auth, `
       query VariantCosts($ids: [ID!]!) {
-        nodes(ids: $ids) { ... on ProductVariant { id inventoryItem { id unitCost { amount currencyCode } } } }
+        nodes(ids: $ids) { ... on ProductVariant { id sku inventoryItem { id unitCost { amount currencyCode } } } }
       }`, { ids: ids.map((id) => `gid://shopify/ProductVariant/${id}`) });
     const now = new Date();
     const values = ids.map((id, i) => {
@@ -286,6 +288,8 @@ class VariantCostCache {
       return {
         brandId: this.config.brandId, variantId: id,
         inventoryItemId: node?.inventoryItem?.id?.split("/").pop() ?? null,
+        // "" when the variant has no SKU in Shopify (so it is not refetched every run); null only for deleted variants
+        sku: node ? (node.sku ?? "").trim() : null,
         unitCost: cost != null && Number.isFinite(cost) ? cost.toFixed(4) : null,
         currency: node?.inventoryItem?.unitCost?.currencyCode ?? null,
         fetchedAt: now,
@@ -293,7 +297,7 @@ class VariantCostCache {
     });
     await db.insert(schema.performanceVariantCosts).values(values).onConflictDoUpdate({
       target: [schema.performanceVariantCosts.brandId, schema.performanceVariantCosts.variantId],
-      set: { inventoryItemId: sql`excluded.inventory_item_id`, unitCost: sql`excluded.unit_cost`, currency: sql`excluded.currency`, fetchedAt: sql`excluded.fetched_at` },
+      set: { inventoryItemId: sql`excluded.inventory_item_id`, sku: sql`excluded.sku`, unitCost: sql`excluded.unit_cost`, currency: sql`excluded.currency`, fetchedAt: sql`excluded.fetched_at` },
     });
   }
 
@@ -359,6 +363,7 @@ async function upsertOrders(config: PerformanceClientConfig, orders: ShopifyOrde
     const customerKey = o.customer?.id != null ? `id:${o.customer.id}` : (o.email ?? o.customer?.email) ? `email:${(o.email ?? o.customer?.email ?? "").toLowerCase()}` : null;
     return {
       brandId: config.brandId,
+      channel: "shopify",
       shopifyOrderId: String(o.id),
       createdAt: new Date(o.processed_at ?? o.created_at),
       updatedAt: new Date(o.updated_at),
@@ -379,7 +384,7 @@ async function upsertOrders(config: PerformanceClientConfig, orders: ShopifyOrde
     .insert(schema.performanceOrders)
     .values(values)
     .onConflictDoUpdate({
-      target: [schema.performanceOrders.brandId, schema.performanceOrders.shopifyOrderId],
+      target: [schema.performanceOrders.brandId, schema.performanceOrders.channel, schema.performanceOrders.shopifyOrderId],
       set: {
         createdAt: sql`excluded.created_at`, updatedAt: sql`excluded.updated_at`,
         customerKey: sql`excluded.customer_key`, customerCreatedAt: sql`excluded.customer_created_at`,
@@ -392,7 +397,11 @@ async function upsertOrders(config: PerformanceClientConfig, orders: ShopifyOrde
     });
 }
 
-/** Recompute is_new_customer for the whole brand (cheap: one window query per sync). */
+/**
+ * Recompute is_new_customer for the whole brand (cheap: one window query per sync). Runs over both
+ * channels at once; Shopify keys ("id:…", "email:…") and Amazon keys ("amz:…") never coincide, so
+ * new/returning is effectively per channel.
+ */
 export async function recomputeNewCustomer(config: PerformanceClientConfig): Promise<void> {
   // History floor: customers created before the oldest order we can see may have earlier orders
   // we cannot see (a Partner-organization app only gets the last 60 days), so they count as

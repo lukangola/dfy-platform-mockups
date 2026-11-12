@@ -2,7 +2,7 @@
  * Performance dashboard — per-client ("brand") configuration, DB-backed.
  *
  * Row: performance_client_configs (one per brand; none = defaults, mock data).
- * Secrets (Shopify token, Meta token, Google secrets) are AES-GCM encrypted at
+ * Secrets (Shopify token, Amazon refresh token, Meta token, Google secrets) are AES-GCM encrypted at
  * rest and only ever leave the server as "set / not set". The UI panel on the
  * Performance page writes this row; nothing lives in .env except defaults and
  * the encryption key. No economics inputs live here: margin is derived from
@@ -13,10 +13,14 @@ import { db, schema } from "../db.js";
 import { DEFAULT_REGIONS, OTHER_REGION, flagFor, regionKeyFor, type PlatformKey, type RegionDef, type RegionKey } from "../../../shared/performance/engine.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { forgetShopifyToken } from "./shopify.js";
+import { forgetAmazonToken } from "./amazon.js";
 
 export type DataSourceKind = "mock" | "live";
 export type NcDefinition = "first_ever" | "window_days";
 export type RevenueField = "total" | "subtotal";
+/** SP-API regional endpoint the seller account lives on (EU covers Europe, UK, India, Middle East). */
+export type AmazonRegion = "EU" | "NA" | "FE";
+export const AMAZON_REGIONS: AmazonRegion[] = ["EU", "NA", "FE"];
 export interface AccountMap { id: string; region: RegionKey }
 /** A named region: the countries (ISO-3166 alpha-2) that roll up into it. Everything else is "Other". */
 export interface RegionConfig extends RegionDef { countries: string[] }
@@ -42,6 +46,8 @@ export interface PerformanceClientConfig {
     /** install-flow extras (Partner app): refresh token + expiry of `token`, and when it was installed */
     refreshToken: string | null; tokenExpiresAt: Date | null; installedAt: Date | null;
   };
+  /** private (self-authorised) Seller Central app: LWA client id + secret + refresh token; Orders API only */
+  amazon: { clientId: string | null; clientSecret: string | null; refreshToken: string | null; region: AmazonRegion; marketplaceIds: string[] };
   meta: { token: string | null; accounts: AccountMap[] };
   google: {
     developerToken: string | null; clientId: string | null; clientSecret: string | null;
@@ -116,6 +122,7 @@ function defaults(brandId: string, name: string): PerformanceClientConfig {
     syncEveryMinutes: 10,
     mockSeed: seedFromId(brandId),
     shopify: { shopDomain: null, token: null, clientId: null, clientSecret: null, refreshToken: null, tokenExpiresAt: null, installedAt: null },
+    amazon: { clientId: null, clientSecret: null, refreshToken: null, region: "EU", marketplaceIds: [] },
     meta: { token: null, accounts: [] },
     google: { developerToken: null, clientId: null, clientSecret: null, refreshToken: null, loginCustomerId: null, accounts: [] },
   };
@@ -130,6 +137,24 @@ function parseAccounts(v: unknown, regions: RegionConfig[]): AccountMap[] {
     const region = typeof x?.region === "string" ? x.region.toUpperCase() : "";
     return id && keys.has(region) ? [{ id, region }] : [];
   });
+}
+
+function parseAmazonRegion(v: unknown): AmazonRegion {
+  const r = String(v ?? "").toUpperCase();
+  return (AMAZON_REGIONS as string[]).includes(r) ? (r as AmazonRegion) : "EU";
+}
+
+/** Marketplace ids: list or comma/space-separated text; Amazon ids are 10–14 upper-case alphanumerics. */
+export function parseMarketplaceIds(v: unknown): string[] {
+  const raw = Array.isArray(v) ? v : typeof v === "string" ? v.split(/[,\s]+/) : [];
+  const out: string[] = [];
+  for (const x of raw) {
+    const id = String(x ?? "").trim().toUpperCase();
+    if (!id) continue;
+    if (!/^[A-Z0-9]{10,14}$/.test(id)) throw new Error(`"${id}" is not an Amazon marketplace id (e.g. A1PA6795UKMFR9 for amazon.de)`);
+    if (!out.includes(id)) out.push(id);
+  }
+  return out;
 }
 
 /** Stored regions, or the defaults when the row has none / holds something unreadable. */
@@ -154,6 +179,10 @@ export async function getClientConfig(brandId: string, brandName: string): Promi
       shopDomain: row.shopifyShopDomain, token: decryptSecret(row.shopifyTokenEnc),
       clientId: row.shopifyClientId, clientSecret: decryptSecret(row.shopifyClientSecretEnc),
       refreshToken: decryptSecret(row.shopifyRefreshTokenEnc), tokenExpiresAt: row.shopifyTokenExpiresAt, installedAt: row.shopifyInstalledAt,
+    },
+    amazon: {
+      clientId: row.amazonClientId, clientSecret: decryptSecret(row.amazonClientSecretEnc), refreshToken: decryptSecret(row.amazonRefreshTokenEnc),
+      region: parseAmazonRegion(row.amazonRegion), marketplaceIds: (() => { try { return parseMarketplaceIds(row.amazonMarketplaceIds); } catch { return []; } })(),
     },
     meta: { token: decryptSecret(row.metaTokenEnc), accounts: parseAccounts(row.metaAccounts, regions) },
     google: {
@@ -182,6 +211,8 @@ export interface ConfigPatch {
   syncEveryMinutes?: number;
   shopifyShopDomain?: string | null; shopifyToken?: string | null;
   shopifyClientId?: string | null; shopifyClientSecret?: string | null;
+  amazonClientId?: string | null; amazonClientSecret?: string | null; amazonRefreshToken?: string | null;
+  amazonRegion?: AmazonRegion; amazonMarketplaceIds?: string[] | string;
   metaToken?: string | null; metaAccounts?: AccountMap[];
   googleDeveloperToken?: string | null; googleClientId?: string | null; googleClientSecret?: string | null;
   googleRefreshToken?: string | null; googleLoginCustomerId?: string | null; googleAccounts?: AccountMap[];
@@ -225,6 +256,11 @@ export async function saveClientConfig(brandId: string, patch: ConfigPatch): Pro
       set.shopifyRefreshTokenEnc = null; set.shopifyTokenExpiresAt = null; set.shopifyInstalledAt = null;
     }
   }
+  if (patch.amazonClientId !== undefined) set.amazonClientId = patch.amazonClientId?.trim() || null;
+  const acs = secretSet(patch.amazonClientSecret); if (acs.set) set.amazonClientSecretEnc = acs.value;
+  const art = secretSet(patch.amazonRefreshToken); if (art.set) set.amazonRefreshTokenEnc = art.value;
+  if (patch.amazonRegion !== undefined) set.amazonRegion = parseAmazonRegion(patch.amazonRegion);
+  if (patch.amazonMarketplaceIds !== undefined) set.amazonMarketplaceIds = parseMarketplaceIds(patch.amazonMarketplaceIds);
   // Account → region pairs are validated against the regions being saved (or the stored ones).
   const regionsForAccounts = regions ?? (patch.metaAccounts || patch.googleAccounts ? (await getClientConfig(brandId, "")).regions : []);
   const mt = secretSet(patch.metaToken); if (mt.set) set.metaTokenEnc = mt.value;
@@ -242,6 +278,7 @@ export async function saveClientConfig(brandId: string, patch: ConfigPatch): Pro
   });
   if (regions) await reassignOrderRegions(brandId, regionMappingOf(regions));
   forgetShopifyToken(brandId); // credentials may have changed — next call exchanges them again
+  forgetAmazonToken(brandId);
 }
 
 /** Regions changed: re-derive the stored region of every synced order from its country. */
@@ -261,6 +298,11 @@ export function shopifyConnected(c: PerformanceClientConfig): boolean {
   return Boolean(c.shopify.shopDomain && (c.shopify.token || (c.shopify.clientId && c.shopify.clientSecret)));
 }
 
+/** Amazon is usable: LWA client id + secret + refresh token of the self-authorised app. */
+export function amazonConnected(c: PerformanceClientConfig): boolean {
+  return Boolean(c.amazon.clientId && c.amazon.clientSecret && c.amazon.refreshToken);
+}
+
 /** What the client sees — never a secret, only whether one is set. */
 export function publicConfig(c: PerformanceClientConfig) {
   return {
@@ -271,6 +313,10 @@ export function publicConfig(c: PerformanceClientConfig) {
       shopDomain: c.shopify.shopDomain, tokenSet: Boolean(c.shopify.token),
       clientId: c.shopify.clientId, clientSecretSet: Boolean(c.shopify.clientSecret),
       installedAt: c.shopify.installedAt ? c.shopify.installedAt.toISOString() : null,
+    },
+    amazon: {
+      clientId: c.amazon.clientId, clientSecretSet: Boolean(c.amazon.clientSecret), refreshTokenSet: Boolean(c.amazon.refreshToken),
+      region: c.amazon.region, marketplaceIds: c.amazon.marketplaceIds,
     },
     meta: { tokenSet: Boolean(c.meta.token), accounts: c.meta.accounts },
     google: {
@@ -284,6 +330,7 @@ export function publicConfig(c: PerformanceClientConfig) {
       TT: false,
     } as Record<PlatformKey, boolean>,
     shopifyConfigured: shopifyConnected(c),
+    amazonConfigured: amazonConnected(c),
   };
 }
 export type PublicPerformanceConfig = ReturnType<typeof publicConfig>;

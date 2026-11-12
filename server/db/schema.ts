@@ -943,20 +943,31 @@ export const performanceClientConfigs = pgTable("performance_client_configs", {
   googleLoginCustomerId: text("google_login_customer_id"),
   /** [{ id: "1234567890", region: "UK" }] */
   googleAccounts: jsonb("google_accounts").notNull().default(sql`'[]'::jsonb`),
+  /** Amazon Selling Partner API — private (self-authorised) Seller Central app, Orders role only */
+  amazonClientId: text("amazon_client_id"),
+  amazonClientSecretEnc: text("amazon_client_secret_enc"),
+  amazonRefreshTokenEnc: text("amazon_refresh_token_enc"),
+  /** EU | NA | FE — which SP-API regional endpoint the seller account lives on */
+  amazonRegion: text("amazon_region"),
+  /** ["A1PA6795UKMFR9", …] marketplaces to pull; empty = every marketplace the seller participates in */
+  amazonMarketplaceIds: jsonb("amazon_marketplace_ids").notNull().default(sql`'[]'::jsonb`),
 });
 export type PerformanceClientConfigRow = typeof performanceClientConfigs.$inferSelect;
 
-/** One row per Shopify order (sales side). Aggregated into hourly buckets by LiveSource. */
+/** One row per sales order — Shopify or Amazon (`channel`). Aggregated into hourly buckets by LiveSource. */
 export const performanceOrders = pgTable(
   "performance_orders",
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     brandId: uuid("brand_id").notNull(),
+    /** shopify | amazon — the sales channel the order came from */
+    channel: text("channel").notNull().default("shopify"),
+    /** the channel's order id (Shopify numeric id, Amazon order id like 302-1234567-1234567); column name predates Amazon */
     shopifyOrderId: text("shopify_order_id").notNull(),
-    /** order time (Shopify created_at) */
+    /** order time (Shopify created_at / processed_at, Amazon PurchaseDate) */
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }),
-    /** customer id, else email — the key NC/RC is computed over */
+    /** Shopify: customer id, else email; Amazon: "amz:" + anonymised buyer email — the key NC/RC is computed over (never matches across channels) */
     customerKey: text("customer_key"),
     customerCreatedAt: timestamp("customer_created_at", { withTimezone: true }),
     country: text("country"),
@@ -975,13 +986,16 @@ export const performanceOrders = pgTable(
     cogsComplete: boolean("cogs_complete").notNull().default(false),
   },
   (t) => [
-    uniqueIndex("performance_orders_brand_order_uq").on(t.brandId, t.shopifyOrderId),
+    uniqueIndex("performance_orders_brand_order_uq").on(t.brandId, t.channel, t.shopifyOrderId),
     index("performance_orders_brand_created_idx").on(t.brandId, t.createdAt),
     index("performance_orders_brand_customer_idx").on(t.brandId, t.customerKey),
   ],
 );
 
-/** Shopify unit cost per product variant (InventoryItem.unitCost), cached so costs are fetched once, not per order. */
+/**
+ * Shopify unit cost per product variant (InventoryItem.unitCost), cached so costs are fetched once, not per order.
+ * `sku` lets Amazon order items (SellerSKU) reuse the same cost when the SKUs match.
+ */
 export const performanceVariantCosts = pgTable(
   "performance_variant_costs",
   {
@@ -989,12 +1003,17 @@ export const performanceVariantCosts = pgTable(
     brandId: uuid("brand_id").notNull(),
     variantId: text("variant_id").notNull(),
     inventoryItemId: text("inventory_item_id"),
+    /** the variant's SKU in Shopify (null until refreshed) — Amazon SellerSKU is matched against it, case-insensitive */
+    sku: text("sku"),
     /** null = the variant exists but has no cost in Shopify (or was deleted) */
     unitCost: numeric("unit_cost", { precision: 12, scale: 4 }),
     currency: text("currency"),
     fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().default(sql`now()`),
   },
-  (t) => [uniqueIndex("performance_variant_costs_brand_variant_uq").on(t.brandId, t.variantId)],
+  (t) => [
+    uniqueIndex("performance_variant_costs_brand_variant_uq").on(t.brandId, t.variantId),
+    index("performance_variant_costs_brand_sku_idx").on(t.brandId, t.sku),
+  ],
 );
 
 /** Hourly ad spend per platform account (spend side). */
@@ -1025,13 +1044,13 @@ export const performanceSyncState = pgTable(
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     brandId: uuid("brand_id").notNull(),
-    /** shopify | meta | google */
+    /** shopify | meta | google | amazon */
     source: text("source").notNull(),
     /** idle | running | ok | error */
     status: text("status").notNull().default("idle"),
     lastStartedAt: timestamp("last_started_at", { withTimezone: true }),
     lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
-    /** source-specific incremental cursor (Shopify: last updated_at ISO) */
+    /** source-specific incremental cursor (Shopify: last updated_at ISO; Amazon: last LastUpdateDate ISO) */
     cursor: text("cursor"),
     rowsTotal: integer("rows_total").notNull().default(0),
     error: text("error"),

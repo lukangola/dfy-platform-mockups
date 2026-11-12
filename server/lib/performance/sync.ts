@@ -1,5 +1,5 @@
 /**
- * Sync orchestration: pulls Shopify orders, Meta spend and Google spend for a
+ * Sync orchestration: pulls Shopify orders, Meta spend, Google spend and Amazon orders for a
  * brand into the performance_* tables and records freshness per source.
  *
  *   runBrandSync(brandId)      — one pass over every connected source (serial, per source
@@ -10,13 +10,15 @@
  */
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "../db.js";
-import { getClientConfig, liveBrandIds, type PerformanceClientConfig, shopifyConnected } from "./config.js";
+import { amazonConnected, getClientConfig, liveBrandIds, type PerformanceClientConfig, shopifyConnected } from "./config.js";
+import { syncAmazonOrders } from "./amazon.js";
 import { syncGoogleSpend } from "./googleAds.js";
 import { syncMetaSpend } from "./meta.js";
 import { syncShopifyOrders } from "./shopify.js";
 
-export type SyncSource = "shopify" | "meta" | "google";
-export const SYNC_SOURCES: SyncSource[] = ["shopify", "meta", "google"];
+export type SyncSource = "shopify" | "meta" | "google" | "amazon";
+/** Amazon last: its first backfill is slow (Orders API rate limits) and must not hold up the spend sources. */
+export const SYNC_SOURCES: SyncSource[] = ["shopify", "meta", "google", "amazon"];
 
 const running = new Set<string>(); // brandIds with a sync in flight
 
@@ -35,6 +37,7 @@ async function upsertState(brandId: string, source: SyncSource, set: Partial<typ
 
 function isConnected(config: PerformanceClientConfig, source: SyncSource): boolean {
   if (source === "shopify") return shopifyConnected(config);
+  if (source === "amazon") return amazonConnected(config);
   if (source === "meta") return Boolean(config.meta.token && config.meta.accounts.length);
   return Boolean(config.google.refreshToken && config.google.developerToken && config.google.accounts.length);
 }
@@ -64,6 +67,9 @@ export async function runBrandSync(brandId: string, brandName: string, opts: { f
         const lastSynced = opts.full ? null : (prev?.lastSyncedAt ?? null);
         if (source === "shopify") {
           const r = await syncShopifyOrders(config, opts.full ? null : cursor);
+          rows = r.rows; cursor = r.cursor;
+        } else if (source === "amazon") {
+          const r = await syncAmazonOrders(config, opts.full ? null : cursor);
           rows = r.rows; cursor = r.cursor;
         } else if (source === "meta") {
           rows = (await syncMetaSpend(config, lastSynced)).rows;

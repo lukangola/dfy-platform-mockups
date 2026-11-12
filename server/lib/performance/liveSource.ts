@@ -1,6 +1,6 @@
 /**
  * LiveSource — hourly buckets from the synced tables.
- *   sales: performance_orders  (Shopify)   → c[REGION] = [ncOrders, ncRev, rcOrders, rcRev, cogs]
+ *   sales: performance_orders  (Shopify + Amazon, every channel) → c[REGION] = [ncOrders, ncRev, rcOrders, rcRev, cogs]
  *   spend: performance_spend_hours (Meta/Google/TikTok) → s[PLATFORM] = [spend per region]
  * Same shape as the mock, so agg/metrics/series and the UI are untouched.
  */
@@ -52,7 +52,8 @@ export class LiveSource implements DataSource {
       cell[4] += Math.round(Number(r.cogs) * 100) / 100;
     }
 
-    // Share of revenue whose orders carry a complete cost of goods (every line item had a Shopify unit cost).
+    // Share of revenue whose orders carry a complete cost of goods (every line item had a Shopify unit cost;
+    // for Amazon orders: every SKU matched a Shopify variant SKU with a cost).
     const cov = await db.execute<{ total: string | null; covered: string | null }>(sql`
       SELECT SUM(${revenueCol})::text AS total, SUM(${revenueCol}) FILTER (WHERE cogs_complete)::text AS covered
       FROM performance_orders

@@ -342,9 +342,9 @@ export default function PerformancePage() {
           </p>
           {source === "live" && (
             <p className="text-[10px] text-white/30 font-mono mt-1">
-              {(["shopify", "meta", "google"] as const).map((k, i) => {
+              {(["shopify", "amazon", "meta", "google"] as const).map((k, i) => {
                 const st = sync.find((x) => x.source === k);
-                const name = k === "shopify" ? "Shopify" : k === "meta" ? "Meta" : "Google";
+                const name = k === "shopify" ? "Shopify" : k === "amazon" ? "Amazon" : k === "meta" ? "Meta" : "Google";
                 const txt = !st || st.status === "idle" ? "not connected" : st.status === "running" ? "syncing…" : st.status === "error" ? "error" : `synced ${relTime(st.lastSyncedAt)}`;
                 const tone = st?.status === "error" ? "text-rose-400" : st?.status === "ok" ? "text-emerald-400/80" : "text-white/30";
                 return <span key={k}>{i > 0 && " · "}{name} <span className={tone}>{txt}</span></span>;
@@ -353,7 +353,7 @@ export default function PerformancePage() {
           )}
           {source === "live" && data?.costCoverage != null && data.costCoverage < 0.95 && (
             <p className="text-[10px] text-amber-300 font-mono mt-1 inline-flex items-center gap-1">
-              <AlertTriangle size={10} /> Shopify has no "Cost per item" for {Math.round((1 - data.costCoverage) * 100)}% of this window's revenue — margin and CM are overstated until those products get a cost.
+              <AlertTriangle size={10} /> No cost of goods for {Math.round((1 - data.costCoverage) * 100)}% of this window's revenue (Shopify "Cost per item" missing, or Amazon SKUs without a matching Shopify SKU) — margin and CM are overstated until those products get a cost.
             </p>
           )}
         </div>
@@ -449,7 +449,7 @@ export default function PerformancePage() {
           <section>
             <div className="flex items-center gap-3 mb-2">
               <h2 className="text-[11px] font-mono uppercase tracking-wide text-cyan-300/70">By region</h2>
-              <span className="text-[10px] font-mono text-white/25">Shopify (sales by country) + platform APIs (ad spend) — {source === "live" ? "live" : "mock"}</span>
+              <span className="text-[10px] font-mono text-white/25">Shopify + Amazon (sales by country) + platform APIs (ad spend) — {source === "live" ? "live" : "mock"}</span>
             </div>
             <div className="rounded-xl border border-white/[0.07] bg-[#0D0F12] overflow-x-auto scrollbar-thin">
               <table className="w-full text-[12px] tabular-nums">

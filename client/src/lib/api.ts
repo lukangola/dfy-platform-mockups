@@ -2555,6 +2555,13 @@ export type PerformanceConfig = {
     /** set when the token came from Shopify's install flow (Partner app); ISO date */
     installedAt: string | null;
   };
+  amazon: {
+    clientId: string | null; clientSecretSet: boolean; refreshTokenSet: boolean;
+    /** SP-API regional endpoint */
+    region: "EU" | "NA" | "FE";
+    /** marketplaces to pull; empty = all the seller participates in */
+    marketplaceIds: string[];
+  };
   meta: { tokenSet: boolean; accounts: PerformanceAccountMap[] };
   google: {
     developerTokenSet: boolean; clientId: string | null; clientSecretSet: boolean; refreshTokenSet: boolean;
@@ -2562,10 +2569,13 @@ export type PerformanceConfig = {
   };
   platformsConfigured: { META: boolean; GOOG: boolean; TT: boolean };
   shopifyConfigured: boolean;
+  amazonConfigured: boolean;
 };
 
+export type PerformanceSource = "shopify" | "amazon" | "meta" | "google";
+
 export type PerformanceSyncState = {
-  source: "shopify" | "meta" | "google";
+  source: PerformanceSource;
   status: "idle" | "running" | "ok" | "error";
   lastStartedAt: string | null;
   lastSyncedAt: string | null;
@@ -2581,6 +2591,8 @@ export type PerformanceConfigPatch = Partial<{
   regions: Array<{ label: string; countries: string[] }> | null;
   syncEveryMinutes: number;
   shopifyShopDomain: string | null; shopifyToken: string | null; shopifyClientId: string | null; shopifyClientSecret: string | null;
+  amazonClientId: string | null; amazonClientSecret: string | null; amazonRefreshToken: string | null;
+  amazonRegion: "EU" | "NA" | "FE"; amazonMarketplaceIds: string[];
   metaToken: string | null; metaAccounts: PerformanceAccountMap[];
   googleDeveloperToken: string | null; googleClientId: string | null; googleClientSecret: string | null;
   googleRefreshToken: string | null; googleLoginCustomerId: string | null; googleAccounts: PerformanceAccountMap[];
@@ -2609,10 +2621,15 @@ export type PerformanceTestResult =
       /** Shopify: can the app see orders older than Shopify's 60-day default window? null = probe failed */
       history?: { cutoff: string; olderCount: number; olderReachable: boolean } | null;
       accounts?: Array<{ id: string; name: string; timezone: string; currency: string }>;
+      /** Amazon: seller + marketplaces reachable with these credentials, oldest order in the backfill window, PII access */
+      seller?: string | null; region?: "EU" | "NA" | "FE";
+      marketplaces?: Array<{ id: string; name: string; country: string | null; currency: string | null }>;
+      oldestOrder?: string | null; ordersSeen?: number; backfillFrom?: string;
+      buyerInfo?: boolean; buyerInfoError?: string | null;
     }
   | { ok: false; error: string };
 
-export function testPerformanceSource(brandId: string, source: "shopify" | "meta" | "google"): Promise<{ result: PerformanceTestResult }> {
+export function testPerformanceSource(brandId: string, source: PerformanceSource): Promise<{ result: PerformanceTestResult }> {
   return post(`/api/performance/test?brandId=${encodeURIComponent(brandId)}&source=${source}`, {});
 }
 
