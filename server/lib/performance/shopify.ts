@@ -16,14 +16,15 @@
  *               that change totals), so a 10-minute poll is enough for a live dashboard
  *               without a public webhook URL.
  * After every run NC/RC is recomputed for the whole brand from nc_definition:
- *   first_ever  — the customer's earliest order in our table, and the customer record was
- *                 created inside the backfill window (older customers are returning)
+ *   first_ever  — the customer's earliest order in our table and none hidden before it: for
+ *                 customers whose record predates the oldest order we hold, Shopify's lifetime
+ *                 order count decides (performance_customers); without a count they are returning
  *   window_days — no earlier order by the same customer within N days
  * Guest orders are keyed by email; orders with neither are treated as new-customer.
  */
-import { eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { db, schema } from "../db.js";
-import type { PerformanceClientConfig } from "./config.js";
+import { productLineForTitle, type PerformanceClientConfig } from "./config.js";
 import { backfillStart, sleep } from "./time.js";
 import { refreshShopifyInstallToken, storeShopifyTokens } from "./shopifyOAuth.js";
 import type { RegionKey } from "../../../shared/performance/engine.js";
@@ -37,6 +38,7 @@ const FIELDS = [
 export const REQUIRED_SCOPES = ["read_orders", "read_customers", "read_products", "read_inventory"];
 const COST_TTL_MS = 30 * 86_400_000;
 const COST_BATCH = 100;
+const CUSTOMER_BATCH = 100;
 
 interface ShopifyOrder {
   id: number; created_at: string; updated_at: string; processed_at?: string | null; cancelled_at?: string | null;
@@ -45,7 +47,11 @@ interface ShopifyOrder {
   customer?: { id?: number; created_at?: string; email?: string | null; default_address?: { country_code?: string | null } | null } | null;
   shipping_address?: { country_code?: string | null } | null;
   billing_address?: { country_code?: string | null } | null;
-  line_items?: Array<{ variant_id?: number | null; quantity?: number | null }>;
+  line_items?: Array<{
+    id?: number | string; title?: string | null; variant_title?: string | null; sku?: string | null;
+    product_id?: number | null; variant_id?: number | null; quantity?: number | null;
+    price?: string | null; total_discount?: string | null;
+  }>;
 }
 
 export function regionFor(country: string | null | undefined, mapping: Record<string, RegionKey>): RegionKey {
@@ -53,7 +59,7 @@ export function regionFor(country: string | null | undefined, mapping: Record<st
   return mapping[country.toUpperCase()] ?? "OTH";
 }
 
-function shopHost(domain: string): string {
+export function shopHost(domain: string): string {
   const d = domain.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
   return d.includes(".") ? d : `${d}.myshopify.com`;
 }
@@ -69,7 +75,7 @@ function shopHost(domain: string): string {
  *  - Legacy custom app (created in the admin before 2026): its static `shpat_` token is used as is.
  * `fresh` forces a new exchange/refresh (after a 401, or when "Test connection" validates credentials).
  */
-type TokenSource = (fresh?: boolean) => Promise<string>;
+export type TokenSource = (fresh?: boolean) => Promise<string>;
 const tokenCache = new Map<string, { token: string; expiresAt: number; refreshToken?: string | null }>();
 const TOKEN_RENEW_MARGIN_MS = 10 * 60_000;
 
@@ -114,12 +120,12 @@ async function shopifyAccessToken(config: PerformanceClientConfig, fresh = false
   return body.access_token;
 }
 
-function tokenSource(config: PerformanceClientConfig): TokenSource {
+export function tokenSource(config: PerformanceClientConfig): TokenSource {
   return (fresh) => shopifyAccessToken(config, fresh);
 }
 
 /** GET with Shopify rate-limit handling (429 → wait Retry-After, default 2s); one retry with a fresh token on 401. */
-async function shopifyGet(url: string, auth: TokenSource): Promise<{ body: unknown; link: string | null }> {
+export async function shopifyGet(url: string, auth: TokenSource): Promise<{ body: unknown; link: string | null }> {
   let renewed = false;
   for (let attempt = 0; attempt < 6; attempt++) {
     const res = await fetch(url, { headers: { "X-Shopify-Access-Token": await auth(), Accept: "application/json" } });
@@ -162,7 +168,7 @@ async function shopifyGraphql<T>(host: string, auth: TokenSource, query: string,
       if (body.errors.some((e) => e.extensions?.code === "THROTTLED")) { await sleep(2000 * (attempt + 1)); continue; }
       const msg = body.errors.map((e) => e.message).filter(Boolean).join("; ");
       if (body.errors.some((e) => e.extensions?.code === "ACCESS_DENIED") || /access denied|scope/i.test(msg)) {
-        throw new Error(`Shopify: unit costs need the read_products + read_inventory scopes on the app (${msg})`);
+        throw new Error(`Shopify: the app is missing a scope (unit costs need read_products + read_inventory, customer order counts need read_customers): ${msg}`);
       }
       throw new Error(`Shopify GraphQL: ${msg}`);
     }
@@ -206,8 +212,28 @@ export interface ShopifyHistoryProbe {
   olderReachable: boolean;
 }
 
+export interface ShopInfo { name: string | null; currency: string | null; timezone: string | null }
+
+/**
+ * shop.json → name, currency and IANA time zone, stored on the brand's config row so the
+ * dashboard can format money in the shop's currency and cut its days at the shop's midnight.
+ * Read at the start of every sync (and by Test connection): one small request, and a store
+ * that changes its currency or time zone is picked up within a sync interval.
+ */
+export async function fetchShopInfo(config: PerformanceClientConfig, host: string, auth: TokenSource): Promise<ShopInfo> {
+  const { body } = await shopifyGet(`https://${host}/admin/api/${SHOPIFY_API_VERSION}/shop.json`, auth);
+  const shop = (body as { shop?: { name?: string; currency?: string; iana_timezone?: string } }).shop;
+  const info: ShopInfo = { name: shop?.name ?? null, currency: shop?.currency?.toUpperCase() ?? null, timezone: shop?.iana_timezone ?? null };
+  if (info.currency || info.timezone) {
+    await db.update(schema.performanceClientConfigs)
+      .set({ ...(info.currency ? { shopCurrency: info.currency } : {}), ...(info.timezone ? { shopTimezone: info.timezone } : {}) })
+      .where(eq(schema.performanceClientConfigs.brandId, config.brandId));
+  }
+  return info;
+}
+
 export async function testShopify(config: PerformanceClientConfig): Promise<{
-  ok: true; shop: string; currency: string | null; scopes: string[]; missingScopes: string[]; writeScopes: string[];
+  ok: true; shop: string; currency: string | null; timezone: string | null; scopes: string[]; missingScopes: string[]; writeScopes: string[];
   history: ShopifyHistoryProbe | null;
 }> {
   const { shopDomain } = config.shopify;
@@ -215,8 +241,7 @@ export async function testShopify(config: PerformanceClientConfig): Promise<{
   const host = shopHost(shopDomain);
   const auth = tokenSource(config);
   await auth(true); // validate the credentials as typed, not a cached token
-  const { body } = await shopifyGet(`https://${host}/admin/api/${SHOPIFY_API_VERSION}/shop.json`, auth);
-  const shop = (body as { shop?: { name?: string; currency?: string } }).shop;
+  const shop = await fetchShopInfo(config, host, auth);
   let scopes: string[] = [];
   try {
     const r = await shopifyGet(`https://${host}/admin/oauth/access_scopes.json`, auth);
@@ -225,7 +250,7 @@ export async function testShopify(config: PerformanceClientConfig): Promise<{
   const have = new Set(scopes);
   const history = await probeOrderHistory(host, auth);
   return {
-    ok: true, shop: shop?.name ?? host, currency: shop?.currency ?? null, scopes,
+    ok: true, shop: shop.name ?? host, currency: shop.currency, timezone: shop.timezone, scopes,
     missingScopes: scopes.length ? REQUIRED_SCOPES.filter((sc) => !have.has(sc)) : [],
     writeScopes: scopes.filter((sc) => sc.startsWith("write_")),
     history,
@@ -327,11 +352,17 @@ export async function syncShopifyOrders(config: PerformanceClientConfig, cursor:
   if (!shopDomain) throw new Error("Shopify is not connected (shop domain missing)");
   const host = shopHost(shopDomain);
   const auth = tokenSource(config);
+  await fetchShopInfo(config, host, auth); // keeps currency + time zone current; cheap
   const base = `https://${host}/admin/api/${SHOPIFY_API_VERSION}/orders.json`;
   const params = new URLSearchParams({ status: "any", limit: "250", fields: FIELDS });
   if (cursor) params.set("updated_at_min", cursor);
   else params.set("created_at_min", backfillStart().toISOString());
   // Shopify's cursor pagination (page_info) forbids changing filters, so page requests carry only limit + page_info.
+  // Product lines were configured after the orders were synced (no line items stored yet): one full
+  // re-pull of the window brings the line items in; afterwards every sync keeps them current.
+  if (cursor && config.productLines.length && !(await hasOrderLines(config.brandId))) {
+    params.delete("updated_at_min"); params.set("created_at_min", backfillStart().toISOString());
+  }
   let url: string | null = `${base}?${params.toString()}`;
   let rows = 0;
   let maxUpdated = cursor ?? "";
@@ -350,10 +381,50 @@ export async function syncShopifyOrders(config: PerformanceClientConfig, cursor:
     const next = nextPageInfo(link);
     url = next ? `${base}?limit=250&fields=${encodeURIComponent(FIELDS)}&page_info=${encodeURIComponent(next)}` : null;
   }
+  const customerError = await fetchCustomerOrderCounts(config, host, auth);
   await recomputeNewCustomer(config);
-  // Orders are in; if unit costs could not be loaded, surface it (status = error) so the margin isn't silently 100%.
-  if (costs.error) throw new Error(`Orders synced (${rows}), but cost of goods could not be loaded: ${costs.error}`);
+  // Orders are in; if unit costs or customer counts could not be loaded, surface it (status = error)
+  // so the margin isn't silently 100% and new customers aren't silently under-counted.
+  const problems = [
+    costs.error && `cost of goods could not be loaded: ${costs.error}`,
+    customerError && `customer order counts could not be loaded: ${customerError}`,
+  ].filter(Boolean);
+  if (problems.length) throw new Error(`Orders synced (${rows}), but ${problems.join("; ")}`);
   return { rows, cursor: maxUpdated || cursor };
+}
+
+async function hasOrderLines(brandId: string): Promise<boolean> {
+  const [r] = (await db.execute<{ n: string }>(sql`SELECT COUNT(*)::text AS n FROM performance_order_lines WHERE brand_id = ${brandId}`)).rows;
+  return Number(r?.n ?? 0) > 0;
+}
+
+/** Replace the stored line items of these orders (ids = performance_orders.id by Shopify order id). */
+async function upsertOrderLines(config: PerformanceClientConfig, orders: ShopifyOrder[], ids: Map<string, string>): Promise<void> {
+  const values: Array<typeof schema.performanceOrderLines.$inferInsert> = [];
+  for (const o of orders) {
+    const orderId = ids.get(String(o.id));
+    if (!orderId) continue;
+    const seen = new Set<string>();
+    (o.line_items ?? []).forEach((li, i) => {
+      const lineId = li.id != null ? String(li.id) : `i${i}`;
+      if (seen.has(lineId)) return; seen.add(lineId);
+      const qty = Number(li.quantity ?? 1) || 0;
+      const gross = Math.round(Number(li.price ?? 0) * qty * 100) / 100;
+      const net = Math.max(0, Math.round((gross - Number(li.total_discount ?? 0)) * 100) / 100);
+      values.push({
+        brandId: config.brandId, orderId, lineId,
+        title: li.title ?? "", variantTitle: li.variant_title ?? null, sku: li.sku ?? null,
+        productId: li.product_id != null ? String(li.product_id) : null, variantId: li.variant_id != null ? String(li.variant_id) : null,
+        quantity: qty, gross: gross.toFixed(2), net: net.toFixed(2),
+        productLine: productLineForTitle(li.title, config.productLines),
+      });
+    });
+  }
+  const orderIds = Array.from(new Set(Array.from(ids.values())));
+  await db.transaction(async (tx) => {
+    if (orderIds.length) await tx.delete(schema.performanceOrderLines).where(and(eq(schema.performanceOrderLines.brandId, config.brandId), inArray(schema.performanceOrderLines.orderId, orderIds)));
+    for (let i = 0; i < values.length; i += 500) await tx.insert(schema.performanceOrderLines).values(values.slice(i, i + 500));
+  });
 }
 
 async function upsertOrders(config: PerformanceClientConfig, orders: ShopifyOrder[], costs: VariantCostCache): Promise<void> {
@@ -380,7 +451,7 @@ async function upsertOrders(config: PerformanceClientConfig, orders: ShopifyOrde
       cogs, cogsComplete,
     };
   });
-  await db
+  const saved = await db
     .insert(schema.performanceOrders)
     .values(values)
     .onConflictDoUpdate({
@@ -394,7 +465,9 @@ async function upsertOrders(config: PerformanceClientConfig, orders: ShopifyOrde
         cancelled: sql`excluded.cancelled`, test: sql`excluded.test`,
         cogs: sql`excluded.cogs`, cogsComplete: sql`excluded.cogs_complete`,
       },
-    });
+    })
+    .returning({ id: schema.performanceOrders.id, shopifyOrderId: schema.performanceOrders.shopifyOrderId });
+  await upsertOrderLines(config, orders, new Map(saved.map((r) => [r.shopifyOrderId, r.id])));
 }
 
 /**
@@ -403,31 +476,92 @@ async function upsertOrders(config: PerformanceClientConfig, orders: ShopifyOrde
  * new/returning is effectively per channel.
  */
 export async function recomputeNewCustomer(config: PerformanceClientConfig): Promise<void> {
-  // History floor: customers created before the oldest order we can see may have earlier orders
-  // we cannot see (a Partner-organization app only gets the last 60 days), so they count as
-  // returning. With full history this is the backfill start, as before.
-  const [oldest] = (await db.execute<{ min: string | null }>(sql`
-    SELECT MIN(created_at)::text AS min FROM performance_orders
-    WHERE brand_id = ${config.brandId} AND cancelled = FALSE AND test = FALSE
-  `)).rows;
-  const floor = oldest?.min ? new Date(oldest.min) : null;
-  const start = floor && floor > backfillStart() ? floor : backfillStart();
+  const start = await historyStart(config);
   const windowMs = config.ncWindowDays * 86_400_000;
+  // first_ever: no earlier visible order, and — for customers whose record predates the history
+  // start — Shopify's lifetime count says none is hidden either. Without a count, such customers
+  // count as returning (they may have earlier orders we cannot see).
   const rule = config.ncDefinition === "window_days"
     ? sql`(r.prev_created IS NULL OR (EXTRACT(EPOCH FROM (r.created_at - r.prev_created)) * 1000) > ${windowMs})`
-    : sql`(r.prev_created IS NULL AND (r.customer_created_at IS NULL OR r.customer_created_at >= ${start.toISOString()}::timestamptz))`;
+    : sql`(r.prev_created IS NULL AND CASE
+             WHEN r.hidden_orders IS NOT NULL THEN r.hidden_orders = 0
+             ELSE (r.customer_created_at IS NULL OR r.customer_created_at >= ${start.toISOString()}::timestamptz)
+           END)`;
   await db.execute(sql`
     UPDATE performance_orders o SET is_new_customer = r.is_nc
     FROM (
       SELECT id,
              CASE WHEN customer_key IS NULL THEN TRUE ELSE ${rule} END AS is_nc
       FROM (
-        SELECT id, customer_key, created_at, customer_created_at,
-               LAG(created_at) OVER (PARTITION BY customer_key ORDER BY created_at, id) AS prev_created
-        FROM performance_orders
-        WHERE brand_id = ${config.brandId} AND cancelled = FALSE AND test = FALSE
+        SELECT p.id, p.customer_key, p.created_at, p.customer_created_at, c.hidden_orders,
+               LAG(p.created_at) OVER (PARTITION BY p.customer_key ORDER BY p.created_at, p.id) AS prev_created
+        FROM performance_orders p
+        LEFT JOIN performance_customers c ON c.brand_id = p.brand_id AND c.customer_key = p.customer_key
+        WHERE p.brand_id = ${config.brandId} AND p.cancelled = FALSE AND p.test = FALSE
       ) r
     ) r
     WHERE o.id = r.id AND o.is_new_customer IS DISTINCT FROM r.is_nc
   `);
+}
+
+/**
+ * Where our order history starts: the oldest order we hold (a Partner-organization app only gets
+ * the last 60 days) or the backfill start with full history. Customers created before it may have
+ * orders we cannot see.
+ */
+async function historyStart(config: PerformanceClientConfig): Promise<Date> {
+  const [oldest] = (await db.execute<{ min: string | null }>(sql`
+    SELECT MIN(created_at)::text AS min FROM performance_orders
+    WHERE brand_id = ${config.brandId} AND cancelled = FALSE AND test = FALSE
+  `)).rows;
+  const floor = oldest?.min ? new Date(oldest.min) : null;
+  return floor && floor > backfillStart() ? floor : backfillStart();
+}
+
+/**
+ * Lifetime order counts (Customer.numberOfOrders, needs read_customers) for Shopify customers whose
+ * record predates the history start and have no cached count yet — fetched once per customer in
+ * batches of 100 and stored with how many of those orders are missing from our table. Returns an
+ * error message instead of throwing so the orders still sync (the NC rule then falls back).
+ */
+async function fetchCustomerOrderCounts(config: PerformanceClientConfig, host: string, auth: TokenSource): Promise<string | null> {
+  const start = await historyStart(config);
+  const need = (await db.execute<{ key: string }>(sql`
+    SELECT DISTINCT o.customer_key AS key
+    FROM performance_orders o
+    LEFT JOIN performance_customers c ON c.brand_id = o.brand_id AND c.customer_key = o.customer_key
+    WHERE o.brand_id = ${config.brandId} AND o.channel = 'shopify' AND o.customer_key LIKE 'id:%'
+      AND c.id IS NULL
+      AND (o.customer_created_at IS NULL OR o.customer_created_at < ${start.toISOString()}::timestamptz)
+  `)).rows.map((r) => r.key);
+  type Node = { id: string; numberOfOrders?: string | number | null } | null;
+  for (let i = 0; i < need.length; i += CUSTOMER_BATCH) {
+    const keys = need.slice(i, i + CUSTOMER_BATCH);
+    try {
+      const data = await shopifyGraphql<{ nodes: Node[] }>(host, auth, `
+        query CustomerOrderCounts($ids: [ID!]!) {
+          nodes(ids: $ids) { ... on Customer { id numberOfOrders } }
+        }`, { ids: keys.map((k) => `gid://shopify/Customer/${k.slice(3)}`) });
+      const visible = new Map((await db.select({ key: schema.performanceOrders.customerKey, n: sql<number>`count(*)::int` })
+        .from(schema.performanceOrders)
+        .where(and(eq(schema.performanceOrders.brandId, config.brandId), inArray(schema.performanceOrders.customerKey, keys)))
+        .groupBy(schema.performanceOrders.customerKey)).map((r) => [r.key as string, Number(r.n)]));
+      const now = new Date();
+      const values = keys.flatMap((key, j) => {
+        const n = data.nodes[j]?.numberOfOrders;
+        const lifetime = n == null ? NaN : Number(n);
+        if (!Number.isFinite(lifetime)) return []; // customer deleted or merged — leave the fallback rule
+        return [{ brandId: config.brandId, customerKey: key, lifetimeOrders: lifetime, hiddenOrders: Math.max(0, lifetime - (visible.get(key) ?? 0)), fetchedAt: now }];
+      });
+      if (values.length) {
+        await db.insert(schema.performanceCustomers).values(values).onConflictDoUpdate({
+          target: [schema.performanceCustomers.brandId, schema.performanceCustomers.customerKey],
+          set: { lifetimeOrders: sql`excluded.lifetime_orders`, hiddenOrders: sql`excluded.hidden_orders`, fetchedAt: sql`excluded.fetched_at` },
+        });
+      }
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+  return null;
 }

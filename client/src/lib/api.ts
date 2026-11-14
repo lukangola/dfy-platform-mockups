@@ -2539,6 +2539,8 @@ export type PerformanceRegion = string;
 export type PerformanceAccountMap = { id: string; region: PerformanceRegion };
 /** A named region of the brand (key/flag derived server-side from label / first country). */
 export type PerformanceRegionDef = { key: PerformanceRegion; label: string; flag: string; countries: string[] };
+/** A product line (front-end offer): line items by title keywords (include / exclude), ad campaigns by name keywords. */
+export type PerformanceProductLineDef = { key: string; label: string; include: string[]; exclude: string[]; campaigns: string[] };
 
 export type PerformanceConfig = {
   brandId: string;
@@ -2549,7 +2551,13 @@ export type PerformanceConfig = {
   revenueField: "total" | "subtotal";
   /** named regions in display order; "Other" is implied last */
   regions: PerformanceRegionDef[];
+  /** product lines in display order; "Other / unassigned" is implied last; empty = no product breakdown */
+  productLines: PerformanceProductLineDef[];
   syncEveryMinutes: number;
+  /** the shop's currency (ISO code; EUR until Shopify has been reached) — every money figure is shown in it */
+  currency: string;
+  /** the shop's IANA time zone — "Today" etc. start at its midnight; null = browser's zone */
+  timezone: string | null;
   shopify: {
     shopDomain: string | null; tokenSet: boolean; clientId: string | null; clientSecretSet: boolean;
     /** set when the token came from Shopify's install flow (Partner app); ISO date */
@@ -2589,6 +2597,8 @@ export type PerformanceConfigPatch = Partial<{
   ncDefinition: "first_ever" | "window_days"; ncWindowDays: number; revenueField: "total" | "subtotal";
   /** named regions (label + ISO-2 countries); null = back to NL/BE, UK, USA */
   regions: Array<{ label: string; countries: string[] }> | null;
+  /** product lines (label + keywords); null = none */
+  productLines: Array<{ label: string; include: string[]; exclude: string[]; campaigns: string[] }> | null;
   syncEveryMinutes: number;
   shopifyShopDomain: string | null; shopifyToken: string | null; shopifyClientId: string | null; shopifyClientSecret: string | null;
   amazonClientId: string | null; amazonClientSecret: string | null; amazonRefreshToken: string | null;
@@ -2615,7 +2625,7 @@ export async function savePerformanceConfig(brandId: string, patch: PerformanceC
 
 export type PerformanceTestResult =
   | {
-      ok: true; shop?: string; currency?: string | null;
+      ok: true; shop?: string; currency?: string | null; timezone?: string | null;
       /** Shopify: granted scopes, the read scopes the dashboard still needs, and any write scopes the token carries */
       scopes?: string[]; missingScopes?: string[]; writeScopes?: string[];
       /** Shopify: can the app see orders older than Shopify's 60-day default window? null = probe failed */

@@ -16,7 +16,7 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, AlertTriangle, ChevronDown, ChevronRight, Loader2, Plug, RefreshCw, Save, ShieldCheck } from "lucide-react";
 import {
   savePerformanceConfig, startPerformanceSync, testPerformanceSource,
-  type PerformanceAccountMap, type PerformanceConfig, type PerformanceConfigPatch, type PerformanceRegionDef, type PerformanceSource, type PerformanceSyncState, type PerformanceTestResult,
+  type PerformanceAccountMap, type PerformanceConfig, type PerformanceConfigPatch, type PerformanceProductLineDef, type PerformanceRegionDef, type PerformanceSource, type PerformanceSyncState, type PerformanceTestResult,
 } from "@/lib/api";
 
 const OTHER_KEY = "OTH";
@@ -65,6 +65,35 @@ function regionsText(list: PerformanceRegionDef[]): string {
   return list.map((r) => `${r.label}: ${r.countries.join(", ")}`).join("; ");
 }
 
+/**
+ * One product line per row: "Label = products: kw, -excluded kw | campaigns: kw" ⇄ [{label, include, exclude, campaigns}].
+ * A product keyword starting with "-" excludes; the server validates.
+ */
+function parseProductLinesText(text: string): Array<{ label: string; include: string[]; exclude: string[]; campaigns: string[] }> {
+  return text.split(/\n+/).map((s) => s.trim()).filter(Boolean).map((row) => {
+    const eq = row.indexOf("=");
+    const label = (eq >= 0 ? row.slice(0, eq) : row).trim();
+    const include: string[] = [], exclude: string[] = [], campaigns: string[] = [];
+    for (const part of (eq >= 0 ? row.slice(eq + 1) : "").split("|")) {
+      const m = part.trim().match(/^(products?|campaigns?)\s*:\s*(.*)$/i);
+      if (!m) continue;
+      const list = m[2].split(",").map((k) => k.trim()).filter(Boolean);
+      if (/^campaign/i.test(m[1])) campaigns.push(...list);
+      else for (const k of list) (k.startsWith("-") ? exclude : include).push(k.replace(/^-\s*/, ""));
+    }
+    return { label, include, exclude, campaigns };
+  });
+}
+function productLinesText(list: PerformanceProductLineDef[]): string {
+  return list.map((l) => {
+    const products = [...l.include, ...l.exclude.map((k) => `-${k}`)];
+    const parts = [];
+    if (products.length) parts.push(`products: ${products.join(", ")}`);
+    if (l.campaigns.length) parts.push(`campaigns: ${l.campaigns.join(", ")}`);
+    return `${l.label} = ${parts.join(" | ")}`;
+  }).join("\n");
+}
+
 function SecretField({ id, name, set, value, onChange, placeholder }: { id: string; name: string; set: boolean; value: string; onChange: (v: string) => void; placeholder?: string }) {
   return (
     <div>
@@ -89,6 +118,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
     dataSource: config.dataSource,
     ncDefinition: config.ncDefinition, ncWindowDays: String(config.ncWindowDays), revenueField: config.revenueField,
     regions: regionsText(config.regions),
+    productLines: productLinesText(config.productLines),
     syncEveryMinutes: String(config.syncEveryMinutes),
     shopifyShopDomain: config.shopify.shopDomain ?? "", shopifyClientId: config.shopify.clientId ?? "", shopifyClientSecret: "", shopifyToken: "",
     amazonClientId: config.amazon.clientId ?? "", amazonClientSecret: "", amazonRefreshToken: "", amazonRegion: config.amazon.region, amazonMarketplaceIds: config.amazon.marketplaceIds.join(", "),
@@ -97,7 +127,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
     googleLoginCustomerId: config.google.loginCustomerId ?? "", googleAccounts: accountsText(config.google.accounts),
   }));
   useEffect(() => {
-    setForm((f) => ({ ...f, dataSource: config.dataSource, regions: regionsText(config.regions), shopifyShopDomain: config.shopify.shopDomain ?? "", shopifyClientId: config.shopify.clientId ?? "", amazonClientId: config.amazon.clientId ?? "", amazonRegion: config.amazon.region, amazonMarketplaceIds: config.amazon.marketplaceIds.join(", "), metaAccounts: accountsText(config.meta.accounts), googleClientId: config.google.clientId ?? "", googleLoginCustomerId: config.google.loginCustomerId ?? "", googleAccounts: accountsText(config.google.accounts) }));
+    setForm((f) => ({ ...f, dataSource: config.dataSource, regions: regionsText(config.regions), productLines: productLinesText(config.productLines), shopifyShopDomain: config.shopify.shopDomain ?? "", shopifyClientId: config.shopify.clientId ?? "", amazonClientId: config.amazon.clientId ?? "", amazonRegion: config.amazon.region, amazonMarketplaceIds: config.amazon.marketplaceIds.join(", "), metaAccounts: accountsText(config.meta.accounts), googleClientId: config.google.clientId ?? "", googleLoginCustomerId: config.google.loginCustomerId ?? "", googleAccounts: accountsText(config.google.accounts) }));
   }, [config]);
 
   const [saving, setSaving] = useState(false);
@@ -122,7 +152,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
   const [tests, setTests] = useState<Record<string, PerformanceTestResult>>({});
   const [advanced, setAdvanced] = useState(false);
 
-  const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const by = (s: PerformanceSyncState["source"]) => sync.find((x) => x.source === s);
 
   const patch = (): PerformanceConfigPatch => {
@@ -132,6 +162,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
       dataSource: form.dataSource,
       ncDefinition: form.ncDefinition, ncWindowDays: Number(form.ncWindowDays), revenueField: form.revenueField,
       regions: regions.length ? regions : null,
+      productLines: (() => { const l = parseProductLinesText(form.productLines); return l.length ? l : null; })(),
       syncEveryMinutes: Number(form.syncEveryMinutes),
       shopifyShopDomain: form.shopifyShopDomain, shopifyClientId: form.shopifyClientId, shopifyClientSecret: form.shopifyClientSecret, shopifyToken: form.shopifyToken,
       amazonClientId: form.amazonClientId, amazonClientSecret: form.amazonClientSecret, amazonRefreshToken: form.amazonRefreshToken,
@@ -180,7 +211,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
     if (!r.ok) return <div className="mt-1.5 text-[10px] font-mono text-rose-400 break-words">{r.error}</div>;
     return (
       <div className="mt-1.5 text-[10px] font-mono text-emerald-400">
-        ✓ connected{r.shop ? ` · ${r.shop}${r.currency ? ` (${r.currency})` : ""}` : ""}{r.seller !== undefined ? ` · ${r.seller ?? "seller name not readable"}${r.region ? ` (${r.region} endpoint)` : ""}` : ""}
+        ✓ connected{r.shop ? ` · ${r.shop}${r.currency ? ` (${r.currency}${r.timezone ? `, ${r.timezone}` : ""})` : ""}` : ""}{r.seller !== undefined ? ` · ${r.seller ?? "seller name not readable"}${r.region ? ` (${r.region} endpoint)` : ""}` : ""}
         {r.marketplaces?.map((m) => <div key={m.id} className="text-white/50">{m.name} · {m.id} · {m.country ?? "?"}{m.currency ? ` · ${m.currency}` : ""}</div>)}
         {r.backfillFrom && (r.ordersSeen
           ? <div className="text-white/50">orders: {r.ordersSeen >= 100 ? "100+" : r.ordersSeen} since {r.backfillFrom.slice(0, 10)} on the first page, oldest {r.oldestOrder ? new Date(r.oldestOrder).toLocaleDateString("en-GB") : "—"}</div>
@@ -236,6 +267,9 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
           <p className="text-[10px] text-white/30 font-mono">dev.shopify.com → Create app → name it, leave the URLs as they are → Scopes: <span className="text-white/50">read_orders, read_customers, read_products, read_inventory</span> (nothing else, no write_*) → release the version → install it on the store (app and store in the same Shopify organization) → copy Client ID + Client secret from the app's Settings. Shopify shows no token any more: Inana swaps these for a 24-hour token itself and renews it once a day. Orders give revenue + new/returning customers; products + inventory give the unit costs for margin. Backfills from 1 Jan last year once, then polls only orders that changed.</p>
           <div className="rounded-md border border-white/[0.06] bg-white/[0.02] p-2 space-y-1.5">
             <div className="text-[10px] font-mono text-white/50">App created under a Partner organization (agency account)? The exchange above is refused for a client's store; install it through Shopify instead:</div>
+            {config.shopifyConfigured && config.timezone && (
+              <div className="text-[10px] font-mono text-white/40">store currency {config.currency} · time zone {config.timezone} — money is shown in this currency and "Today" starts at this midnight</div>
+            )}
             {config.shopify.installedAt && (
               <div className="text-[10px] font-mono text-emerald-400">✓ installed via Shopify on {new Date(config.shopify.installedAt).toLocaleDateString("en-GB")} — token stored encrypted, renewed automatically</div>
             )}
@@ -298,7 +332,7 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
       <section className="rounded-lg border border-white/[0.07] p-4">
         <button type="button" className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-white/70 hover:text-white" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced}>
           {advanced ? <ChevronDown size={12} /> : <ChevronRight size={12} />} Advanced settings
-          <span className="text-[10px] font-mono font-normal text-white/30 ml-2">regions = {config.regions.map((r) => r.label).join(", ") || "none"} + Other · new customer = {form.ncDefinition === "window_days" ? `first order in ${form.ncWindowDays} days` : "first-ever order"} · revenue = {form.revenueField === "subtotal" ? "subtotal" : "order total"} · sync every {form.syncEveryMinutes || "10"} min</span>
+          <span className="text-[10px] font-mono font-normal text-white/30 ml-2">regions = {config.regions.map((r) => r.label).join(", ") || "none"} + Other · product lines = {config.productLines.map((l) => l.label).join(", ") || "none"} · new customer = {form.ncDefinition === "window_days" ? `first order in ${form.ncWindowDays} days` : "first-ever order"} · revenue = {form.revenueField === "subtotal" ? "subtotal" : "order total"} · sync every {form.syncEveryMinutes || "10"} min</span>
         </button>
         {advanced && (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 mt-3">
@@ -306,6 +340,11 @@ export default function PerformanceSourcesPanel({ brandId, config, sync, running
               <label htmlFor="regions" className={label}>Regions = label: countries; …</label>
               <input id="regions" className={input} value={form.regions} onChange={set("regions")} placeholder="NL/BE: NL, BE; UK: GB; USA: US" />
               <p className="text-[10px] text-white/30 font-mono mt-1">Up to 8 regions, 2-letter country codes (shipping country of the order); everything else is <span className="text-white/50">Other</span>. The key for ad-account mapping is the label without punctuation ({config.regions.map((r) => `${r.label} → ${r.key}`).join(", ") || "—"}). Empty = NL/BE, UK, USA. Saving re-assigns the synced orders; the first-ever-order rule only counts customers whose first order is inside the synced history.</p>
+            </div>
+            <div className="sm:col-span-2 lg:col-span-4">
+              <label htmlFor="productLines" className={label}>Product lines = one per row: Label = products: keyword, -excluded | campaigns: keyword</label>
+              <textarea id="productLines" className={`${input} min-h-[64px]`} rows={3} value={form.productLines} onChange={set("productLines")} placeholder={"GGK & single bundle products = products: -laundry, -durga, -protection | campaigns: ggk\nLaundry = products: laundry, durga | campaigns: laundry"} />
+              <p className="text-[10px] text-white/30 font-mono mt-1">Front-end offers for the "By product line" table. A line item belongs to the first product line whose product keywords match its title (case-insensitive; "-kw" = title must not contain kw; no plain keyword = any title). An order counts in every product line it contains; its revenue is split across them by line value. Ad spend follows the campaign name keywords; spend no rule claims (promo, retargeting, Google without campaign data) is distributed pro-rata over the attributed product spend of the same country and day, like the tracker's promo split. Leftovers show as <span className="text-white/50">Other / unassigned</span>. Saving re-assigns stored line items and campaigns; if line items were never synced, the next sync re-pulls the orders once.</p>
             </div>
             <div><label htmlFor="ncd" className={label}>New customer =</label>
               <select id="ncd" className={input} value={form.ncDefinition} onChange={set("ncDefinition")}>

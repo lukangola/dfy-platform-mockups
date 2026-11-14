@@ -10,7 +10,7 @@
  */
 import { eq, sql } from "drizzle-orm";
 import { db, schema } from "../db.js";
-import { DEFAULT_REGIONS, OTHER_REGION, flagFor, regionKeyFor, type PlatformKey, type RegionDef, type RegionKey } from "../../../shared/performance/engine.js";
+import { DEFAULT_REGIONS, OTHER_PRODUCT, OTHER_REGION, flagFor, regionKeyFor, type PlatformKey, type ProductKey, type ProductLineDef, type RegionDef, type RegionKey } from "../../../shared/performance/engine.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { forgetShopifyToken } from "./shopify.js";
 import { forgetAmazonToken } from "./amazon.js";
@@ -26,6 +26,14 @@ export interface AccountMap { id: string; region: RegionKey }
 export interface RegionConfig extends RegionDef { countries: string[] }
 /** What the UI sends: label + countries (key and flag are derived). */
 export interface RegionInput { label: string; countries: string[] }
+/**
+ * A product line (front-end offer): line items whose title contains one of `include` (any title when
+ * empty) and none of `exclude` belong to it — first product line in order wins. Ad campaigns whose
+ * name contains one of `campaigns` carry its spend; campaigns matching none are distributed pro-rata.
+ * All matching is case-insensitive substring.
+ */
+export interface ProductLineConfig extends ProductLineDef { include: string[]; exclude: string[]; campaigns: string[] }
+export interface ProductLineInput { label: string; include?: string[]; exclude?: string[]; campaigns?: string[] }
 
 export interface PerformanceClientConfig {
   brandId: string;
@@ -38,8 +46,13 @@ export interface PerformanceClientConfig {
   regions: RegionConfig[];
   /** derived: ISO-2 country → region key (countries not listed → OTH) */
   regionMapping: Record<string, RegionKey>;
+  /** product lines in display order (without "Other / unassigned"); empty = no product breakdown */
+  productLines: ProductLineConfig[];
   syncEveryMinutes: number;
   mockSeed: number;
+  /** the store's currency (ISO code) and IANA time zone from Shopify's shop.json; null until the first Test connection / sync */
+  shopCurrency: string | null;
+  shopTimezone: string | null;
   /** token = legacy custom app (pre-2026); clientId + clientSecret = Dev Dashboard app (exchanged for 24h tokens server-side) */
   shopify: {
     shopDomain: string | null; token: string | null; clientId: string | null; clientSecret: string | null;
@@ -92,6 +105,103 @@ export function parseRegions(v: unknown): RegionConfig[] {
   return out;
 }
 
+export const MAX_PRODUCT_LINES = 8;
+const MAX_KEYWORDS = 20;
+
+function keywordList(v: unknown, what: string): string[] {
+  const raw = Array.isArray(v) ? v : typeof v === "string" ? v.split(/[,\n]+/) : [];
+  const out: string[] = [];
+  for (const x of raw) {
+    const kw = String(x ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+    if (!kw) continue;
+    if (kw.length > 60) throw new Error(`${what} keyword "${kw.slice(0, 20)}…" is too long`);
+    if (!out.includes(kw)) out.push(kw);
+  }
+  if (out.length > MAX_KEYWORDS) throw new Error(`at most ${MAX_KEYWORDS} ${what} keywords per product line`);
+  return out;
+}
+
+/**
+ * Validate + normalise product lines from the UI or the DB. Keys come from the labels (like regions).
+ * A product line needs a product rule (include or exclude keywords) or campaign keywords; an
+ * all-empty one would swallow every line item.
+ */
+export function parseProductLines(v: unknown): ProductLineConfig[] {
+  if (v == null) return [];
+  if (!Array.isArray(v)) throw new Error("product lines must be a list");
+  if (v.length > MAX_PRODUCT_LINES) throw new Error(`at most ${MAX_PRODUCT_LINES} product lines (plus Other)`);
+  const out: ProductLineConfig[] = [];
+  for (const x of v as Array<Record<string, unknown>>) {
+    const label = typeof x?.label === "string" ? x.label.trim().replace(/\s+/g, " ").slice(0, 40) : "";
+    const key = regionKeyFor(label);
+    if (!label || !key) throw new Error("every product line needs a label with letters or digits");
+    if (key === OTHER_PRODUCT.key || /^OTHER$/i.test(label)) throw new Error(`"${label}" is reserved for the catch-all product line`);
+    if (out.some((r) => r.key === key)) throw new Error(`product line "${label}" appears twice (same key ${key})`);
+    const include = keywordList(x.include, "product"), exclude = keywordList(x.exclude, "product"), campaigns = keywordList(x.campaigns, "campaign");
+    if (!include.length && !exclude.length && !campaigns.length) throw new Error(`product line "${label}" has no product or campaign keywords`);
+    out.push({ key, label, include, exclude, campaigns });
+  }
+  return out;
+}
+
+/** Product line a line item title belongs to: first whose include matches (or has none) and whose exclude does not; OTH when none. */
+export function productLineForTitle(title: string | null | undefined, lines: ProductLineConfig[]): ProductKey {
+  const t = (title ?? "").toLowerCase();
+  for (const l of lines) {
+    if (!l.include.length && !l.exclude.length) continue; // campaign-only line never claims products
+    if (l.include.length && !l.include.some((k) => t.includes(k))) continue;
+    if (l.exclude.some((k) => t.includes(k))) continue;
+    return l.key;
+  }
+  return OTHER_PRODUCT.key;
+}
+
+/** Product line an ad campaign's spend belongs to by name; "" when no rule matches (→ distributed pro-rata). */
+export function productLineForCampaign(name: string | null | undefined, lines: ProductLineConfig[]): string {
+  const n = (name ?? "").toLowerCase();
+  for (const l of lines) if (l.campaigns.some((k) => n.includes(k))) return l.key;
+  return "";
+}
+
+/** Display list: the product lines, then "Other / unassigned"; empty when none are configured. */
+export function productDefs(c: Pick<PerformanceClientConfig, "productLines">): ProductLineDef[] {
+  return c.productLines.length ? [...c.productLines.map(({ key, label }) => ({ key, label })), OTHER_PRODUCT] : [];
+}
+
+/** `col ILIKE '%kw%'` with LIKE wildcards in the keyword escaped. */
+function ilike(col: ReturnType<typeof sql>, kw: string) {
+  return sql`${col} ILIKE ${"%" + kw.replace(/[\\%_]/g, (m) => "\\" + m) + "%"} ESCAPE '\\'`;
+}
+function anyOf(col: ReturnType<typeof sql>, kws: string[]) {
+  return sql`(${sql.join(kws.map((k) => ilike(col, k)), sql` OR `)})`;
+}
+
+/** SQL mirror of productLineForTitle for re-assigning stored line items. */
+export function productLineTitleCase(lines: ProductLineConfig[]) {
+  const col = sql`title`;
+  const whens = lines.filter((l) => l.include.length || l.exclude.length).map((l) => {
+    const conds = [];
+    if (l.include.length) conds.push(anyOf(col, l.include));
+    if (l.exclude.length) conds.push(sql`NOT ${anyOf(col, l.exclude)}`);
+    return sql`WHEN ${sql.join(conds, sql` AND `)} THEN ${l.key}`;
+  });
+  return whens.length ? sql`CASE ${sql.join(whens, sql` `)} ELSE ${OTHER_PRODUCT.key} END` : sql`${OTHER_PRODUCT.key}`;
+}
+
+/** SQL mirror of productLineForCampaign for re-assigning stored campaign days. */
+export function productLineCampaignCase(lines: ProductLineConfig[]) {
+  const col = sql`campaign_name`;
+  const whens = lines.filter((l) => l.campaigns.length).map((l) => sql`WHEN ${anyOf(col, l.campaigns)} THEN ${l.key}`);
+  return whens.length ? sql`CASE ${sql.join(whens, sql` `)} ELSE '' END` : sql`''`;
+}
+
+/** Product lines changed: re-derive the product line of every stored line item and campaign day. */
+export async function reassignProductLines(brandId: string, lines: ProductLineConfig[]): Promise<void> {
+  const byTitle = productLineTitleCase(lines), byCampaign = productLineCampaignCase(lines);
+  await db.execute(sql`UPDATE performance_order_lines SET product_line = ${byTitle} WHERE brand_id = ${brandId} AND product_line IS DISTINCT FROM (${byTitle})`);
+  await db.execute(sql`UPDATE performance_spend_campaign_days SET product_line = ${byCampaign} WHERE brand_id = ${brandId} AND product_line IS DISTINCT FROM (${byCampaign})`);
+}
+
 export function regionMappingOf(regions: RegionConfig[]): Record<string, RegionKey> {
   const m: Record<string, RegionKey> = {};
   for (const r of regions) for (const cc of r.countries) m[cc] = r.key;
@@ -119,8 +229,10 @@ function defaults(brandId: string, name: string): PerformanceClientConfig {
     dataSource: process.env.PERFORMANCE_DATA_SOURCE === "live" ? "live" : "mock",
     ncDefinition: "first_ever", ncWindowDays: 365, revenueField: "total",
     regions, regionMapping: regionMappingOf(regions),
+    productLines: [],
     syncEveryMinutes: 10,
     mockSeed: seedFromId(brandId),
+    shopCurrency: null, shopTimezone: null,
     shopify: { shopDomain: null, token: null, clientId: null, clientSecret: null, refreshToken: null, tokenExpiresAt: null, installedAt: null },
     amazon: { clientId: null, clientSecret: null, refreshToken: null, region: "EU", marketplaceIds: [] },
     meta: { token: null, accounts: [] },
@@ -157,6 +269,11 @@ export function parseMarketplaceIds(v: unknown): string[] {
   return out;
 }
 
+/** Stored product lines; none when the row holds something unreadable. */
+function storedProductLines(v: unknown): ProductLineConfig[] {
+  try { return parseProductLines(v); } catch { return []; }
+}
+
 /** Stored regions, or the defaults when the row has none / holds something unreadable. */
 function storedRegions(v: unknown): RegionConfig[] {
   if (!Array.isArray(v) || !v.length) return parseRegions(DEFAULT_REGION_INPUT);
@@ -174,7 +291,9 @@ export async function getClientConfig(brandId: string, brandName: string): Promi
     ncDefinition: row.ncDefinition === "window_days" ? "window_days" : "first_ever",
     ncWindowDays: row.ncWindowDays, revenueField: row.revenueField === "subtotal" ? "subtotal" : "total",
     regions, regionMapping: regionMappingOf(regions),
+    productLines: storedProductLines(row.productLines),
     syncEveryMinutes: row.syncEveryMinutes,
+    shopCurrency: row.shopCurrency, shopTimezone: row.shopTimezone,
     shopify: {
       shopDomain: row.shopifyShopDomain, token: decryptSecret(row.shopifyTokenEnc),
       clientId: row.shopifyClientId, clientSecret: decryptSecret(row.shopifyClientSecretEnc),
@@ -208,6 +327,8 @@ export interface ConfigPatch {
   ncDefinition?: NcDefinition; ncWindowDays?: number; revenueField?: RevenueField;
   /** named regions (label + countries); null = back to the defaults */
   regions?: RegionInput[] | null;
+  /** product lines (label + title keywords + campaign keywords); null or [] = no product breakdown */
+  productLines?: ProductLineInput[] | null;
   syncEveryMinutes?: number;
   shopifyShopDomain?: string | null; shopifyToken?: string | null;
   shopifyClientId?: string | null; shopifyClientSecret?: string | null;
@@ -238,6 +359,11 @@ export async function saveClientConfig(brandId: string, patch: ConfigPatch): Pro
   if (patch.regions !== undefined) {
     regions = parseRegions(patch.regions ?? DEFAULT_REGION_INPUT);
     set.regions = patch.regions ? regions.map(({ label, countries }) => ({ label, countries })) : null;
+  }
+  let productLines: ProductLineConfig[] | null = null;
+  if (patch.productLines !== undefined) {
+    productLines = parseProductLines(patch.productLines ?? []);
+    set.productLines = productLines.length ? productLines.map(({ label, include, exclude, campaigns }) => ({ label, include, exclude, campaigns })) : null;
   }
   if (patch.syncEveryMinutes != null) set.syncEveryMinutes = Math.round(clamp(patch.syncEveryMinutes, 2, 1440, 10));
   if (patch.shopifyShopDomain !== undefined) set.shopifyShopDomain = patch.shopifyShopDomain?.trim() || null;
@@ -281,6 +407,7 @@ export async function saveClientConfig(brandId: string, patch: ConfigPatch): Pro
     if (regions) await reassignOrderRegions(brandId, saved.regionMapping);
     await reassignSpendRegions(brandId, saved.regionMapping, [...saved.meta.accounts, ...saved.google.accounts]);
   }
+  if (productLines) await reassignProductLines(brandId, productLines);
   forgetShopifyToken(brandId); // credentials may have changed — next call exchanges them again
   forgetAmazonToken(brandId);
 }
@@ -326,7 +453,9 @@ export function publicConfig(c: PerformanceClientConfig) {
   return {
     brandId: c.brandId, name: c.name, dataSource: c.dataSource,
     ncDefinition: c.ncDefinition, ncWindowDays: c.ncWindowDays, revenueField: c.revenueField,
-    regions: c.regions, syncEveryMinutes: c.syncEveryMinutes,
+    regions: c.regions, productLines: c.productLines, syncEveryMinutes: c.syncEveryMinutes,
+    /** money is shown in the shop's currency (EUR until Shopify has been reached once); days follow the shop's time zone (browser's when null) */
+    currency: c.shopCurrency ?? "EUR", timezone: c.shopTimezone,
     shopify: {
       shopDomain: c.shopify.shopDomain, tokenSet: Boolean(c.shopify.token),
       clientId: c.shopify.clientId, clientSecretSet: Boolean(c.shopify.clientSecret),

@@ -61,17 +61,36 @@ export type RegionCell = [number, number, number, number, number];
 /** spend per region, indexed like `Dataset.regions` */
 export type PlatformSpend = number[];
 
+/**
+ * Product line (front-end offer, e.g. "GGK" vs "Laundry"): key derived from the label like regions.
+ * "OTH" is the catch-all: line items no product line claims, and spend that could not be split.
+ */
+export type ProductKey = string;
+export interface ProductLineDef { key: ProductKey; label: string }
+export const OTHER_PRODUCT: ProductLineDef = { key: "OTH", label: "Other / unassigned" };
+
+/** [ncOrders, ncRevenue, rcOrders, rcRevenue] of a product line within a region. An order counts in
+ *  every product line it contains (like a line-item report); its revenue is split across them. */
+export type ProductCell = [number, number, number, number];
+
 export interface HourBucket {
   /** bucket start, epoch ms, aligned to the hour */
   t: number;
   c: Record<RegionKey, RegionCell>;
   s: Record<PlatformKey, PlatformSpend>;
+  /** per product line: sales per region (keys of `Dataset.products`); absent when the brand has no product lines */
+  pc?: Record<ProductKey, Record<RegionKey, ProductCell>>;
+  /** per product line: ad spend per region (all platforms), indexed like `Dataset.regions` — campaign spend
+   *  by product plus the pro-rata share of spend no campaign rule claimed */
+  ps?: Record<ProductKey, number[]>;
 }
 
 /** A contiguous hourly dataset. `hours[i].t === startMs + i * HOUR`. */
 export interface Dataset {
   /** the brand's regions in display order, "Other" last — keys of `c`, index of `s` */
   regions: RegionDef[];
+  /** the brand's product lines in display order, "Other / unassigned" last; empty = none configured */
+  products?: ProductLineDef[];
   hours: HourBucket[];
   startMs: number;
   /** "as of" — the moment the data was produced */
@@ -130,10 +149,39 @@ export function agg(D: Dataset, t0: number, t1: number, region: RegionKey | null
   return out;
 }
 
+/** Sales + spend of one product line in [t0, t1) (one region or all). Margin is not tracked per product (cogs 0). */
+export function aggProduct(D: Dataset, t0: number, t1: number, region: RegionKey | null, product: ProductKey): Sums {
+  const out = zeroSums();
+  if (D.hours.length === 0) return out;
+  const i0 = Math.max(0, idxOf(D, t0));
+  const i1 = Math.min(D.hours.length - 1, idxOf(D, t1 - 1));
+  for (let i = i0; i <= i1; i++) {
+    const h = D.hours[i];
+    const cells = h.pc?.[product];
+    const spend = h.ps?.[product];
+    for (let r = 0; r < D.regions.length; r++) {
+      const k = D.regions[r].key;
+      if (region && k !== region) continue;
+      const o = cells?.[k];
+      if (o) {
+        out.ncO += o[0]; out.ncR += o[1]; out.rcO += o[2]; out.rcR += o[3];
+        if (o[0] + o[2] > 0) out.salesRows += o[0] + o[2];
+      }
+      const sp = spend?.[r] ?? 0;
+      if (sp) { out.spend += sp; out.adRows++; }
+    }
+  }
+  return out;
+}
+
 /* ---------- derived metrics ---------- */
 
 export interface Metrics {
   revenue: number;
+  /** revenue from first-order (new) customers, by the brand's NC definition */
+  ncRevenue: number;
+  /** revenue from returning customers */
+  rcRevenue: number;
   cm: number;
   ncRoas: number | null;
   ncpa: number | null;
@@ -174,6 +222,8 @@ export function metrics(s: Sums): Metrics {
   const rcCm = (M ?? 0) * s.rcR;
   return {
     revenue: rev,
+    ncRevenue: s.ncR,
+    rcRevenue: s.rcR,
     cm,
     ncRoas: s.spend > 0 ? s.ncR / s.spend : null,
     ncpa: s.ncO > 0 ? s.spend / s.ncO : null,
@@ -205,17 +255,66 @@ export const RANGE_LABELS: Record<RangeKey, string> = {
   today: "Today", yesterday: "Yesterday", mtd: "Month to date", ytd: "Year to date",
 };
 
-function dayStart(ms: number): number {
-  const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime();
+/* ---------- time zone helpers (the shop's day, not the browser's) ---------- */
+
+const tzFormats = new Map<string, Intl.DateTimeFormat>();
+function tzFormat(tz: string): Intl.DateTimeFormat {
+  let f = tzFormats.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    tzFormats.set(tz, f);
+  }
+  return f;
+}
+
+/** The IANA zone if the runtime knows it, else undefined (→ browser-local). */
+export function validTimeZone(tz: string | null | undefined): string | undefined {
+  if (!tz) return undefined;
+  try { tzFormat(tz); return tz; } catch { return undefined; }
+}
+
+/** Calendar fields of an instant in `tz`. */
+function zonedParts(ms: number, tz: string): { y: number; m: number; d: number; h: number; mi: number; s: number } {
+  const p: Record<string, number> = {};
+  for (const x of tzFormat(tz).formatToParts(ms)) if (x.type !== "literal") p[x.type] = Number(x.value);
+  return { y: p.year, m: p.month, d: p.day, h: p.hour, mi: p.minute, s: p.second };
+}
+
+/** Instant of local midnight on calendar day (y, m[1-12], d) in `tz`; m may over/underflow like Date.UTC. */
+function zonedMidnight(y: number, m: number, d: number, tz: string): number {
+  const naive = Date.UTC(y, m - 1, d);
+  const offsetAt = (t: number) => { const p = zonedParts(t, tz); return Date.UTC(p.y, p.m - 1, p.d, p.h, p.mi, p.s) - t; };
+  let t = naive - offsetAt(naive);
+  t = naive - offsetAt(t); // second pass settles DST transitions
+  return t;
+}
+
+/** Start of the day containing `ms` — in `tz`, or the browser's zone when none. */
+export function dayStart(ms: number, tz?: string): number {
+  if (!tz) { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); }
+  const p = zonedParts(ms, tz);
+  return zonedMidnight(p.y, p.m, p.d, tz);
+}
+function monthStart(ms: number, tz: string | undefined, monthsBack: number): number {
+  if (!tz) { const d = new Date(ms); return new Date(d.getFullYear(), d.getMonth() - monthsBack, 1).getTime(); }
+  const p = zonedParts(ms, tz);
+  return zonedMidnight(p.y, p.m - monthsBack, 1, tz);
+}
+function yearStart(ms: number, tz: string | undefined, yearsBack: number): number {
+  if (!tz) { const d = new Date(ms); return new Date(d.getFullYear() - yearsBack, 0, 1).getTime(); }
+  const p = zonedParts(ms, tz);
+  return zonedMidnight(p.y - yearsBack, 1, 1, tz);
 }
 
 /**
  * Current window + the previous window of equal length (compare basis).
- * Uses the dataset's `now` so client and server agree on "as of".
+ * Uses the dataset's `now` so client and server agree on "as of". Days, months and years
+ * start at midnight in `tz` (the shop's time zone, so "Today" matches the Shopify admin
+ * and Ads Manager); without a zone they follow the browser. Daily buckets step 24 h from
+ * that midnight, so on a DST-change day the later buckets of a series shift by an hour.
  */
-export function range(now: number, key: RangeKey): Range {
-  const ds = dayStart(now);
-  const nd = new Date(now);
+export function range(now: number, key: RangeKey, tz?: string): Range {
+  const ds = dayStart(now, tz);
   if (key === "today") {
     const elapsed = now - ds;
     return { cur: [ds, now], prev: [ds - DAY, ds - DAY + elapsed], grain: "hour" };
@@ -224,12 +323,10 @@ export function range(now: number, key: RangeKey): Range {
     return { cur: [ds - DAY, ds], prev: [ds - 2 * DAY, ds - DAY], grain: "hour" };
   }
   if (key === "mtd") {
-    const m0 = new Date(nd.getFullYear(), nd.getMonth(), 1).getTime();
-    const p0 = new Date(nd.getFullYear(), nd.getMonth() - 1, 1).getTime();
+    const m0 = monthStart(now, tz, 0), p0 = monthStart(now, tz, 1);
     return { cur: [m0, now], prev: [p0, p0 + (now - m0)], grain: "day" };
   }
-  const y0 = new Date(nd.getFullYear(), 0, 1).getTime();
-  const p0 = new Date(nd.getFullYear() - 1, 0, 1).getTime();
+  const y0 = yearStart(now, tz, 0), p0 = yearStart(now, tz, 1);
   return { cur: [y0, now], prev: [p0, p0 + (now - y0)], grain: "day" };
 }
 
@@ -288,17 +385,38 @@ export function platformStats(m: Metrics): PlatformStat[] {
   });
 }
 
-/* ---------- formatting (EUR, en-GB dates, tabular numbers) ---------- */
+/* ---------- formatting (shop currency, en-GB dates, tabular numbers) ---------- */
 
-const nf0 = { minimumFractionDigits: 0, maximumFractionDigits: 0 };
+const moneyFormats = new Map<string, Intl.NumberFormat>();
+function moneyFormat(currency: string, dec: number): Intl.NumberFormat {
+  const k = `${currency}:${dec}`;
+  let f = moneyFormats.get(k);
+  if (!f) {
+    try {
+      f = new Intl.NumberFormat("en-US", { style: "currency", currency, currencyDisplay: "symbol", minimumFractionDigits: dec, maximumFractionDigits: dec });
+    } catch {
+      // unknown code (bad data from a source): plain number with the code in front
+      const nf = new Intl.NumberFormat("en-US", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+      f = { format: (n: number) => `${currency} ${nf.format(n)}` } as Intl.NumberFormat;
+    }
+    moneyFormats.set(k, f);
+  }
+  return f;
+}
 
-export function eur(v: number | null | undefined, dec?: number): string {
+/**
+ * Money in the shop's currency: "€12,345", "CA$36.51", "£1,055". Whole units from 100 up,
+ * two decimals below (or `dec` decimals when given); negatives get a true minus sign.
+ */
+export function money(v: number | null | undefined, dec: number | undefined, currency: string): string {
   if (v == null || !Number.isFinite(v)) return "—";
   const neg = v < 0; const a = Math.abs(v);
-  const opts = dec != null
-    ? { minimumFractionDigits: dec, maximumFractionDigits: dec }
-    : (a < 100 ? { minimumFractionDigits: 2, maximumFractionDigits: 2 } : nf0);
-  return (neg ? "−" : "") + "€" + a.toLocaleString("en-US", opts);
+  const d = dec != null ? dec : (a < 100 ? 2 : 0);
+  return (neg ? "−" : "") + moneyFormat(currency || "EUR", d).format(a);
+}
+/** EUR shorthand (mock data, places without a shop currency). */
+export function eur(v: number | null | undefined, dec?: number): string {
+  return money(v, dec, "EUR");
 }
 export function num(v: number | null | undefined): string {
   return v == null || !Number.isFinite(v) ? "—" : Math.round(v).toLocaleString("en-US");

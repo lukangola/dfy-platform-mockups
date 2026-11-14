@@ -22,7 +22,7 @@ What to click:
   platform table scope to that market; the matching region row is highlighted.
 - **Compare** — Previous period shows ▲/▼ deltas on every number (green = good direction,
   red = bad; NCPA/CPA invert; spend is grey = neutral). Off hides them.
-- Hover any sparkline for the bucket's time and value. **Refresh** refetches.
+- Hover any sparkline for the bucket's time and value. **Refresh** pulls new orders and spend from the connected sources (an incremental sync, same as "Sync now") and reloads when it is done; the button reads "Syncing…" meanwhile. On mock data it just reloads.
 - Switch brand in the top-left switcher: every brand gets its own mock series.
 
 Reconciliation that must always hold (checked in the browser on 2026-11-09, all four ranges):
@@ -104,7 +104,10 @@ platform-table spend equals the Meta / Google / TikTok columns of the Total row.
    Credentials, Desktop/Web app), a refresh token for that client (OAuth playground or the
    Google Ads API `generate_user_credentials` helper), optional MCC id, and customer ids with region:
    `1234567890:NLBE`. Click **Test connection**.
-5. Set **Data source = Live** and click **Save & sync now**. (Nothing to type for margin — it
+5. Set **Data source = Live** and click **Save & sync now**. The dashboard then formats money in the
+   shop's currency and starts "Today" at the shop's midnight (both from Shopify's `shop.json`, shown in
+   the Shopify card and the footer) — so Today matches the Shopify admin and Ads Manager, not the
+   browser's clock. (Nothing to type for margin — it
    comes from Shopify's "Cost per item"; the new-customer rule and the regions live under Advanced
    settings. Regions: `label: countries; …` with 2-letter codes of the order's shipping country, up
    to 8, everything else = Other; the ad-account mapping uses the label without punctuation as key,
@@ -209,15 +212,18 @@ platform retires a version the Test button shows the error.
 | LiveSource (SQL → hourly buckets) | `server/lib/performance/liveSource.ts` |
 | Shopify orders sync + NC/RC recompute | `server/lib/performance/shopify.ts` |
 | Amazon orders sync (SP-API Orders, SKU → Shopify cost) | `server/lib/performance/amazon.ts` |
-| Meta hourly spend sync | `server/lib/performance/meta.ts` |
+| Meta hourly spend sync + campaign days | `server/lib/performance/meta.ts` |
+| Product-line spend split (campaign days → hourly slices) | `server/lib/performance/productSplit.ts` |
 | Google Ads hourly spend sync | `server/lib/performance/googleAds.ts` |
 | Sync loop, "Sync now", freshness | `server/lib/performance/sync.ts` |
 | Credential encryption | `server/lib/performance/secrets.ts` |
-| Tables (migrations `drizzle/0031_performance_dashboard.sql` … `0035_amazon_sales_channel.sql`) | `performance_client_configs`, `performance_orders` (`channel`), `performance_variant_costs` (`sku`), `performance_spend_hours`, `performance_sync_state` |
+| Tables (migrations `drizzle/0031_performance_dashboard.sql` … `0039_product_lines.sql`) | `performance_client_configs`, `performance_orders` (`channel`), `performance_order_lines`, `performance_customers`, `performance_variant_costs` (`sku`), `performance_spend_hours`, `performance_spend_campaign_days`, `performance_sync_state` |
 
 Hourly-bucket contract (every source must produce it):
 `{ t, c: { REGION: [ncOrders, ncRev, rcOrders, rcRev, cogs] }, s: { PLATFORM: [spendPerRegion] } }` — the
 dataset carries the brand's `regions` (named ones, then Other); spend arrays are indexed like it.
+With product lines configured each bucket also carries `pc: { PRODUCT: { REGION: [ncOrders, ncRev, rcOrders, rcRev] } }`
+and `ps: { PRODUCT: [spendPerRegion] }` (`Dataset.products`, "Other / unassigned" last).
 
 ### What each sync pulls (so nothing is re-downloaded needlessly)
 
@@ -227,11 +233,13 @@ dataset carries the brand's `regions` (named ones, then Other); spend arrays are
 | Shopify unit costs | one GraphQL request per 100 distinct variants seen in orders | only variants not cached yet, or cached > 30 days ago (or without SKU) and seen again |
 | Amazon orders | all orders created since 1 Jan last year, 100/page + one items call per live order | only orders whose `LastUpdateDate` moved past the cursor |
 | Meta spend | hourly rows since 1 Jan last year, 60-day chunks | last 3 days per account (late attribution settles) |
+| Meta campaign days | daily spend per campaign × country, same chunks (product-line split) | same 3 days; an account without campaign days yet gets one full re-pull |
+| Shopify line items | stored with every order (no extra request) | with every order upsert; a brand whose orders predate product lines re-pulls its window once |
 | Google spend | hourly rows since 1 Jan last year, 90-day chunks | last 3 days per account |
 
-**Refresh** on the dashboard and the range/country/compare controls only re-read the local
-database — they never call Shopify or the ad platforms. "Full re-sync" is the only button that
-redoes the backfill.
+**Refresh** on the dashboard runs an incremental sync (the same as "Sync now") and reloads;
+the range/country/compare controls only re-read the local database and never call Shopify or
+the ad platforms. "Full re-sync" is the only button that redoes the backfill.
 
 ## Flags and env
 
@@ -247,12 +255,52 @@ redoes the backfill.
   items by SKU match); gross margin % = (revenue − COGS) ÷ revenue. Mock data uses a calibrated ~52% margin.
 - CM = revenue − COGS − ad spend
 - NC CM = margin × NC revenue − ad spend (all ad spend counts as acquisition); RC CM = margin × RC revenue
-- NCPA = ad spend ÷ NC orders; NC ROAS = NC revenue ÷ ad spend
-- New customer = first-ever order of that customer (Shopify's definition); orders of customers whose
-  Shopify record predates the oldest synced order count as returning (with full history that is the
-  backfill start; with a Partner-organization app it is the 60-day floor, so hidden earlier orders
-  do not make a customer look new)
+- NC revenue = total price of new-customer orders (the "New customer revenue" card); NCPA = ad spend ÷ NC orders; NC ROAS = NC revenue ÷ ad spend
+- New customer = first-ever order of that customer (Shopify's and Triple Whale's definition). For
+  customers whose Shopify record predates the oldest synced order (with a Partner-organization app
+  that is the 60-day floor, with full history the backfill start) the sync fetches the customer's
+  lifetime order count (`Customer.numberOfOrders`, scope read_customers) once and stores how many of
+  those orders we cannot see (`performance_customers.hidden_orders`); the order is new only when
+  none is hidden. Customers without a count (deleted, or the lookup failed) count as returning.
 - Platform ROAS/CPA use fixed mock attribution factors (Meta 2.05, Google 6.2, TikTok 2.4)
+
+### By product line (front-end offers)
+
+The table under "By region" repeats the weekly tracker's product rows per region: Ad spend, NC
+revenue, NC orders, NC ROAS, NCPA, NC AOV (+ all-customer revenue), with the region's totals as the
+group header. Product lines are per brand (Connect data sources → Advanced settings → Product
+lines), one per row:
+
+```
+GGK & single bundle products = products: -laundry, -durga, -protection | campaigns: ggk
+Laundry = products: laundry, durga | campaigns: laundry
+```
+
+- **Sales**: every Shopify line item is stored (`performance_order_lines`) and assigned to the first
+  product line whose product keywords match its title — case-insensitive substring; `-kw` means the
+  title must not contain kw, no plain keyword means any title. This mirrors the Shopify report
+  filters the tracker was filled from ("does not contain Laundry, Durga, Protection" → GGK,
+  "contains Laundry / Durga" → Laundry). An order counts in **every** product line it has an item in
+  (like a line-item report, so product order counts exceed the region's order count — the tracker's
+  rows behave the same way), while the order's revenue (the configured revenue field) is split
+  across its product lines in proportion to the net line value, so product revenue adds up to the
+  region's revenue. Items no product line claims (Shipping Protection) and orders without stored
+  items (Amazon) sit in "Other / unassigned".
+- **Spend**: Meta is also pulled at campaign level per day and country
+  (`performance_spend_campaign_days`); a campaign maps to a product line by the campaign keywords
+  (GoE: `LVRG_CBO_GGK_CA`, `LVRG_CBO_LAUNDRY_US`, …). Each hourly spend slice is split in the
+  proportions of that day's **attributed** spend for the same account and country — so spend no
+  rule claims (promo campaigns, retargeting) is distributed pro-rata over the product lines, the
+  same rule as the tracker's promo column. Fallbacks: the day's shares across all countries of the
+  account, then any campaign day of the same region (how Google spend without campaign data is
+  split), else "Other / unassigned". NC ROAS and NCPA per product therefore include the
+  distributed share.
+- Changing product lines re-assigns the stored line items and campaign days in SQL; nothing is
+  re-downloaded except the one-time re-pull when a brand had no line items yet.
+- Difference to the tracker: the tracker's product revenue is Shopify "gross sales" (before
+  discounts, tax and shipping); Inana uses the same revenue definition as the rest of the dashboard
+  (order total by default), so absolute revenue differs slightly while ROAS/NCPA stay comparable in
+  shape.
 
 ## Still open (not blocking the live dashboard)
 
@@ -261,8 +309,10 @@ redoes the backfill.
    insights (Phase 4).
 2. Platform ROAS/CPA in the by-platform table still use mock attribution factors; platform-reported
    conversions come with the campaign-level pull (Phase 4).
-3. TikTok and Windsor.ai fallback (Phase 4). Refund netting, currency conversion (shop currency is
-   assumed EUR; Amazon totals are stored in the marketplace currency as-is), auth hardening for
+3. TikTok and Windsor.ai fallback (Phase 4). Refund netting, currency conversion across sources (the dashboard shows every figure in
+   the Shopify shop's currency — CAD for Guests on Earth, EUR for wellbe — and cuts "Today" at the
+   shop's midnight, both read from `shop.json` on every sync; Amazon totals and ad spend are stored
+   in their own currency as-is and are not converted, so a USD ad account on a CAD shop would mix), auth hardening for
    production (Phase 5). Amazon: the Reports API (`GET_FLAT_FILE_ALL_ORDERS_DATA_BY_LAST_UPDATE_GENERAL`)
    would make the first backfill minutes instead of hours; Amazon ad spend (Advertising API) is a
    separate platform and not pulled.

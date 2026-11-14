@@ -920,6 +920,9 @@ export const performanceClientConfigs = pgTable("performance_client_configs", {
   regionMapping: jsonb("region_mapping"),
   /** named regions in display order, [{ label: "NL/BE", countries: ["NL","BE"] }]; "Other" is implied last; null = default (NL/BE, UK, USA) */
   regions: jsonb("regions"),
+  /** product lines (front-end offers) in display order, [{ label, include: ["laundry"], exclude: ["protection"], campaigns: ["laundry"] }];
+   *  line items are matched by title (first line whose include matches and no exclude matches), ad campaigns by name; null = none */
+  productLines: jsonb("product_lines"),
   syncEveryMinutes: integer("sync_every_minutes").notNull().default(10),
   shopifyShopDomain: text("shopify_shop_domain"),
   /** legacy custom app (created in the admin before 2026): its static Admin API access token */
@@ -932,6 +935,10 @@ export const performanceClientConfigs = pgTable("performance_client_configs", {
   shopifyRefreshTokenEnc: text("shopify_refresh_token_enc"),
   shopifyTokenExpiresAt: timestamp("shopify_token_expires_at", { withTimezone: true }),
   shopifyInstalledAt: timestamp("shopify_installed_at", { withTimezone: true }),
+  /** from Shopify's shop.json (currency, iana_timezone), refreshed by Test connection and every sync;
+   *  the dashboard formats money in this currency and draws its day boundaries in this time zone */
+  shopCurrency: text("shop_currency"),
+  shopTimezone: text("shop_timezone"),
   metaTokenEnc: text("meta_token_enc"),
   /** [{ id: "act_123", region: "NLBE" }] — region = key of one of the brand's regions or OTH */
   metaAccounts: jsonb("meta_accounts").notNull().default(sql`'[]'::jsonb`),
@@ -990,6 +997,26 @@ export const performanceOrders = pgTable(
     index("performance_orders_brand_created_idx").on(t.brandId, t.createdAt),
     index("performance_orders_brand_customer_idx").on(t.brandId, t.customerKey),
   ],
+);
+
+/**
+ * Shopify lifetime order count per customer (Customer.numberOfOrders), fetched once for customers
+ * whose record predates the oldest order we hold — the only ones the app's 60-day order window
+ * makes ambiguous. `hiddenOrders` = orders Shopify counts that are not in performance_orders, so
+ * 0 means the customer's first visible order really is their first order.
+ */
+export const performanceCustomers = pgTable(
+  "performance_customers",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    /** same key as performance_orders.customer_key ("id:<shopify customer id>") */
+    customerKey: text("customer_key").notNull(),
+    lifetimeOrders: integer("lifetime_orders").notNull(),
+    hiddenOrders: integer("hidden_orders").notNull(),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().default(sql`now()`),
+  },
+  (t) => [uniqueIndex("performance_customers_brand_key_uq").on(t.brandId, t.customerKey)],
 );
 
 /**
@@ -1059,3 +1086,68 @@ export const performanceSyncState = pgTable(
   },
   (t) => [uniqueIndex("performance_sync_state_brand_source_uq").on(t.brandId, t.source)],
 );
+
+/**
+ * One row per Shopify line item of a synced order — the product-line breakdown ("GGK vs Laundry")
+ * is built from these. `productLine` is the key of the brand's product line the title matched
+ * ("OTH" = none) and is re-derived when the product lines change. `net` = price × quantity − line
+ * discounts; the order's revenue is split across its product lines in proportion to `net`.
+ */
+export const performanceOrderLines = pgTable(
+  "performance_order_lines",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    orderId: uuid("order_id").notNull(),
+    /** the channel's line item id */
+    lineId: text("line_id").notNull(),
+    title: text("title").notNull(),
+    variantTitle: text("variant_title"),
+    sku: text("sku"),
+    productId: text("product_id"),
+    variantId: text("variant_id"),
+    quantity: integer("quantity").notNull(),
+    /** price × quantity before discounts */
+    gross: numeric("gross", { precision: 12, scale: 2 }).notNull(),
+    /** gross − discounts allocated to the line */
+    net: numeric("net", { precision: 12, scale: 2 }).notNull(),
+    productLine: text("product_line").notNull().default("OTH"),
+  },
+  (t) => [
+    uniqueIndex("performance_order_lines_order_line_uq").on(t.orderId, t.lineId),
+    index("performance_order_lines_brand_idx").on(t.brandId, t.productLine),
+  ],
+);
+
+/**
+ * Daily ad spend per campaign and country (Meta: level=campaign + breakdowns=country). Only used to
+ * split the hourly account spend across product lines: a campaign maps to a product line by name
+ * (`productLine`, "" = none → distributed pro-rata over the attributed spend of the same day and
+ * country). `dayStart`/`dayEnd` are the UTC instants of the day in the ad account's time zone, so
+ * hourly rows join by range without knowing the zone.
+ */
+export const performanceSpendCampaignDays = pgTable(
+  "performance_spend_campaign_days",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    platform: text("platform").notNull(),
+    accountId: text("account_id").notNull(),
+    campaignId: text("campaign_id").notNull(),
+    campaignName: text("campaign_name").notNull(),
+    /** the report day (YYYY-MM-DD in the account's zone) */
+    day: text("day").notNull(),
+    dayStart: timestamp("day_start", { withTimezone: true }).notNull(),
+    dayEnd: timestamp("day_end", { withTimezone: true }).notNull(),
+    /** ISO-2 country; "" = unknown */
+    country: text("country").notNull().default(""),
+    spend: numeric("spend", { precision: 12, scale: 4 }).notNull(),
+    /** product line key the campaign name matched; "" = unattributed */
+    productLine: text("product_line").notNull().default(""),
+  },
+  (t) => [
+    uniqueIndex("performance_spend_campaign_days_uq").on(t.brandId, t.platform, t.accountId, t.campaignId, t.day, t.country),
+    index("performance_spend_campaign_days_brand_day_idx").on(t.brandId, t.dayStart),
+  ],
+);
+

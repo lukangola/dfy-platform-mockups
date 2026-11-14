@@ -124,8 +124,10 @@ export function startPerformanceSyncLoop(): void {
 
 /** Reset a brand's live data (used by "Full re-sync"). */
 export async function clearBrandData(brandId: string): Promise<void> {
+  await db.delete(schema.performanceOrderLines).where(eq(schema.performanceOrderLines.brandId, brandId));
   await db.delete(schema.performanceOrders).where(eq(schema.performanceOrders.brandId, brandId));
   await db.delete(schema.performanceSpendHours).where(eq(schema.performanceSpendHours.brandId, brandId));
+  await db.delete(schema.performanceSpendCampaignDays).where(eq(schema.performanceSpendCampaignDays.brandId, brandId));
   await db.delete(schema.performanceVariantCosts).where(eq(schema.performanceVariantCosts.brandId, brandId));
   await db.update(schema.performanceSyncState).set({ cursor: null, lastSyncedAt: null, rowsTotal: 0, status: "idle", error: null })
     .where(and(eq(schema.performanceSyncState.brandId, brandId)));

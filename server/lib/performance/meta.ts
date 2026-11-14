@@ -10,19 +10,22 @@
  * (country ""). Pulled in 60-day chunks; a chunk replaces the account's rows in
  * its window, and incremental runs re-pull the last 3 days so late-attributed
  * spend settles.
+ * A third, daily request at campaign level (breakdowns=country) feeds
+ * performance_spend_campaign_days, from which the hourly account spend is split
+ * across the brand's product lines (campaign name → product line; the rest pro-rata).
  * The token travels only in the Authorization header — never in a URL, so it
  * can't end up in logs, error messages or paging links.
  */
 import { and, eq, gte, lt, sql } from "drizzle-orm";
 import { db, schema } from "../db.js";
-import type { PerformanceClientConfig } from "./config.js";
+import { productLineForCampaign, type PerformanceClientConfig } from "./config.js";
 import { regionFor } from "./shopify.js";
-import { backfillStart, dateChunks, sleep, zonedHourToUtcMs } from "./time.js";
+import { addDays, backfillStart, dateChunks, sleep, ymd, zonedHourToUtcMs } from "./time.js";
 
 export const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v23.0";
 const GRAPH = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
 
-interface InsightRow { date_start: string; spend?: string; impressions?: string; clicks?: string; hourly_stats_aggregated_by_advertiser_time_zone?: string; country?: string }
+interface InsightRow { date_start: string; spend?: string; impressions?: string; clicks?: string; hourly_stats_aggregated_by_advertiser_time_zone?: string; country?: string; campaign_id?: string; campaign_name?: string }
 
 /** One day's spend per country, as shares of the day's total (country "" never appears here). */
 export type CountryShares = Map<string, Array<{ country: string; share: number }>>;
@@ -103,17 +106,19 @@ export async function syncMetaSpend(config: PerformanceClientConfig, lastSyncedA
   const { token, accounts } = config.meta;
   if (!token) throw new Error("Meta is not connected (access token)");
   if (!accounts.length) throw new Error("Meta: no ad accounts configured");
-  const from = lastSyncedAt ? new Date(lastSyncedAt.getTime() - 3 * 86_400_000) : backfillStart();
+  const incrementalFrom = lastSyncedAt ? new Date(lastSyncedAt.getTime() - 3 * 86_400_000) : backfillStart();
   const to = new Date();
   let rows = 0;
   for (const acct of accounts) {
     const id = actId(acct.id);
     const meta = await graphGet<{ timezone_name?: string }>(`${GRAPH}/${id}?fields=timezone_name`, token);
     const tz = meta.timezone_name ?? "UTC";
+    // Campaign days are newer than the hourly rows: an account without any gets one full re-pull.
+    const from = (await hasCampaignDays(config.brandId, id)) ? incrementalFrom : backfillStart();
     for (const [since, until] of dateChunks(from, to, 60)) {
-      const insights = async (breakdowns: string): Promise<InsightRow[]> => {
+      const insights = async (breakdowns: string, level = "account", fields = "spend,impressions,clicks"): Promise<InsightRow[]> => {
         const params = new URLSearchParams({
-          level: "account", fields: "spend,impressions,clicks", time_increment: "1", breakdowns,
+          level, fields, time_increment: "1", breakdowns,
           time_range: JSON.stringify({ since, until }), limit: "500",
         });
         const all: InsightRow[] = [];
@@ -127,6 +132,7 @@ export async function syncMetaSpend(config: PerformanceClientConfig, lastSyncedA
       };
       const hourly = await insights("hourly_stats_aggregated_by_advertiser_time_zone");
       const shares = countryShares(await insights("country"));
+      const campaignDays = campaignDayRows(config, id, tz, await insights("country", "campaign", "campaign_id,campaign_name,spend"));
       const values: SpendRow[] = hourly.flatMap((r) => {
         const h = hourFromBreakdown(r.hourly_stats_aggregated_by_advertiser_time_zone);
         if (h == null) return [];
@@ -149,6 +155,11 @@ export async function syncMetaSpend(config: PerformanceClientConfig, lastSyncedA
           eq(schema.performanceSpendHours.accountId, id), gte(schema.performanceSpendHours.hour, winFrom), lt(schema.performanceSpendHours.hour, winTo),
         ));
         for (let i = 0; i < values.length; i += 500) await tx.insert(schema.performanceSpendHours).values(values.slice(i, i + 500));
+        await tx.delete(schema.performanceSpendCampaignDays).where(and(
+          eq(schema.performanceSpendCampaignDays.brandId, config.brandId), eq(schema.performanceSpendCampaignDays.platform, "META"),
+          eq(schema.performanceSpendCampaignDays.accountId, id), gte(schema.performanceSpendCampaignDays.dayStart, winFrom), lt(schema.performanceSpendCampaignDays.dayStart, winTo),
+        ));
+        for (let i = 0; i < campaignDays.length; i += 500) await tx.insert(schema.performanceSpendCampaignDays).values(campaignDays.slice(i, i + 500));
       });
       rows += values.length; onProgress?.(rows);
     }
@@ -157,6 +168,36 @@ export async function syncMetaSpend(config: PerformanceClientConfig, lastSyncedA
 }
 
 export type SpendRow = typeof schema.performanceSpendHours.$inferInsert;
+export type CampaignDayRow = typeof schema.performanceSpendCampaignDays.$inferInsert;
+
+async function hasCampaignDays(brandId: string, accountId: string): Promise<boolean> {
+  const [r] = (await db.execute<{ n: string }>(sql`
+    SELECT COUNT(*)::text AS n FROM performance_spend_campaign_days WHERE brand_id = ${brandId} AND platform = 'META' AND account_id = ${accountId}
+  `)).rows;
+  return Number(r?.n ?? 0) > 0;
+}
+
+/** Campaign × day × country rows (spend > 0) with the product line the campaign name maps to; duplicates (e.g. two "unknown" countries) are summed. */
+export function campaignDayRows(config: PerformanceClientConfig, accountId: string, tz: string, rows: InsightRow[]): CampaignDayRow[] {
+  const byKey = new Map<string, CampaignDayRow>();
+  for (const r of rows) {
+    const spend = Number(r.spend ?? 0);
+    if (!(spend > 0) || !r.campaign_id || !r.date_start) continue;
+    const cc = (r.country ?? "").toUpperCase();
+    const country = /^[A-Z]{2}$/.test(cc) ? cc : "";
+    const key = `${r.campaign_id}|${r.date_start}|${country}`;
+    const hit = byKey.get(key);
+    if (hit) { hit.spend = (Number(hit.spend) + spend).toFixed(4); continue; }
+    const dayStart = new Date(zonedHourToUtcMs(r.date_start, 0, tz));
+    const dayEnd = new Date(zonedHourToUtcMs(ymd(addDays(new Date(`${r.date_start}T00:00:00Z`), 1)), 0, tz));
+    byKey.set(key, {
+      brandId: config.brandId, platform: "META", accountId, campaignId: r.campaign_id, campaignName: r.campaign_name ?? r.campaign_id,
+      day: r.date_start, dayStart, dayEnd, country, spend: spend.toFixed(4),
+      productLine: productLineForCampaign(r.campaign_name, config.productLines),
+    });
+  }
+  return Array.from(byKey.values());
+}
 
 export async function upsertSpend(values: SpendRow[]): Promise<void> {
   for (let i = 0; i < values.length; i += 500) {

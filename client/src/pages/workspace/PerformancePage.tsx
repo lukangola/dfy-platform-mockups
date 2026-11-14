@@ -25,28 +25,30 @@ import { BarChart3, Calendar, Loader2, RefreshCw, ShieldAlert, Lock, AlertTriang
 import { useAuth } from "@/contexts/AuthContext";
 import { useBrand } from "@/contexts/BrandContext";
 import { PERFORMANCE_ENABLED } from "@/lib/featureFlags";
-import { getPerformanceConfig, getPerformanceHours, getPerformanceStatus, type PerformanceConfig, type PerformanceSyncState } from "@/lib/api";
+import { getPerformanceConfig, getPerformanceHours, getPerformanceStatus, startPerformanceSync, type PerformanceConfig, type PerformanceSyncState } from "@/lib/api";
 import PerformanceSourcesPanel, { relTime } from "@/components/PerformanceSourcesPanel";
 import {
   PLATFORMS, RANGE_LABELS, HOUR, DAY,
-  agg, metrics, range, series, platSeries, platformStats,
-  eur, num, ratio, pct, delta, fmtDelta,
-  type Dataset, type Grain, type Metrics, type MetricKey, type RangeKey, type RegionKey,
+  agg, aggProduct, metrics, range, series, platSeries, platformStats,
+  money, validTimeZone, num, ratio, pct, delta, fmtDelta,
+  type Dataset, type Grain, type Metrics, type MetricKey, type RangeKey, type RegionKey, type Sums,
 } from "@shared/performance/engine";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Column / card definitions (mirror the reference exactly — no extra KPIs)
 // ─────────────────────────────────────────────────────────────────────────────
 
-type Fmt = (v: number | null | undefined) => string;
+/** `cur` = the shop's currency code; ignored by the non-money formatters. */
+type Fmt = (v: number | null | undefined, cur: string) => string;
 /** up: true = higher is good, false = lower is good (costs), null = neutral (spend). */
 interface MetricDef { k: MetricKey | "pMETA" | "pGOOG" | "pTT"; label: string; fmt: Fmt; up: boolean | null }
 
-const eur0: Fmt = (v) => eur(v);
-const eur2: Fmt = (v) => eur(v, 2);
+const eur0: Fmt = (v, cur) => money(v, undefined, cur);
+const eur2: Fmt = (v, cur) => money(v, 2, cur);
 
 const CARDS: MetricDef[] = [
   { k: "revenue", label: "Total revenue", fmt: eur0, up: true },
+  { k: "ncRevenue", label: "New customer revenue", fmt: eur0, up: true },
   { k: "cm", label: "Total CM", fmt: eur0, up: true },
   { k: "ncRoas", label: "NC ROAS", fmt: ratio, up: true },
   { k: "ncpa", label: "NCPA", fmt: eur2, up: false },
@@ -84,6 +86,24 @@ const RANGE_KEYS: RangeKey[] = ["today", "yesterday", "mtd", "ytd"];
 type CompareMode = "prev" | "off";
 type RowMetrics = Metrics & { pMETA: number; pGOOG: number; pTT: number };
 
+/** The weekly tracker's columns per product line: spend (incl. the distributed share), NC revenue, orders, ROAS, NCPA, AOV + all-customer revenue. */
+const PRODUCT_COLS: MetricDef[] = [
+  { k: "spend", label: "Ad spend", fmt: eur0, up: null },
+  { k: "ncRevenue", label: "NC revenue", fmt: eur0, up: true },
+  { k: "ncOrders", label: "NC orders", fmt: num, up: true },
+  { k: "ncRoas", label: "NC ROAS", fmt: ratio, up: true },
+  { k: "ncpa", label: "NCPA", fmt: eur2, up: false },
+  { k: "ncAov", label: "NC AOV", fmt: eur2, up: true },
+  { k: "revenue", label: "Revenue", fmt: eur0, up: true },
+];
+
+interface ProductRow { key: string; label: string; indent: boolean; cur: Metrics; prev: Metrics }
+interface ProductGroup { key: RegionKey | null; label: string; flag: string; rows: ProductRow[] }
+
+function hasAny(s: Sums): boolean {
+  return s.ncO + s.rcO + s.ncR + s.rcR + s.spend > 0;
+}
+
 function withPlatformCols(m: Metrics): RowMetrics {
   return { ...m, pMETA: m.plat.META, pGOOG: m.plat.GOOG, pTT: m.plat.TT };
 }
@@ -91,7 +111,8 @@ function withPlatformCols(m: Metrics): RowMetrics {
 /** The data window the current range needs: from the earlier of prev/cur start to now. */
 function windowFor(now: number, key: RangeKey): [number, number] {
   const r = range(now, key);
-  return [Math.min(r.prev[0], r.cur[0]), now];
+  // one extra day: the shop's calendar day can start up to 14 h before the browser's
+  return [Math.min(r.prev[0], r.cur[0]) - DAY, now];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -108,18 +129,18 @@ function DeltaChip({ cur, prev, up, compare }: { cur: number | null | undefined;
   return <span className={`text-[10px] font-mono tabular-nums whitespace-nowrap ${tone}`}>{fmtDelta(d)}</span>;
 }
 
-function bucketLabel(t0: number, grain: Grain, i: number): string {
+function bucketLabel(t0: number, grain: Grain, i: number, tz?: string): string {
   const d = new Date(t0 + i * (grain === "hour" ? HOUR : DAY));
   return grain === "hour"
-    ? d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
-    : d.toLocaleDateString("en-GB", { month: "short", day: "numeric" });
+    ? d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: tz })
+    : d.toLocaleDateString("en-GB", { month: "short", day: "numeric", timeZone: tz });
 }
 
 /**
  * Hand-rolled SVG sparkline (no chart lib — keeps the dashboard dependency-free
  * and pixel-identical to the reference). Hover shows bucket label + value.
  */
-function Sparkline({ pts, t0, grain, fmt, height = 34 }: { pts: number[]; t0: number; grain: Grain; fmt: Fmt; height?: number }) {
+function Sparkline({ pts, t0, grain, fmt, cur, tz, height = 34 }: { pts: number[]; t0: number; grain: Grain; fmt: Fmt; cur: string; tz?: string; height?: number }) {
   const [hover, setHover] = useState<number | null>(null);
   const ref = useRef<SVGSVGElement>(null);
   const w = 120, h = height, pad = 2;
@@ -169,15 +190,15 @@ function Sparkline({ pts, t0, grain, fmt, height = 34 }: { pts: number[]; t0: nu
           className="pointer-events-none absolute -top-7 z-20 rounded border border-white/[0.08] bg-[#1A1D23] px-2 py-1 text-[10px] font-mono text-white/80 whitespace-nowrap tabular-nums"
           style={{ left: `${(hover / (n - 1)) * 100}%`, transform: "translateX(-50%)" }}
         >
-          {bucketLabel(t0, grain, hover)} · {fmt(pts[hover])}
+          {bucketLabel(t0, grain, hover, tz)} · {fmt(pts[hover], cur)}
         </div>
       )}
     </div>
   );
 }
 
-function KpiCard({ def, cur, prev, pts, t0, grain, compare, caption }: {
-  def: MetricDef; cur: RowMetrics; prev: RowMetrics; pts: number[]; t0: number; grain: Grain; compare: CompareMode; caption: string;
+function KpiCard({ def, cur, prev, pts, t0, grain, compare, caption, currency, tz }: {
+  def: MetricDef; cur: RowMetrics; prev: RowMetrics; pts: number[]; t0: number; grain: Grain; compare: CompareMode; caption: string; currency: string; tz?: string;
 }) {
   const v = cur[def.k] as number | null;
   const p = prev[def.k] as number | null;
@@ -185,11 +206,11 @@ function KpiCard({ def, cur, prev, pts, t0, grain, compare, caption }: {
     <div className="rounded-xl border border-white/[0.07] bg-[#0D0F12] p-4 hover:border-white/[0.12] transition-colors">
       <div className="text-[10px] font-mono uppercase tracking-widest text-white/35">{def.label}</div>
       <div className="mt-1.5 flex items-baseline gap-2">
-        <span className="text-xl font-semibold text-white/90 tabular-nums">{def.fmt(v)}</span>
+        <span className="text-xl font-semibold text-white/90 tabular-nums">{def.fmt(v, currency)}</span>
         <DeltaChip cur={v} prev={p} up={def.up} compare={compare} />
       </div>
       <div className="mt-3">
-        <Sparkline pts={pts} t0={t0} grain={grain} fmt={def.fmt} />
+        <Sparkline pts={pts} t0={t0} grain={grain} fmt={def.fmt} cur={currency} tz={tz} />
       </div>
       <div className="mt-2 text-[9px] font-mono text-white/25 uppercase tracking-wider">{caption}</div>
     </div>
@@ -276,6 +297,20 @@ export default function PerformancePage() {
 
   useEffect(() => { void load(); }, [load]);
 
+  // Refresh: on live data, pull from the connected sources first (the poll below reloads the
+  // numbers once the sync is done); on mock data there is nothing to pull, so just reload.
+  const refresh = useCallback(async () => {
+    if (!activeBrandId || source !== "live") { void load(); return; }
+    setError(null);
+    try {
+      await startPerformanceSync(activeBrandId); // 202 even when a sync is already running
+      setRunning(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      void load();
+    }
+  }, [activeBrandId, source, load]);
+
   // While a sync runs, poll its status every 3s; when it finishes, reload the numbers.
   useEffect(() => {
     if (!running || !activeBrandId) return;
@@ -291,9 +326,13 @@ export default function PerformancePage() {
     return () => { cancelled = true; clearInterval(t); };
   }, [running, activeBrandId, load]);
 
+  // The shop's currency and time zone (from Shopify); EUR / browser zone until known.
+  const currency = config?.currency ?? "EUR";
+  const tz = validTimeZone(config?.timezone);
+
   const view = useMemo(() => {
     if (!data) return null;
-    const r = range(data.now, rangeKey);
+    const r = range(data.now, rangeKey, tz);
     const reg: RegionKey | null = country || null;
     const cur = withPlatformCols(metrics(agg(data, r.cur[0], r.cur[1], reg)));
     const prev = withPlatformCols(metrics(agg(data, r.prev[0], r.prev[1], reg)));
@@ -307,8 +346,22 @@ export default function PerformancePage() {
     const pStats = platformStats(cur);
     const pPrev = platformStats(prev);
     const pSeries = PLATFORMS.map((p) => platSeries(data, r.cur[0], r.cur[1], r.grain, p.key));
-    return { r, cur, prev, cardSeries, rows, pStats, pPrev, pSeries };
-  }, [data, rangeKey, country]);
+    // By product line: one group per region (or just the selected one), the region's totals on top,
+    // the product lines underneath; "Other / unassigned" only when it holds something.
+    const products = data.products ?? [];
+    const groupKeys = reg ? data.regions.filter((rg) => rg.key === reg) : [...data.regions, null];
+    const productGroups: ProductGroup[] = products.length ? groupKeys.map((rg) => {
+      const key = rg ? (rg.key as RegionKey) : null;
+      const head: ProductRow = { key: "__region", label: rg ? rg.label : "Total", indent: false, cur: metrics(agg(data, r.cur[0], r.cur[1], key)), prev: metrics(agg(data, r.prev[0], r.prev[1], key)) };
+      const lines = products.flatMap((p) => {
+        const cs = aggProduct(data, r.cur[0], r.cur[1], key, p.key), ps = aggProduct(data, r.prev[0], r.prev[1], key, p.key);
+        if (p.key === "OTH" && !hasAny(cs) && !hasAny(ps)) return [];
+        return [{ key: p.key, label: p.label, indent: true, cur: metrics(cs), prev: metrics(ps) }];
+      });
+      return { key, label: rg ? rg.label : "Total", flag: rg ? rg.flag : "", rows: [head, ...lines] };
+    }).filter((g) => g.key === null || g.rows.some((row) => row.indent && [row.cur, row.prev].some((m) => m.revenue > 0 || m.spend > 0 || m.ncOrders + m.rcOrders > 0))) : [];
+    return { r, cur, prev, cardSeries, rows, pStats, pPrev, pSeries, productGroups, productsConfigured: products.length > 0 };
+  }, [data, rangeKey, country, tz]);
 
   // ── gates ──────────────────────────────────────────────────────────────────
   if (!PERFORMANCE_ENABLED) {
@@ -322,11 +375,11 @@ export default function PerformancePage() {
   }
 
   const nowD = data ? new Date(data.now) : new Date();
-  const dateChip = nowD.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  const dateChip = nowD.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: tz });
   const regions = data?.regions ?? [];
   const regLabel = country ? (regions.find((x) => x.key === country)?.label ?? country) : null;
   const caption = view?.r.grain === "hour"
-    ? `Hourly · ${nowD.toLocaleDateString("en-GB", { month: "short", day: "numeric" })} · ${source === "live" ? "live" : "mock"}`
+    ? `Hourly · ${nowD.toLocaleDateString("en-GB", { month: "short", day: "numeric", timeZone: tz })} · ${source === "live" ? "live" : "mock"}`
     : `Daily · ${source === "live" ? "live" : "mock"}`;
 
   return (
@@ -338,7 +391,7 @@ export default function PerformancePage() {
           <h1 className="text-lg font-semibold text-white/90 mt-1">{activeBrand?.name ?? "Brand"}</h1>
           <p className="text-xs text-white/40 font-mono mt-1">
             {regLabel ? `Market: ${regLabel}` : "Blended (all markets)"}
-            {view && <> · {num(view.cur.salesRows)} sales rows · {num(view.cur.adRows)} ad rows · as of {nowD.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</>}
+            {view && <> · {num(view.cur.salesRows)} sales rows · {num(view.cur.adRows)} ad rows · as of {nowD.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: tz })}{tz ? ` ${tz}` : ""}</>}
           </p>
           {source === "live" && (
             <p className="text-[10px] text-white/30 font-mono mt-1">
@@ -379,11 +432,12 @@ export default function PerformancePage() {
       <div className="flex items-center gap-3 flex-wrap">
         <button
           type="button"
-          onClick={() => void load()}
-          disabled={loading}
+          onClick={() => void refresh()}
+          disabled={loading || running}
+          title={source === "live" ? "Pull new orders and spend from the connected sources, then reload" : "Reload"}
           className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-[#0D0F12] px-2.5 py-1.5 text-[11px] font-mono text-white/70 hover:text-white hover:border-white/[0.16] disabled:opacity-50 transition-colors"
         >
-          {loading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Refresh
+          {loading || running ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} {running ? "Syncing…" : "Refresh"}
         </button>
         <button
           type="button"
@@ -440,7 +494,7 @@ export default function PerformancePage() {
           <section>
             <div className="grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
               {CARDS.map((c, i) => (
-                <KpiCard key={c.k} def={c} cur={view.cur} prev={view.prev} pts={view.cardSeries[i]} t0={view.r.cur[0]} grain={view.r.grain} compare={compare} caption={caption} />
+                <KpiCard key={c.k} def={c} cur={view.cur} prev={view.prev} pts={view.cardSeries[i]} t0={view.r.cur[0]} grain={view.r.grain} compare={compare} caption={caption} currency={currency} tz={tz} />
               ))}
             </div>
           </section>
@@ -474,7 +528,7 @@ export default function PerformancePage() {
                           const noTT = c.k === "pTT" && v === 0;
                           return (
                             <td key={c.k} className="px-3 py-3 text-right whitespace-nowrap">
-                              <div className={isTotal ? "text-white/90" : "text-white/80"}>{noTT ? "—" : c.fmt(v)}</div>
+                              <div className={isTotal ? "text-white/90" : "text-white/80"}>{noTT ? "—" : c.fmt(v, currency)}</div>
                               {!noTT && <div className="mt-0.5"><DeltaChip cur={v} prev={p} up={c.up} compare={compare} /></div>}
                             </td>
                           );
@@ -485,6 +539,53 @@ export default function PerformancePage() {
                 </tbody>
               </table>
             </div>
+          </section>
+
+          {/* By product line */}
+          <section>
+            <div className="flex items-center gap-3 mb-2">
+              <h2 className="text-[11px] font-mono uppercase tracking-wide text-cyan-300/70">By product line</h2>
+              <span className="text-[10px] font-mono text-white/25">Shopify line items by product title · campaign spend by name · spend without a product (promo, retargeting) distributed pro-rata — {source === "live" ? "live" : "mock"}</span>
+            </div>
+            {!view.productsConfigured ? (
+              <p className="text-[11px] font-mono text-white/35 rounded-xl border border-white/[0.07] bg-[#0D0F12] px-4 py-3">No product lines configured for this brand — Connect data sources → Advanced settings → Product lines.</p>
+            ) : view.productGroups.length === 0 ? (
+              <p className="text-[11px] font-mono text-white/35 rounded-xl border border-white/[0.07] bg-[#0D0F12] px-4 py-3">No product-line data in this range yet — the next sync stores line items and campaign spend.</p>
+            ) : (
+              <div className="rounded-xl border border-white/[0.07] bg-[#0D0F12] overflow-x-auto scrollbar-thin">
+                <table className="w-full text-[12px] tabular-nums">
+                  <thead>
+                    <tr className="text-[10px] font-mono uppercase tracking-wider text-white/35">
+                      <th className="text-left font-normal px-4 py-3 sticky left-0 bg-[#0D0F12]">Region / product line</th>
+                      {PRODUCT_COLS.map((c) => <th key={c.k} className="text-right font-normal px-3 py-3 whitespace-nowrap">{c.label}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/[0.06]">
+                    {view.productGroups.map((g) => g.rows.map((row) => {
+                      const isHead = !row.indent;
+                      const isTotal = isHead && g.key === null;
+                      return (
+                        <tr key={`${g.label}:${row.key}`} className={isHead ? "bg-white/[0.02] font-semibold" : ""}>
+                          <td className={`px-4 py-2.5 whitespace-nowrap sticky left-0 bg-[#0D0F12] ${isHead ? (isTotal ? "text-white/90" : "text-white/85") : "text-white/65 pl-8"}`}>
+                            {isHead && g.flag && <span className="mr-2">{g.flag}</span>}{row.indent ? `— ${row.label}` : row.label}
+                          </td>
+                          {PRODUCT_COLS.map((c) => {
+                            const v = row.cur[c.k as MetricKey] as number | null;
+                            const p = row.prev[c.k as MetricKey] as number | null;
+                            return (
+                              <td key={c.k} className="px-3 py-2.5 text-right whitespace-nowrap">
+                                <div className={isHead ? "text-white/85" : "text-white/70"}>{c.fmt(v, currency)}</div>
+                                <div className="mt-0.5"><DeltaChip cur={v} prev={p} up={c.up} compare={compare} /></div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    }))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
 
           {/* By ad platform */}
@@ -512,10 +613,10 @@ export default function PerformancePage() {
                         <td className="px-4 py-3 whitespace-nowrap text-white/80">
                           <span className="inline-flex items-center justify-center w-5 h-5 rounded bg-white/[0.05] text-[10px] font-mono text-white/60 mr-2">{p.sym}</span>{p.label}
                         </td>
-                        <td className="px-3 py-3 text-right"><div className="text-white/80">{eur(p.spend)}</div><div className="mt-0.5"><DeltaChip cur={p.spend} prev={q.spend} up={null} compare={compare} /></div></td>
+                        <td className="px-3 py-3 text-right"><div className="text-white/80">{money(p.spend, undefined, currency)}</div><div className="mt-0.5"><DeltaChip cur={p.spend} prev={q.spend} up={null} compare={compare} /></div></td>
                         <td className="px-3 py-3 text-right"><div className="text-white/80">{ratio(p.roas)}</div><div className="mt-0.5"><DeltaChip cur={p.roas} prev={q.roas} up={true} compare={compare} /></div></td>
-                        <td className="px-3 py-3 text-right"><div className="text-white/80">{p.cpa == null ? "—" : eur(p.cpa, 2)}</div><div className="mt-0.5"><DeltaChip cur={p.cpa} prev={q.cpa} up={false} compare={compare} /></div></td>
-                        <td className="px-3 py-2 w-[260px]"><Sparkline pts={view.pSeries[i]} t0={view.r.cur[0]} grain={view.r.grain} fmt={eur0} height={28} /></td>
+                        <td className="px-3 py-3 text-right"><div className="text-white/80">{p.cpa == null ? "—" : money(p.cpa, 2, currency)}</div><div className="mt-0.5"><DeltaChip cur={p.cpa} prev={q.cpa} up={false} compare={compare} /></div></td>
+                        <td className="px-3 py-2 w-[260px]"><Sparkline pts={view.pSeries[i]} t0={view.r.cur[0]} grain={view.r.grain} fmt={eur0} cur={currency} tz={tz} height={28} /></td>
                       </tr>
                     );
                   })}
@@ -525,7 +626,7 @@ export default function PerformancePage() {
           </section>
 
           <p className="text-[10px] font-mono text-white/25">
-            Gross margin = (revenue − cost of goods from Shopify) ÷ revenue{view?.cur.grossMargin != null ? ` = ${pct(view.cur.grossMargin)}` : ""} · CM = gross profit − ad spend · NC CM = margin × NC revenue − ad spend · RC CM = margin × RC revenue · currency EUR · dates en-GB
+            Gross margin = (revenue − cost of goods from Shopify) ÷ revenue{view?.cur.grossMargin != null ? ` = ${pct(view.cur.grossMargin)}` : ""} · CM = gross profit − ad spend · NC CM = margin × NC revenue − ad spend · RC CM = margin × RC revenue · currency {currency} (the shop's) · days start at midnight {tz ?? "in your browser's zone"} · dates en-GB
           </p>
         </>
       )}
