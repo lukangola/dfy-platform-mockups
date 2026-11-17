@@ -2,7 +2,8 @@
  * DESIGN: Studio Control Room — Performance
  *
  * Ecom performance dashboard for the ACTIVE brand: 14 KPI cards with
- * hourly/daily sparklines, date range (Today / Yesterday / MTD / YTD), compare
+ * hourly/daily sparklines, date range (Today / Yesterday / Last 3, 7, 30 days /
+ * This month / Year to date / Custom start and end date), compare
  * to the previous period of equal length, country filter, by-region table and
  * by-ad-platform table. Layout and behaviour ported from the reference
  * dashboard (performance-dashboard repo, index.html); metrics come from the
@@ -29,7 +30,7 @@ import { getPerformanceConfig, getPerformanceHours, getPerformanceStatus, startP
 import PerformanceSourcesPanel, { relTime } from "@/components/PerformanceSourcesPanel";
 import {
   PLATFORMS, RANGE_LABELS, HOUR, DAY,
-  agg, aggProduct, metrics, range, series, platSeries, platformStats,
+  agg, aggProduct, metrics, range, customRange, shiftDays, ymdOf, ymdStart, series, platSeries, platformStats,
   money, validTimeZone, num, ratio, pct, delta, fmtDelta,
   type Dataset, type Grain, type Metrics, type MetricKey, type RangeKey, type RegionKey, type Sums,
 } from "@shared/performance/engine";
@@ -82,7 +83,16 @@ const REGION_COLS: MetricDef[] = [
   { k: "spend", label: "Ad spend", fmt: eur0, up: null },
 ];
 
-const RANGE_KEYS: RangeKey[] = ["today", "yesterday", "mtd", "ytd"];
+const RANGE_KEYS: RangeKey[] = ["today", "yesterday", "last3", "last7", "last30", "mtd", "ytd"];
+const RANGE_HINTS: Partial<Record<RangeKey, string>> = {
+  last3: "The last 3 full days, ending yesterday (today is left out, as in Ads Manager)",
+  last7: "The last 7 full days, ending yesterday (today is left out, as in Ads Manager)",
+  last30: "The last 30 full days, ending yesterday (today is left out, as in Ads Manager)",
+  mtd: "From the 1st of this month until now",
+  ytd: "From 1 January until now",
+};
+/** A preset, or "custom" = the two dates picked in the date fields. */
+type RangeChoice = RangeKey | "custom";
 type CompareMode = "prev" | "off";
 type RowMetrics = Metrics & { pMETA: number; pGOOG: number; pTT: number };
 
@@ -217,12 +227,13 @@ function KpiCard({ def, cur, prev, pts, t0, grain, compare, caption, currency, t
   );
 }
 
-function SegButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+function SegButton({ active, onClick, title, children }: { active: boolean; onClick: () => void; title?: string; children: React.ReactNode }) {
   return (
     <button
       type="button"
       aria-pressed={active}
       onClick={onClick}
+      title={title}
       className={`px-3 py-1.5 rounded-md text-[11px] font-mono tracking-wide transition-colors ${
         active ? "bg-cyan-500/15 text-cyan-300 border border-cyan-400/30" : "text-white/45 hover:text-white/75 hover:bg-white/[0.04] border border-transparent"
       }`}
@@ -232,6 +243,7 @@ function SegButton({ active, onClick, children }: { active: boolean; onClick: ()
   );
 }
 
+const dateCls = "bg-transparent border border-white/[0.08] rounded-md px-2 py-1 text-[11px] font-mono text-white/80 [color-scheme:dark] focus:outline-none focus:border-cyan-400/40";
 const selectCls = "bg-[#0D0F12] border border-white/[0.08] rounded-md px-2.5 py-1.5 text-[11px] font-mono text-white/80 focus:outline-none focus:border-cyan-400/40";
 
 function EmptyState({ icon: Icon, title, body }: { icon: React.ElementType; title: string; body: string }) {
@@ -255,7 +267,10 @@ export default function PerformancePage() {
   const { activeBrandId, activeBrand } = useBrand();
   const canUse = role === "admin" || role === "manager";
 
-  const [rangeKey, setRangeKey] = useState<RangeKey>("today");
+  const [rangeKey, setRangeKey] = useState<RangeChoice>("today");
+  // Custom range: what the two date fields show (may be half-typed) and the last complete pair in use.
+  const [customDraft, setCustomDraft] = useState<{ from: string; to: string }>({ from: "", to: "" });
+  const [custom, setCustom] = useState<{ from: string; to: string } | null>(null);
   const [country, setCountry] = useState<RegionKey | "">("");
   const [compare, setCompare] = useState<CompareMode>("prev");
 
@@ -332,7 +347,8 @@ export default function PerformancePage() {
 
   const view = useMemo(() => {
     if (!data) return null;
-    const r = range(data.now, rangeKey, tz);
+    const r = (rangeKey === "custom" && custom ? customRange(data.now, custom.from, custom.to, tz) : null)
+      ?? range(data.now, rangeKey === "custom" ? "last7" : rangeKey, tz);
     const reg: RegionKey | null = country || null;
     const cur = withPlatformCols(metrics(agg(data, r.cur[0], r.cur[1], reg)));
     const prev = withPlatformCols(metrics(agg(data, r.prev[0], r.prev[1], reg)));
@@ -361,7 +377,7 @@ export default function PerformancePage() {
       return { key, label: rg ? rg.label : "Total", flag: rg ? rg.flag : "", rows: [head, ...lines] };
     }).filter((g) => g.key === null || g.rows.some((row) => row.indent && [row.cur, row.prev].some((m) => m.revenue > 0 || m.spend > 0 || m.ncOrders + m.rcOrders > 0))) : [];
     return { r, cur, prev, cardSeries, rows, pStats, pPrev, pSeries, productGroups, productsConfigured: products.length > 0 };
-  }, [data, rangeKey, country, tz]);
+  }, [data, rangeKey, custom, country, tz]);
 
   // ── gates ──────────────────────────────────────────────────────────────────
   if (!PERFORMANCE_ENABLED) {
@@ -378,9 +394,31 @@ export default function PerformancePage() {
   const dateChip = nowD.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: tz });
   const regions = data?.regions ?? [];
   const regLabel = country ? (regions.find((x) => x.key === country)?.label ?? country) : null;
-  const caption = view?.r.grain === "hour"
-    ? `Hourly · ${nowD.toLocaleDateString("en-GB", { month: "short", day: "numeric", timeZone: tz })} · ${source === "live" ? "live" : "mock"}`
-    : `Daily · ${source === "live" ? "live" : "mock"}`;
+  // The days the selected range covers, e.g. "10 Nov – 16 Nov" (one date for a single day).
+  const dayLabel = (ms: number) => new Date(ms).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: tz });
+  const spanLabel = view
+    ? ((a, b) => (a === b ? a : `${a} – ${b}`))(dayLabel(view.r.cur[0]), dayLabel(Math.max(view.r.cur[0], view.r.cur[1] - 1)))
+    : "";
+  const caption = `${view?.r.grain === "hour" ? "Hourly" : "Daily"} · ${spanLabel} · ${source === "live" ? "live" : "mock"}`;
+
+  // Date fields: the shop's today is the latest pickable day, the start of the loaded history the earliest.
+  const maxDay = ymdOf(nowD.getTime(), tz);
+  const minDay = ymdOf(range(nowD.getTime(), "ytd", tz).prev[0], tz);
+  const pickable = (d: string) => ymdStart(d) != null && d >= minDay && d <= maxDay;
+  const openCustom = () => {
+    if (!custom) {
+      // start from the last 7 full days so the fields are never empty
+      const first = { from: ymdOf(shiftDays(nowD.getTime(), tz, -7), tz), to: ymdOf(shiftDays(nowD.getTime(), tz, -1), tz) };
+      setCustom(first);
+      setCustomDraft(first);
+    }
+    setRangeKey("custom");
+  };
+  const setCustomDay = (side: "from" | "to", value: string) => {
+    const next = { ...customDraft, [side]: value };
+    setCustomDraft(next);
+    if (pickable(next.from) && pickable(next.to)) setCustom(next); // half-typed or out-of-range dates wait
+  };
 
   return (
     <div className="p-8 space-y-8">
@@ -448,9 +486,18 @@ export default function PerformancePage() {
         </button>
         <div className="inline-flex items-center gap-1 rounded-lg border border-white/[0.07] bg-[#0D0F12] p-1">
           {RANGE_KEYS.map((k) => (
-            <SegButton key={k} active={rangeKey === k} onClick={() => setRangeKey(k)}>{RANGE_LABELS[k]}</SegButton>
+            <SegButton key={k} active={rangeKey === k} onClick={() => setRangeKey(k)} title={RANGE_HINTS[k]}>{RANGE_LABELS[k]}</SegButton>
           ))}
+          <SegButton active={rangeKey === "custom"} onClick={openCustom} title="Pick any start and end date">Custom</SegButton>
+          {rangeKey === "custom" && (
+            <span className="inline-flex items-center gap-1.5 pl-1 pr-1 text-[10px] font-mono text-white/35">
+              <input type="date" aria-label="From date" className={dateCls} value={customDraft.from} min={minDay} max={maxDay} onChange={(e) => setCustomDay("from", e.target.value)} />
+              to
+              <input type="date" aria-label="To date" className={dateCls} value={customDraft.to} min={minDay} max={maxDay} onChange={(e) => setCustomDay("to", e.target.value)} />
+            </span>
+          )}
         </div>
+        {view && <span className="text-[11px] font-mono text-white/45" title="The days the numbers below cover">{spanLabel}</span>}
         <div className="flex-1" />
         <label className="inline-flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider text-white/35">
           Country

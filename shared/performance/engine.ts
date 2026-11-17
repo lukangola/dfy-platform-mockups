@@ -242,7 +242,7 @@ export function metrics(s: Sums): Metrics {
 
 /* ---------- date ranges ---------- */
 
-export type RangeKey = "today" | "yesterday" | "mtd" | "ytd";
+export type RangeKey = "today" | "yesterday" | "last3" | "last7" | "last30" | "mtd" | "ytd";
 export type Grain = "hour" | "day";
 
 export interface Range {
@@ -252,8 +252,14 @@ export interface Range {
 }
 
 export const RANGE_LABELS: Record<RangeKey, string> = {
-  today: "Today", yesterday: "Yesterday", mtd: "Month to date", ytd: "Year to date",
+  today: "Today", yesterday: "Yesterday", last3: "Last 3 days", last7: "Last 7 days", last30: "Last 30 days",
+  mtd: "This month", ytd: "Year to date",
 };
+
+/** "Last N days" presets: N full days ending yesterday (today is left out, as in Ads Manager). */
+const LAST_N_DAYS: Partial<Record<RangeKey, number>> = { last3: 3, last7: 7, last30: 30 };
+/** Ranges up to this many days get hourly sparklines, longer ones daily. */
+const HOURLY_MAX_DAYS = 3;
 
 /* ---------- time zone helpers (the shop's day, not the browser's) ---------- */
 
@@ -295,6 +301,28 @@ export function dayStart(ms: number, tz?: string): number {
   const p = zonedParts(ms, tz);
   return zonedMidnight(p.y, p.m, p.d, tz);
 }
+/** Midnight of the calendar day `days` days away from the day containing `ms` (calendar days, so DST-safe). */
+export function shiftDays(ms: number, tz: string | undefined, days: number): number {
+  if (!tz) { const d = new Date(ms); return new Date(d.getFullYear(), d.getMonth(), d.getDate() + days).getTime(); }
+  const p = zonedParts(ms, tz);
+  return zonedMidnight(p.y, p.m, p.d + days, tz);
+}
+/** "YYYY-MM-DD" of the day containing `ms` — in `tz`, or the browser's zone when none. */
+export function ymdOf(ms: number, tz?: string): string {
+  const pad = (n: number, w = 2) => String(n).padStart(w, "0");
+  if (!tz) { const d = new Date(ms); return `${pad(d.getFullYear(), 4)}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
+  const p = zonedParts(ms, tz);
+  return `${pad(p.y, 4)}-${pad(p.m)}-${pad(p.d)}`;
+}
+/** Midnight of the calendar day "YYYY-MM-DD" (+ `plusDays`) — in `tz`, or the browser's zone; null when not a real date. */
+export function ymdStart(ymd: string, tz?: string, plusDays = 0): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return null;
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+  const check = new Date(Date.UTC(y, mo - 1, d));
+  if (check.getUTCFullYear() !== y || check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d) return null;
+  return tz ? zonedMidnight(y, mo, d + plusDays, tz) : new Date(y, mo - 1, d + plusDays).getTime();
+}
 function monthStart(ms: number, tz: string | undefined, monthsBack: number): number {
   if (!tz) { const d = new Date(ms); return new Date(d.getFullYear(), d.getMonth() - monthsBack, 1).getTime(); }
   const p = zonedParts(ms, tz);
@@ -322,12 +350,33 @@ export function range(now: number, key: RangeKey, tz?: string): Range {
   if (key === "yesterday") {
     return { cur: [ds - DAY, ds], prev: [ds - 2 * DAY, ds - DAY], grain: "hour" };
   }
+  const n = LAST_N_DAYS[key];
+  if (n) {
+    const c0 = shiftDays(now, tz, -n);
+    return { cur: [c0, ds], prev: [shiftDays(now, tz, -2 * n), c0], grain: n <= HOURLY_MAX_DAYS ? "hour" : "day" };
+  }
   if (key === "mtd") {
     const m0 = monthStart(now, tz, 0), p0 = monthStart(now, tz, 1);
     return { cur: [m0, now], prev: [p0, p0 + (now - m0)], grain: "day" };
   }
   const y0 = yearStart(now, tz, 0), p0 = yearStart(now, tz, 1);
   return { cur: [y0, now], prev: [p0, p0 + (now - y0)], grain: "day" };
+}
+
+/**
+ * A hand-picked range: the calendar days `from` … `to` ("YYYY-MM-DD", both included, either order)
+ * in `tz`, cut at `now` when it reaches into today. Compared with the same number of days right
+ * before it (a range still running today is compared up to the same time of day). Null when a
+ * date is not a real date.
+ */
+export function customRange(now: number, from: string, to: string, tz?: string): Range | null {
+  const [a, b] = from <= to ? [from, to] : [to, from];
+  const start = ymdStart(a, tz), end = ymdStart(b, tz, 1);
+  if (start == null || end == null) return null;
+  const days = Math.max(1, Math.round((end - start) / DAY));
+  const c1 = Math.max(start, Math.min(end, now));
+  const p0 = ymdStart(a, tz, -days)!;
+  return { cur: [start, c1], prev: [p0, c1 === end ? start : p0 + (c1 - start)], grain: days <= HOURLY_MAX_DAYS ? "hour" : "day" };
 }
 
 /* ---------- series for sparklines ---------- */

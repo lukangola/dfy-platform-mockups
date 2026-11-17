@@ -15,8 +15,13 @@ you need the manager or admin role). **Performance** also appears in the left na
 under Dashboard. The amber **MOCK DATA** pill means the numbers are generated, not real.
 
 What to click:
-- **Today / Yesterday / Month to date / Year to date** — cards, tables and sparklines rescope;
-  Today/Yesterday are hourly, MTD/YTD daily.
+- **Today / Yesterday / Last 3 days / Last 7 days / Last 30 days / This month / Year to date /
+  Custom** — cards, tables and sparklines rescope; ranges of up to 3 days are hourly, longer ones
+  daily. "Last N days" are the N full days ending yesterday (today left out, as in Ads Manager).
+  **Custom** shows two date fields (start and end day, both included, in the shop's time zone;
+  earliest = 1 January of last year, latest = today). Every range is compared with the same
+  number of days right before it. The selected days are printed next to the buttons and under
+  each card. Switching ranges only re-reads data already loaded in the browser.
 - **Country** — Total / the brand's regions / Other (default NL/BE, UK, USA; per brand under
   Data sources → Advanced settings, e.g. `DE: DE; AT: AT` for a DACH shop). Cards and the
   platform table scope to that market; the matching region row is highlighted.
