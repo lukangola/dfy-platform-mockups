@@ -892,3 +892,262 @@ export type Job = typeof jobs.$inferSelect;
 export type JobItem = typeof jobItems.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;
 export type NewJobItem = typeof jobItems.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Performance dashboard (docs/performance-dashboard.md)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Per-brand ("client") configuration for the Performance dashboard: which data
+ * source feeds it, the economics that turn revenue + spend into CM/NCPA/ROAS,
+ * and the credentials for Shopify / Meta / Google Ads. Secrets are stored
+ * AES-256-GCM encrypted with CONNECTIONS_KEY (see server/lib/performance/secrets.ts)
+ * and never returned to the client — only "set / not set".
+ * One row per brand; a brand without a row runs on defaults (mock).
+ */
+export const performanceClientConfigs = pgTable("performance_client_configs", {
+  brandId: uuid("brand_id").primaryKey(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+  /** mock | live */
+  dataSource: text("data_source").notNull().default("mock"),
+  /** first_ever | window_days — how an order counts as new-customer */
+  ncDefinition: text("nc_definition").notNull().default("first_ever"),
+  ncWindowDays: integer("nc_window_days").notNull().default(365),
+  /** total | subtotal — which Shopify price is "revenue" */
+  revenueField: text("revenue_field").notNull().default("total"),
+  /** @deprecated superseded by `regions`; kept so the column history stays linear */
+  regionMapping: jsonb("region_mapping"),
+  /** named regions in display order, [{ label: "NL/BE", countries: ["NL","BE"] }]; "Other" is implied last; null = default (NL/BE, UK, USA) */
+  regions: jsonb("regions"),
+  /** product lines (front-end offers) in display order, [{ label, include: ["laundry"], exclude: ["protection"], campaigns: ["laundry"] }];
+   *  line items are matched by title (first line whose include matches and no exclude matches), ad campaigns by name; null = none */
+  productLines: jsonb("product_lines"),
+  syncEveryMinutes: integer("sync_every_minutes").notNull().default(10),
+  shopifyShopDomain: text("shopify_shop_domain"),
+  /** legacy custom app (created in the admin before 2026): its static Admin API access token */
+  shopifyTokenEnc: text("shopify_token_enc"),
+  /** Dev Dashboard app (the only kind creatable since 2026): Client ID + secret, exchanged server-side for 24h tokens */
+  shopifyClientId: text("shopify_client_id"),
+  shopifyClientSecretEnc: text("shopify_client_secret_enc"),
+  /** Partner-account app installed through Shopify's install flow (authorization code grant): the
+   *  token lands in shopify_token_enc; newer apps get a 1-hour token + 90-day refresh token */
+  shopifyRefreshTokenEnc: text("shopify_refresh_token_enc"),
+  shopifyTokenExpiresAt: timestamp("shopify_token_expires_at", { withTimezone: true }),
+  shopifyInstalledAt: timestamp("shopify_installed_at", { withTimezone: true }),
+  /** from Shopify's shop.json (currency, iana_timezone), refreshed by Test connection and every sync;
+   *  the dashboard formats money in this currency and draws its day boundaries in this time zone */
+  shopCurrency: text("shop_currency"),
+  shopTimezone: text("shop_timezone"),
+  metaTokenEnc: text("meta_token_enc"),
+  /** [{ id: "act_123", region: "NLBE" }] — region = key of one of the brand's regions or OTH */
+  metaAccounts: jsonb("meta_accounts").notNull().default(sql`'[]'::jsonb`),
+  googleDeveloperTokenEnc: text("google_developer_token_enc"),
+  googleClientId: text("google_client_id"),
+  googleClientSecretEnc: text("google_client_secret_enc"),
+  googleRefreshTokenEnc: text("google_refresh_token_enc"),
+  /** MCC id (digits only) when accounts are reached through a manager account */
+  googleLoginCustomerId: text("google_login_customer_id"),
+  /** [{ id: "1234567890", region: "UK" }] */
+  googleAccounts: jsonb("google_accounts").notNull().default(sql`'[]'::jsonb`),
+  /** Amazon Selling Partner API — private (self-authorised) Seller Central app, Orders role only */
+  amazonClientId: text("amazon_client_id"),
+  amazonClientSecretEnc: text("amazon_client_secret_enc"),
+  amazonRefreshTokenEnc: text("amazon_refresh_token_enc"),
+  /** EU | NA | FE — which SP-API regional endpoint the seller account lives on */
+  amazonRegion: text("amazon_region"),
+  /** ["A1PA6795UKMFR9", …] marketplaces to pull; empty = every marketplace the seller participates in */
+  amazonMarketplaceIds: jsonb("amazon_marketplace_ids").notNull().default(sql`'[]'::jsonb`),
+});
+export type PerformanceClientConfigRow = typeof performanceClientConfigs.$inferSelect;
+
+/** One row per sales order — Shopify or Amazon (`channel`). Aggregated into hourly buckets by LiveSource. */
+export const performanceOrders = pgTable(
+  "performance_orders",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    /** shopify | amazon — the sales channel the order came from */
+    channel: text("channel").notNull().default("shopify"),
+    /** the channel's order id (Shopify numeric id, Amazon order id like 302-1234567-1234567); column name predates Amazon */
+    shopifyOrderId: text("shopify_order_id").notNull(),
+    /** order time (Shopify created_at / processed_at, Amazon PurchaseDate) */
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }),
+    /** Shopify: customer id, else email; Amazon: "amz:" + anonymised buyer email — the key NC/RC is computed over (never matches across channels) */
+    customerKey: text("customer_key"),
+    customerCreatedAt: timestamp("customer_created_at", { withTimezone: true }),
+    country: text("country"),
+    region: text("region").notNull(),
+    totalPrice: numeric("total_price", { precision: 12, scale: 2 }).notNull(),
+    subtotalPrice: numeric("subtotal_price", { precision: 12, scale: 2 }),
+    currency: text("currency"),
+    financialStatus: text("financial_status"),
+    cancelled: boolean("cancelled").notNull().default(false),
+    test: boolean("test").notNull().default(false),
+    /** recomputed after every sync from nc_definition */
+    isNewCustomer: boolean("is_new_customer").notNull().default(true),
+    /** Σ quantity × Shopify unit cost over line items with a known cost (null = none known) */
+    cogs: numeric("cogs", { precision: 12, scale: 2 }),
+    /** every line item had a unit cost → the order's margin is trustworthy */
+    cogsComplete: boolean("cogs_complete").notNull().default(false),
+  },
+  (t) => [
+    uniqueIndex("performance_orders_brand_order_uq").on(t.brandId, t.channel, t.shopifyOrderId),
+    index("performance_orders_brand_created_idx").on(t.brandId, t.createdAt),
+    index("performance_orders_brand_customer_idx").on(t.brandId, t.customerKey),
+  ],
+);
+
+/**
+ * Shopify lifetime order count per customer (Customer.numberOfOrders), fetched once for customers
+ * whose record predates the oldest order we hold — the only ones the app's 60-day order window
+ * makes ambiguous. `hiddenOrders` = orders Shopify counts that are not in performance_orders, so
+ * 0 means the customer's first visible order really is their first order.
+ */
+export const performanceCustomers = pgTable(
+  "performance_customers",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    /** same key as performance_orders.customer_key ("id:<shopify customer id>") */
+    customerKey: text("customer_key").notNull(),
+    lifetimeOrders: integer("lifetime_orders").notNull(),
+    hiddenOrders: integer("hidden_orders").notNull(),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().default(sql`now()`),
+  },
+  (t) => [uniqueIndex("performance_customers_brand_key_uq").on(t.brandId, t.customerKey)],
+);
+
+/**
+ * Shopify unit cost per product variant (InventoryItem.unitCost), cached so costs are fetched once, not per order.
+ * `sku` lets Amazon order items (SellerSKU) reuse the same cost when the SKUs match.
+ */
+export const performanceVariantCosts = pgTable(
+  "performance_variant_costs",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    variantId: text("variant_id").notNull(),
+    inventoryItemId: text("inventory_item_id"),
+    /** the variant's SKU in Shopify (null until refreshed) — Amazon SellerSKU is matched against it, case-insensitive */
+    sku: text("sku"),
+    /** null = the variant exists but has no cost in Shopify (or was deleted) */
+    unitCost: numeric("unit_cost", { precision: 12, scale: 4 }),
+    currency: text("currency"),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().default(sql`now()`),
+  },
+  (t) => [
+    uniqueIndex("performance_variant_costs_brand_variant_uq").on(t.brandId, t.variantId),
+    index("performance_variant_costs_brand_sku_idx").on(t.brandId, t.sku),
+  ],
+);
+
+/** Hourly ad spend per platform account (spend side). */
+export const performanceSpendHours = pgTable(
+  "performance_spend_hours",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    /** META | GOOG | TT */
+    platform: text("platform").notNull(),
+    accountId: text("account_id").notNull(),
+    /** bucket start, aligned to the hour (UTC instant) */
+    hour: timestamp("hour", { withTimezone: true }).notNull(),
+    /** ISO-2 country the spend was delivered in (Meta's daily country report, pro-rated per hour); "" = unknown → the account's region */
+    country: text("country").notNull().default(""),
+    region: text("region").notNull(),
+    spend: numeric("spend", { precision: 12, scale: 4 }).notNull(),
+    impressions: integer("impressions"),
+    clicks: integer("clicks"),
+  },
+  (t) => [
+    uniqueIndex("performance_spend_brand_platform_account_hour_country_uq").on(t.brandId, t.platform, t.accountId, t.hour, t.country),
+    index("performance_spend_brand_hour_idx").on(t.brandId, t.hour),
+  ],
+);
+
+/** Freshness + cursor per (brand, source). Drives the status panel and incremental syncs. */
+export const performanceSyncState = pgTable(
+  "performance_sync_state",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    /** shopify | meta | google | amazon */
+    source: text("source").notNull(),
+    /** idle | running | ok | error */
+    status: text("status").notNull().default("idle"),
+    lastStartedAt: timestamp("last_started_at", { withTimezone: true }),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    /** source-specific incremental cursor (Shopify: last updated_at ISO; Amazon: last LastUpdateDate ISO) */
+    cursor: text("cursor"),
+    rowsTotal: integer("rows_total").notNull().default(0),
+    error: text("error"),
+  },
+  (t) => [uniqueIndex("performance_sync_state_brand_source_uq").on(t.brandId, t.source)],
+);
+
+/**
+ * One row per Shopify line item of a synced order — the product-line breakdown ("GGK vs Laundry")
+ * is built from these. `productLine` is the key of the brand's product line the title matched
+ * ("OTH" = none) and is re-derived when the product lines change. `net` = price × quantity − line
+ * discounts; the order's revenue is split across its product lines in proportion to `net`.
+ */
+export const performanceOrderLines = pgTable(
+  "performance_order_lines",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    orderId: uuid("order_id").notNull(),
+    /** the channel's line item id */
+    lineId: text("line_id").notNull(),
+    title: text("title").notNull(),
+    variantTitle: text("variant_title"),
+    sku: text("sku"),
+    productId: text("product_id"),
+    variantId: text("variant_id"),
+    quantity: integer("quantity").notNull(),
+    /** price × quantity before discounts */
+    gross: numeric("gross", { precision: 12, scale: 2 }).notNull(),
+    /** gross − discounts allocated to the line */
+    net: numeric("net", { precision: 12, scale: 2 }).notNull(),
+    productLine: text("product_line").notNull().default("OTH"),
+  },
+  (t) => [
+    uniqueIndex("performance_order_lines_order_line_uq").on(t.orderId, t.lineId),
+    index("performance_order_lines_brand_idx").on(t.brandId, t.productLine),
+  ],
+);
+
+/**
+ * Daily ad spend per campaign and country (Meta: level=campaign + breakdowns=country). Only used to
+ * split the hourly account spend across product lines: a campaign maps to a product line by name
+ * (`productLine`, "" = none → distributed pro-rata over the attributed spend of the same day and
+ * country). `dayStart`/`dayEnd` are the UTC instants of the day in the ad account's time zone, so
+ * hourly rows join by range without knowing the zone.
+ */
+export const performanceSpendCampaignDays = pgTable(
+  "performance_spend_campaign_days",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    brandId: uuid("brand_id").notNull(),
+    platform: text("platform").notNull(),
+    accountId: text("account_id").notNull(),
+    campaignId: text("campaign_id").notNull(),
+    campaignName: text("campaign_name").notNull(),
+    /** the report day (YYYY-MM-DD in the account's zone) */
+    day: text("day").notNull(),
+    dayStart: timestamp("day_start", { withTimezone: true }).notNull(),
+    dayEnd: timestamp("day_end", { withTimezone: true }).notNull(),
+    /** ISO-2 country; "" = unknown */
+    country: text("country").notNull().default(""),
+    spend: numeric("spend", { precision: 12, scale: 4 }).notNull(),
+    /** product line key the campaign name matched; "" = unattributed */
+    productLine: text("product_line").notNull().default(""),
+  },
+  (t) => [
+    uniqueIndex("performance_spend_campaign_days_uq").on(t.brandId, t.platform, t.accountId, t.campaignId, t.day, t.country),
+    index("performance_spend_campaign_days_brand_day_idx").on(t.brandId, t.dayStart),
+  ],
+);
+

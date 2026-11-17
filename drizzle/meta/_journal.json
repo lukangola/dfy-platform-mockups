@@ -218,6 +218,69 @@
       "when": 1786725801372,
       "tag": "0030_striped_blue_marvel",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1794320926409,
+      "tag": "0031_performance_dashboard",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1794351168127,
+      "tag": "0032_shopify_client_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1794393156506,
+      "tag": "0033_shopify_install_flow",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1794483717605,
+      "tag": "0034_performance_regions",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1794485814277,
+      "tag": "0035_amazon_sales_channel",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1794488137680,
+      "tag": "0036_spend_country",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1794522940402,
+      "tag": "0037_shop_currency_timezone",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1794569850086,
+      "tag": "0038_customer_order_counts",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1794691396689,
+      "tag": "0039_product_lines",
+      "breakpoints": true
     }
   ]
 }

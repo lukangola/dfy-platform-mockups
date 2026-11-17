@@ -2529,3 +2529,131 @@ export type AdPipelineJob = { cardId: string; status: "pending" | "running" | "c
 export function getAdPipelineCardJobStatus(cardId: string): Promise<{ job: AdPipelineJob | null }> {
   return get<{ job: AdPipelineJob | null }>(`${AD_PIPELINE}/cards/${cardId}/job-status`);
 }
+
+// ── Performance dashboard (feature-flagged; server/routes/performance.ts) ─────
+
+import type { Dataset as PerformanceDataset } from "@shared/performance/engine";
+
+/** Region key: derived from the label ("NL/BE" → "NLBE"); "OTH" is the catch-all. */
+export type PerformanceRegion = string;
+export type PerformanceAccountMap = { id: string; region: PerformanceRegion };
+/** A named region of the brand (key/flag derived server-side from label / first country). */
+export type PerformanceRegionDef = { key: PerformanceRegion; label: string; flag: string; countries: string[] };
+/** A product line (front-end offer): line items by title keywords (include / exclude), ad campaigns by name keywords. */
+export type PerformanceProductLineDef = { key: string; label: string; include: string[]; exclude: string[]; campaigns: string[] };
+
+export type PerformanceConfig = {
+  brandId: string;
+  name: string;
+  dataSource: "mock" | "live";
+  ncDefinition: "first_ever" | "window_days";
+  ncWindowDays: number;
+  revenueField: "total" | "subtotal";
+  /** named regions in display order; "Other" is implied last */
+  regions: PerformanceRegionDef[];
+  /** product lines in display order; "Other / unassigned" is implied last; empty = no product breakdown */
+  productLines: PerformanceProductLineDef[];
+  syncEveryMinutes: number;
+  /** the shop's currency (ISO code; EUR until Shopify has been reached) — every money figure is shown in it */
+  currency: string;
+  /** the shop's IANA time zone — "Today" etc. start at its midnight; null = browser's zone */
+  timezone: string | null;
+  shopify: {
+    shopDomain: string | null; tokenSet: boolean; clientId: string | null; clientSecretSet: boolean;
+    /** set when the token came from Shopify's install flow (Partner app); ISO date */
+    installedAt: string | null;
+  };
+  amazon: {
+    clientId: string | null; clientSecretSet: boolean; refreshTokenSet: boolean;
+    /** SP-API regional endpoint */
+    region: "EU" | "NA" | "FE";
+    /** marketplaces to pull; empty = all the seller participates in */
+    marketplaceIds: string[];
+  };
+  meta: { tokenSet: boolean; accounts: PerformanceAccountMap[] };
+  google: {
+    developerTokenSet: boolean; clientId: string | null; clientSecretSet: boolean; refreshTokenSet: boolean;
+    loginCustomerId: string | null; accounts: PerformanceAccountMap[];
+  };
+  platformsConfigured: { META: boolean; GOOG: boolean; TT: boolean };
+  shopifyConfigured: boolean;
+  amazonConfigured: boolean;
+};
+
+export type PerformanceSource = "shopify" | "amazon" | "meta" | "google";
+
+export type PerformanceSyncState = {
+  source: PerformanceSource;
+  status: "idle" | "running" | "ok" | "error";
+  lastStartedAt: string | null;
+  lastSyncedAt: string | null;
+  rowsTotal: number;
+  error: string | null;
+};
+
+/** Secret fields: non-empty string = replace, "" / undefined = keep, null = clear. */
+export type PerformanceConfigPatch = Partial<{
+  dataSource: "mock" | "live";
+  ncDefinition: "first_ever" | "window_days"; ncWindowDays: number; revenueField: "total" | "subtotal";
+  /** named regions (label + ISO-2 countries); null = back to NL/BE, UK, USA */
+  regions: Array<{ label: string; countries: string[] }> | null;
+  /** product lines (label + keywords); null = none */
+  productLines: Array<{ label: string; include: string[]; exclude: string[]; campaigns: string[] }> | null;
+  syncEveryMinutes: number;
+  shopifyShopDomain: string | null; shopifyToken: string | null; shopifyClientId: string | null; shopifyClientSecret: string | null;
+  amazonClientId: string | null; amazonClientSecret: string | null; amazonRefreshToken: string | null;
+  amazonRegion: "EU" | "NA" | "FE"; amazonMarketplaceIds: string[];
+  metaToken: string | null; metaAccounts: PerformanceAccountMap[];
+  googleDeveloperToken: string | null; googleClientId: string | null; googleClientSecret: string | null;
+  googleRefreshToken: string | null; googleLoginCustomerId: string | null; googleAccounts: PerformanceAccountMap[];
+}>;
+
+export type PerformanceConfigResponse = { config: PerformanceConfig; sync: PerformanceSyncState[]; running: boolean; secretsKeySet: boolean };
+
+export function getPerformanceConfig(brandId: string): Promise<PerformanceConfigResponse> {
+  return get(`/api/performance/config?brandId=${encodeURIComponent(brandId)}`);
+}
+
+export async function savePerformanceConfig(brandId: string, patch: PerformanceConfigPatch): Promise<{ config: PerformanceConfig }> {
+  const res = await fetch(`/api/performance/config?brandId=${encodeURIComponent(brandId)}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
+  });
+  const payload = (await res.json().catch(() => ({}))) as { config: PerformanceConfig } | ApiError;
+  if (!res.ok) throw new Error((payload as ApiError).error ?? `Request failed: ${res.status}`);
+  return payload as { config: PerformanceConfig };
+}
+
+export type PerformanceTestResult =
+  | {
+      ok: true; shop?: string; currency?: string | null; timezone?: string | null;
+      /** Shopify: granted scopes, the read scopes the dashboard still needs, and any write scopes the token carries */
+      scopes?: string[]; missingScopes?: string[]; writeScopes?: string[];
+      /** Shopify: can the app see orders older than Shopify's 60-day default window? null = probe failed */
+      history?: { cutoff: string; olderCount: number; olderReachable: boolean } | null;
+      accounts?: Array<{ id: string; name: string; timezone: string; currency: string }>;
+      /** Amazon: seller + marketplaces reachable with these credentials, oldest order in the backfill window, PII access */
+      seller?: string | null; region?: "EU" | "NA" | "FE";
+      marketplaces?: Array<{ id: string; name: string; country: string | null; currency: string | null }>;
+      oldestOrder?: string | null; ordersSeen?: number; backfillFrom?: string;
+      buyerInfo?: boolean; buyerInfoError?: string | null;
+    }
+  | { ok: false; error: string };
+
+export function testPerformanceSource(brandId: string, source: PerformanceSource): Promise<{ result: PerformanceTestResult }> {
+  return post(`/api/performance/test?brandId=${encodeURIComponent(brandId)}&source=${source}`, {});
+}
+
+export function startPerformanceSync(brandId: string, full = false): Promise<{ started: boolean; running: boolean }> {
+  return post(`/api/performance/sync?brandId=${encodeURIComponent(brandId)}${full ? "&full=1" : ""}`, {});
+}
+
+export function getPerformanceStatus(brandId: string): Promise<{ sync: PerformanceSyncState[]; running: boolean }> {
+  return get(`/api/performance/status?brandId=${encodeURIComponent(brandId)}`);
+}
+
+export function getPerformanceHours(
+  brandId: string, fromMs: number, toMs: number,
+): Promise<{ dataset: PerformanceDataset; source: "mock" | "live" }> {
+  const q = new URLSearchParams({ brandId, from: String(Math.floor(fromMs)), to: String(Math.floor(toMs)) });
+  return get(`/api/performance/hours?${q.toString()}`);
+}

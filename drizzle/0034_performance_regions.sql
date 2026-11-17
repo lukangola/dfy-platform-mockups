@@ -1,0 +1,1 @@
+ALTER TABLE "performance_client_configs" ADD COLUMN "regions" jsonb;
